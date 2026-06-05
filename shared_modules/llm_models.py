@@ -14,7 +14,7 @@ except ModuleNotFoundError:
 AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "your-gigachat-auth-key")
 GIGACHAT_TIMEOUT = int(os.getenv("GIGACHAT_TIMEOUT", "180"))
 GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Max")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-api-key")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.proxyapi.ru/openai/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.3-chat-latest")
 

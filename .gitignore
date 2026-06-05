@@ -1,0 +1,56 @@
+# Documents
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.xlsm
+*.csv
+*.ppt
+*.pptx
+*.rtf
+*.odt
+*.ods
+
+# Archives
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+~$*
+*.tmp
+*.temp
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local env files
+.env
+.env.*

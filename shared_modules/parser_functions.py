@@ -416,6 +416,12 @@ class DocumentParser:
                 idx for idx, cell in enumerate(header)
                 if any(kw in cell.lower() for kw in keyword_lower)
             ]
+
+            first_col_is_number = False
+            if header:
+                first_header = header[0].lower()
+                first_col_is_number = "№" in header[0] or "п/п" in first_header or "номер" in first_header
+
             if not selected_indexes:
                 continue
             
@@ -432,7 +438,11 @@ class DocumentParser:
                 # print("Нашёл колонки:", selected_cells)
                 if len(selected_cells) == 1 or "Дополнительные характеристики" in selected_cells[1]:
                     continue
-                if '№' in selected_cells[0]:
+
+                if (
+                    first_col_is_number
+                    and selected_cells[0].strip().isdigit()
+                ):
                     num  = selected_cells[0]
                     code = f"№{num}. " + selected_cells[1].split()[0]
                     name = selected_cells[2]

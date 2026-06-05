@@ -31,14 +31,14 @@
 
 ## Переменные окружения
 
-Используйте рабочий файл [`web/.env`](web/.env).
+Используйте файл [`web/.env`](web/.env).
 
-Минимально заполните:
+Минимально заполните его так:
 
 ```env
 SECRET_KEY=your-django-secret-key
-DEBUG=True
-ALLOWED_HOSTS=localhost,127.0.0.1
+DEBUG=False
+ALLOWED_HOSTS=89.23.101.85,localhost,127.0.0.1
 
 GIGACHAT_AUTH_KEY=your-gigachat-auth-key
 GIGACHAT_MODEL=GigaChat-2-Max
@@ -48,26 +48,61 @@ OPENAI_API_KEY=your-openai-api-key
 OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1
 OPENAI_MODEL=gpt-5.3-chat-latest
 
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/0
 ```
+
+По умолчанию в проекте для LangChain используется OpenAI-совместимая модель, поэтому `OPENAI_API_KEY`, `OPENAI_BASE_URL` и `OPENAI_MODEL` нужно заполнить обязательно, если вы хотите, чтобы работала RAG-часть и остальные LLM-вызовы через OpenAI.
 
 ## Быстрый запуск через Docker Compose
 
-Это основной и самый простой способ поднять сервис.
+Это основной и самый простой способ поднять сервис на сервере.
 
-### 1. Создайте файл окружения
+### 1. Подключитесь к серверу
+
+Подключитесь по SSH:
+
+```bash
+ssh root@89.23.101.85
+```
+
+### 2. Перейдите в папку проекта
+
+Если репозиторий ещё не клонирован:
+
+```bash
+git clone https://github.com/BoochD/procurement_rag_system.git
+cd procurement_rag_system
+```
+
+Если репозиторий уже есть на сервере:
+
+```bash
+cd procurement_rag_system
+git pull
+```
+
+### 3. Создайте и заполните `web/.env`
 
 Заполните [`web/.env`](web/.env) реальными значениями переменных окружения.
 
-Docker Compose читает этот файл через `env_file`, поэтому переменные автоматически попадут и в web, и в worker.
+Важно:
+- в `ALLOWED_HOSTS` укажите IP сервера или домен
+- для сервера не оставляйте только `localhost`
+- если будете заходить по IP `89.23.101.85`, он должен быть указан в `ALLOWED_HOSTS`
 
-### 2. Запустите сервисы
+Пример:
+
+```env
+ALLOWED_HOSTS=89.23.101.85,localhost,127.0.0.1
+```
+
+### 4. Запустите сервисы
 
 Из корня проекта выполните:
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
 Будут подняты:
@@ -75,55 +110,22 @@ docker compose up --build
 - Django web-сервер
 - Celery worker
 
-### 3. Откройте приложение
+### 5. Откройте приложение
 
 После запуска веб-интерфейс будет доступен по адресу:
 
 ```text
-http://localhost:8000/
+http://89.23.101.85:8000/
 ```
 
-## Локальный запуск без Docker
+Если у сервера будет домен, используйте его вместо IP.
 
-### 1. Установите Redis
+### 6. Как обновить проект на сервере
 
-Нужен локальный Redis на `6379` либо настройте свои значения через переменные:
-- `CELERY_BROKER_URL`
-- `CELERY_RESULT_BACKEND`
-
-### 2. Установите зависимости
-
-Из корня проекта:
+Если вы уже внесли изменения в репозиторий и хотите обновить контейнеры на сервере:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r web/requirements.txt
-pip install -r celery-worker/requirements.txt
-pip install -r latest_model/requirements.txt
-pip install -r shared_modules/requirements.txt
+git pull
+docker compose down
+docker compose up --build -d
 ```
-
-### 3. Создайте файл окружения
-
-Убедитесь, что файл [`web/.env`](web/.env) существует и содержит реальные значения переменных.
-
-### 4. Выполните миграции Django
-
-```bash
-python web/manage.py migrate
-```
-
-### 5. Запустите веб-сервер
-
-```bash
-python web/manage.py runserver 0.0.0.0:8000
-```
-
-### 6. В отдельном терминале запустите worker
-
-```bash
-cd celery-worker && celery -A celery_app worker --loglevel=info --pool=threads --concurrency=4
-```
-
-После этого откройте [`http://localhost:8000/`](web/fileprocessor/urls.py:7).

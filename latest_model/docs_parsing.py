@@ -130,6 +130,7 @@ def _parse_zapiska_text(zapiska_path: str) -> str:
 def _parse_onmck_text(ONMCK_path: str) -> str:
     parser_onmck = DocumentParser(ONMCK_path)
     table_onmck = parser_onmck.extract_rows_region(keyword="шт")
+    table_onmck += "\n" + parser_onmck.extract_rows_region(keyword="к-т")
     if not table_onmck:
         table_onmck = parser_onmck.extract_tables_columns(
             keywords=["наименование товара", "Ед.", "Единиц", "Кол-во", "Количество"]
