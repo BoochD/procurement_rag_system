@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Обработка документов</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-10">
+                <div class="card shadow">
+                    <div class="card-body">
+                        <h1 class="card-title text-center mb-4">Обработчик документов</h1>
+                        <p class="text-center text-muted mb-4">
+                            Загрузите полный комплект документов для обработки
+                        </p>
+
+                        {% if error %}
+                        <div class="alert alert-danger" role="alert">
+                            {{ error }}
+                        </div>
+                        {% endif %}
+
+                        <form method="post" action="{% url 'fileprocessor:upload_and_process' %}" enctype="multipart/form-data">
+                            {% csrf_token %}
+
+                            {% for field_name, field_label in document_fields %}
+                            <div class="mb-4">
+                                <label for="{{ field_name }}" class="form-label">Загрузите "{{ field_label }}"</label>
+                                <input type="file" class="form-control" id="{{ field_name }}" name="{{ field_name }}" required>
+                                <div class="form-text">Форматы: .txt, .docx, .pdf</div>
+                            </div>
+                            {% endfor %}
+
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-primary btn-lg">
+                                    <span>Обработать</span>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

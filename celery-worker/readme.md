@@ -1,0 +1,1 @@
+celery -A celery_app worker -l info -P solo

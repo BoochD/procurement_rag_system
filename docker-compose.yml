@@ -1,0 +1,38 @@
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - ./web/.env
+    environment:
+      DEBUG: "False"
+      ALLOWED_HOSTS: "*"
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    command: >
+      sh -c "python web/manage.py migrate &&
+             python web/manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - ./web/.env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    command: >
+      sh -c "cd celery-worker &&
+             celery -A celery_app worker --loglevel=info --pool=threads --concurrency=4"
