@@ -102,7 +102,7 @@ ALLOWED_HOSTS=89.23.101.85,localhost,127.0.0.1
 Из корня проекта выполните:
 
 ```bash
-docker compose up --build -d
+docker-compose up --build -d
 ```
 
 Будут подняты:
@@ -126,6 +126,6 @@ http://89.23.101.85:8000/
 
 ```bash
 git pull
-docker compose down
-docker compose up --build -d
+docker-compose down
+docker-compose up --build -d
 ```
