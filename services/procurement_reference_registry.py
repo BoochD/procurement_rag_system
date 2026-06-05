@@ -980,7 +980,7 @@ class ProcurementReferenceRegistry:
                 f"<warn>КТРУ {code} найден, но наименование отличается от эталонного.</warn>\n\n"
                 f"Ссылка на карточку: {common_info.get('url')}\n\n"
                 f"Эталонное наименование: {reference_name}\n"
-                f"Проверьте соответствует ли ваше наименование </warn>'{name}'</warn>."
+                f"Проверьте соответствует ли ваше наименование <warn>'{name}'</warn>."
             )
             found = True
 
