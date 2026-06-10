@@ -199,17 +199,26 @@ def parse_ktry_entries(text: str):
         "КТРУ: 31.01.12.150-00000003 - Тумба офисная"
         -> [{"ktru_code": "31.01.12.150-00000003", "name": "Тумба офисная"}]
     """
+    ktru_pattern = re.compile(r"\b\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8}\b")
     result = []
-    for item in text.split(":")[1].split(";"):
+    for item in text.split(":", 1)[1].split(";"):
         item = item.strip()
         if not item:
             continue
         item = normalize_text(item)
+        code_match = ktru_pattern.search(item)
         try:
-            code, name = item.split(" - ", 1)
+            _, name = item.split(" - ", 1)
         except Exception:
-            code = item.strip()
             name = "У данного КТРУ не указано наименование в таблице"
+
+        if code_match:
+            code = code_match.group(0)
+        else:
+            try:
+                code = item.split(" - ", 1)[0].strip()
+            except Exception:
+                code = item.strip()
         result.append({
             "ktru_code": code.strip(),
             "name": name.strip(),
