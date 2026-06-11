@@ -191,7 +191,7 @@ def parse_okpd_entries(text: str):
     return result
 
 
-def parse_ktry_entries(text: str):
+def parse_ktry_entries(text: str, names: List[str] | None = None):
     """
     Парсит строку с КТРУ в список словарей `{"ktru_code": ..., "name": ...}`.
 
@@ -200,8 +200,18 @@ def parse_ktry_entries(text: str):
         -> [{"ktru_code": "31.01.12.150-00000003", "name": "Тумба офисная"}]
     """
     ktru_pattern = re.compile(r"\b\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8}\b")
+    fallback_names = []
+    for raw_name in names or []:
+        if ":" in raw_name:
+            candidate = raw_name.split(":", 1)[1].strip()
+        else:
+            candidate = raw_name.strip()
+        candidate = normalize_text(candidate)
+        if candidate:
+            fallback_names.append(candidate)
+
     result = []
-    for item in text.split(":", 1)[1].split(";"):
+    for index, item in enumerate(text.split(":", 1)[1].split(";")):
         item = item.strip()
         if not item:
             continue
@@ -210,7 +220,12 @@ def parse_ktry_entries(text: str):
         try:
             _, name = item.split(" - ", 1)
         except Exception:
-            name = "У данного КТРУ не указано наименование в таблице"
+            if index < len(fallback_names):
+                name = fallback_names[index]
+            elif fallback_names:
+                name = fallback_names[0]
+            else:
+                name = "У данного КТРУ не указано наименование в таблице"
 
         if code_match:
             code = code_match.group(0)

@@ -12,7 +12,8 @@ def process_smart_points(
         contract_points: str,
         OOZ_points: str,
         zapiska_points: str,
-        ONMCK_points: str
+        ONMCK_points: str,
+        available_documents: str,
         ) -> str:
     llm = get_langchain_chat_model()
     chain = prompt_smart | llm | StrOutputParser()
@@ -23,6 +24,7 @@ def process_smart_points(
         "contract_points": contract_points,
         "OOZ_points": OOZ_points,
         "zapiska_points": zapiska_points,
-        "ONMCK_points": ONMCK_points
+        "ONMCK_points": ONMCK_points,
+        "available_documents": available_documents,
     }).strip()
 

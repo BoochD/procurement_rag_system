@@ -13,7 +13,11 @@ KTRU_CODE_RE = re.compile(r"\d{2}(?:\.\d{1,3}){1,4}-\d{8}")
 OKPD2_CODE_RE = re.compile(r"\d{2}(?:\.\d{1,3}){1,4}")
 
 
-def get_regestry_response_okpd_ktry(plan_points_use: List[str], REGISTRY_DIR: Path) -> List[str]:
+def get_regestry_response_okpd_ktry(
+    plan_points_use: List[str],
+    REGISTRY_DIR: Path,
+    plan_points_names: Optional[List[str]] = None,
+) -> List[str]:
     try:
         registry = ProcurementReferenceRegistry(REGISTRY_DIR)
     except Exception as e:
@@ -27,7 +31,7 @@ def get_regestry_response_okpd_ktry(plan_points_use: List[str], REGISTRY_DIR: Pa
         parsed_okpd = []
 
     try:
-        parsed_ktry = parse_ktry_entries(plan_points_use[1])
+        parsed_ktry = parse_ktry_entries(plan_points_use[1], names=plan_points_names)
     except Exception as e:
         print(f"Ошибка при парсинге КТРУ plan_points_use[1]: {e}")
         parsed_ktry = []

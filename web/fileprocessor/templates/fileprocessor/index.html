@@ -13,8 +13,11 @@
                 <div class="card shadow">
                     <div class="card-body">
                         <h1 class="card-title text-center mb-4">Обработчик документов</h1>
+                        <p class="text-center text-muted mb-2">
+                            Загрузите документы для обработки
+                        </p>
                         <p class="text-center text-muted mb-4">
-                            Загрузите полный комплект документов для обработки
+                            Обязателен только документ "Заявка в план-график", остальные можно не загружать
                         </p>
 
                         {% if error %}
@@ -28,8 +31,21 @@
 
                             {% for field_name, field_label in document_fields %}
                             <div class="mb-4">
-                                <label for="{{ field_name }}" class="form-label">Загрузите "{{ field_label }}"</label>
-                                <input type="file" class="form-control" id="{{ field_name }}" name="{{ field_name }}" required>
+                                <label for="{{ field_name }}" class="form-label">
+                                    Загрузите "{{ field_label }}"
+                                    {% if field_name in required_document_keys %}
+                                    <span class="text-danger">*</span>
+                                    {% else %}
+                                    <span class="text-muted">(необязательно)</span>
+                                    {% endif %}
+                                </label>
+                                <input
+                                    type="file"
+                                    class="form-control"
+                                    id="{{ field_name }}"
+                                    name="{{ field_name }}"
+                                    {% if field_name in required_document_keys %}required{% endif %}
+                                >
                                 <div class="form-text">Форматы: .txt, .docx, .pdf</div>
                             </div>
                             {% endfor %}

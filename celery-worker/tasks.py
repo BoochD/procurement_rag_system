@@ -19,6 +19,7 @@ REQUIRED_DOCUMENTS = (
     ("onmck", "ОНМЦК"),
     ("obrasheniye", "Обращение о проведении закупки"),
 )
+MANDATORY_DOCUMENT_KEYS = {"plan"}
 
 
 def build_result_docx_bytes(ai_response: str) -> bytes:
@@ -120,7 +121,10 @@ def process_document_query(self, documents):
                 'content': base64.b64decode(file_content_b64),
             }
 
-        missing_docs = [label for key, label in REQUIRED_DOCUMENTS if key not in docs_by_key]
+        missing_docs = [
+            label for key, label in REQUIRED_DOCUMENTS
+            if key in MANDATORY_DOCUMENT_KEYS and key not in docs_by_key
+        ]
         if missing_docs:
             raise ValueError(
                 f"Missing required documents: {', '.join(missing_docs)}."
@@ -130,6 +134,10 @@ def process_document_query(self, documents):
         try:
             doc_paths = {}
             for key, _label in REQUIRED_DOCUMENTS:
+                if key not in docs_by_key:
+                    doc_paths[key] = None
+                    continue
+
                 file_name = os.path.basename(docs_by_key[key]['name'])
                 temp_file_path = os.path.join(temp_dir, f"{key}_{file_name}")
 
@@ -159,6 +167,7 @@ def process_document_query(self, documents):
                         'name': docs_by_key[key]['name'],
                     }
                     for key, label in REQUIRED_DOCUMENTS
+                    if key in docs_by_key
                 ],
                 'status': 'completed'
             }
