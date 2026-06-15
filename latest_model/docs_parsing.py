@@ -1,8 +1,141 @@
 ﻿import numpy as np
+import re
 from typing import List
 from shared_modules.parser_functions import DocumentParser, PlanParser
-from shared_modules.parser_functions import extract_ktru_block, _clean_keyword_dict, _extract_keyword_windows
+from shared_modules.parser_functions import (
+    build_table_header,
+    dedupe_merged_cells,
+    extract_ktru_block,
+    extract_okpd2_entries_from_plain_text,
+    get_row_cells,
+    normalize_text,
+    _clean_keyword_dict,
+)
 from shared_modules.parser_functions import parse_contracters_onmck_by_row_number
+
+
+KTRU_ENTRY_RE = re.compile(
+    r"(?<![\d.])"
+    r"(?P<code>\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8})"
+    r"(?![\d.])"
+    r"(?:\s*[-–—]\s*(?P<name>[^\n\r;|]+))?"
+)
+
+
+def _join_non_empty(*parts: str) -> str:
+    return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _normalize_lookup_text(value: str) -> str:
+    return normalize_text(value).lstrip("*").strip().lower()
+
+
+def _extract_ktru_entries_from_plain_text(text: str) -> list[dict[str, str]]:
+    entries = []
+    for match in KTRU_ENTRY_RE.finditer(text or ""):
+        entries.append({
+            "code": match.group("code").strip(),
+            "name": _normalize_lookup_text(match.group("name") or ""),
+        })
+    return entries
+
+
+def _match_ktru_code_by_name(item_name: str, ktru_entries: list[dict[str, str]]) -> str | None:
+    normalized_item_name = _normalize_lookup_text(item_name)
+    if not normalized_item_name:
+        return None
+
+    for entry in ktru_entries:
+        entry_name = entry["name"]
+        if entry_name and (
+            entry_name == normalized_item_name
+            or entry_name in normalized_item_name
+            or normalized_item_name in entry_name
+        ):
+            return entry["code"]
+
+    return None
+
+
+def _append_characteristic(result: dict[str, dict[str, str]], code: str, name: str, value: str) -> None:
+    clean_name = normalize_text(name).lstrip("*").strip()
+    clean_value = normalize_text(value)
+    if not code or not clean_name or not clean_value:
+        return
+
+    characteristics = result.setdefault(code, {})
+    if clean_name in characteristics and clean_value not in characteristics[clean_name].split("; "):
+        characteristics[clean_name] = characteristics[clean_name] + "; " + clean_value
+    else:
+        characteristics[clean_name] = clean_value
+
+
+def _extract_ooz_characteristics_fallback(parser_ooz: DocumentParser) -> tuple[dict[str, dict[str, str]], set[str]]:
+    plain_text = parser_ooz.extract_clean_text()
+    ktru_entries = _extract_ktru_entries_from_plain_text(plain_text)
+    result: dict[str, dict[str, str]] = {}
+
+    for table in parser_ooz.doc.tables:
+        rows = [get_row_cells(row) for row in table.rows if len(dedupe_merged_cells(row)) > 1]
+        if not rows:
+            continue
+
+        header, header_rows_count = build_table_header(rows)
+        normalized_header = [_normalize_lookup_text(cell) for cell in header]
+
+        name_idx = next(
+            (
+                idx
+                for idx, cell in enumerate(normalized_header)
+                if "наименование" in cell
+                and "оборудован" not in cell
+                and "характерист" not in cell
+            ),
+            None,
+        )
+        characteristic_idx = next(
+            (
+                idx
+                for idx, cell in enumerate(normalized_header)
+                if "характерист" in cell and "значение" not in cell and "ед." not in cell
+            ),
+            None,
+        )
+        value_idx = next(
+            (
+                idx
+                for idx, cell in enumerate(normalized_header)
+                if "значение" in cell and "характерист" in cell
+            ),
+            None,
+        )
+
+        if characteristic_idx is None or value_idx is None:
+            continue
+
+        for row in rows[header_rows_count:]:
+            normalized_row = [normalize_text(cell) for cell in row]
+            row_text = " ".join(normalized_row)
+            code_match = KTRU_ENTRY_RE.search(row_text)
+            code = code_match.group("code") if code_match else None
+
+            if not code and name_idx is not None and name_idx < len(normalized_row):
+                code = _match_ktru_code_by_name(normalized_row[name_idx], ktru_entries)
+
+            if not code:
+                continue
+
+            if characteristic_idx >= len(normalized_row) or value_idx >= len(normalized_row):
+                continue
+
+            _append_characteristic(
+                result,
+                code,
+                normalized_row[characteristic_idx],
+                normalized_row[value_idx],
+            )
+
+    return result, set(result)
 
 
 def _parse_plan_points(plan_path: str) -> List[str]:
@@ -14,17 +147,22 @@ def _parse_plan_points(plan_path: str) -> List[str]:
     return plan_points
 
 
-def _parse_contract_characteristics(contract_path: str) -> str:
+def _parse_ooz_characteristic(ooz_path: str) -> tuple[str, dict[str, dict[str, str]], set[str]]:
     """
-    Достаёт характеристики товаров из контракта.
+    Достаёт характеристики товаров из ООЗ для сравнения с КТРУ.
     """
-    parser_contract = DocumentParser(contract_path)
+    parser_ooz = DocumentParser(ooz_path)
 
-    table_ktry_names = parser_contract.extract_tables_columns(keywords=["№", "ОКПД", "КТРУ"])
+    table_ktry_names = parser_ooz.extract_tables_columns(keywords=["№", "ОКПД", "КТРУ"])
 
-    table_characteristics, ktry_codes = parser_contract.extract_tables_characteristics(
+    table_characteristics, ktry_codes = parser_ooz.extract_tables_characteristics(
         keywords=["№", "КТРУ", "Наименование характеристики", "Значение характеристики"]
     )
+    fallback_characteristics, fallback_codes = _extract_ooz_characteristics_fallback(parser_ooz)
+
+    for code, characteristics in fallback_characteristics.items():
+        table_characteristics.setdefault(code, {}).update(characteristics)
+    ktry_codes = set(ktry_codes) | fallback_codes
 
     ktry_codes = {code for code in ktry_codes if len(code.split("-")) > 1}
     table_characteristics = {ktry_code: table_characteristics[ktry_code] for ktry_code in ktry_codes}
@@ -42,12 +180,10 @@ def _parse_contract_points(contract_path: str, window: int = 100) -> str:
 
     if not contract_points or len(contract_points) < 20:
         contract_plain_text = parser_contract.extract_clean_text().strip()
-        contract_points = _extract_keyword_windows(
-            contract_plain_text,
-            keywords=["ОКПД"],
-            window=window,
+        contract_points = _join_non_empty(
+            extract_okpd2_entries_from_plain_text(contract_plain_text),
+            extract_ktru_block(contract_plain_text, tail_chars=60, fallback_chars=150),
         )
-        contract_points += extract_ktru_block(contract_plain_text, tail_chars=60, fallback_chars=150)
 
         table_contract_points = parser_contract.extract_tables_columns(keywords=["№", "ОКПД", "КТРУ"])
         table_contract_points_amount = parser_contract.extract_tables_columns(
@@ -93,12 +229,10 @@ def _parse_ooz_points(ooz_path: str, window: int = 200) -> str:
         if not ooz_amounts:
             ooz_amounts = parser_ooz.extract_tables_columns(keywords=["наименование", "количество"])
 
-        ooz_points = _extract_keyword_windows(
-            ooz_plain_text,
-            keywords=["ОКПД"],
-            window=window,
+        ooz_points = _join_non_empty(
+            extract_okpd2_entries_from_plain_text(ooz_plain_text),
+            extract_ktru_block(ooz_plain_text, tail_chars=30, fallback_chars=150),
         )
-        ooz_points = ooz_points + "\n" + extract_ktru_block(ooz_plain_text, tail_chars=30, fallback_chars=150)
 
         if ooz_ktry_okpd_table:
             ooz_points = ooz_points + "\n" + ooz_ktry_okpd_table

@@ -6,7 +6,7 @@ from shared_modules.parser_functions import (
     parse_ktry_entries,
     parse_okpd_entries,
 )
-from latest_model.docs_parsing import _parse_contract_characteristics
+from latest_model.docs_parsing import _parse_ooz_characteristic
 from services.procurement_reference_registry import ProcurementReferenceRegistry
 
 KTRU_CODE_RE = re.compile(r"\d{2}(?:\.\d{1,3}){1,4}-\d{8}")
@@ -357,7 +357,7 @@ def compare_characteristics(
         }
 
     try:
-        _, table_characteristics, ktry_codes = _parse_contract_characteristics(ooz_path)
+        _, table_characteristics, ktry_codes = _parse_ooz_characteristic(ooz_path)
     except Exception as e:
         return {
             "error": "Не удалось извлечь характеристики из ООЗ для сравнения с КТРУ."

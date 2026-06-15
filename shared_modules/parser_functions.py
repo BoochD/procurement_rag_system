@@ -281,22 +281,78 @@ def _extract_keyword_windows(text: str, keywords: list[str], window: int = 90) -
 
     return "\n".join(dict.fromkeys(matches))
 
+
+OKPD2_PLAIN_CODE_RE = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?!-\d{8})(?![\d.])")
+OKPD2_PLAIN_ENTRY_RE = re.compile(
+    r"(?<![\d.])"
+    r"(?P<code>\d{2}\.\d{2}\.\d{2}\.\d{3})"
+    r"(?!-\d{8})(?![\d.])"
+    r"(?:\s*[-–—]\s*(?P<name>.*?))?"
+    r"(?=\s*(?:[;\n\r|]|$)|\s+\d{2}\.\d{2}\.\d{2}\.\d{3}(?:-\d{8})?\b)",
+    re.DOTALL,
+)
+
+
+def extract_okpd2_entries_from_plain_text(text: str) -> str:
+    """
+    Extracts OKPD2 entries from plain text without treating KTRU prefixes as OKPD2.
+
+    Expected code forms:
+    - OKPD2: 20.59.12.120
+    - KTRU: 20.59.12.120-00000002
+    """
+    if not text:
+        return ""
+
+    entries: list[str] = []
+    seen_codes: set[str] = set()
+
+    for match in OKPD2_PLAIN_ENTRY_RE.finditer(text):
+        code = match.group("code").strip()
+        if code in seen_codes:
+            continue
+
+        name = match.group("name") or ""
+        name = normalize_text(name)
+        name = re.sub(r"\s+", " ", name).strip(" ;,.-")
+
+        if name:
+            entries.append(f"ОКПД2: {code} - {name}")
+        else:
+            entries.append(f"ОКПД2: {code}")
+        seen_codes.add(code)
+
+    for code_match in OKPD2_PLAIN_CODE_RE.finditer(text):
+        code = code_match.group(0)
+        if code in seen_codes:
+            continue
+        entries.append(f"ОКПД2: {code}")
+        seen_codes.add(code)
+
+    return "\n".join(entries)
+
+
 def extract_ktru_block(text: str, tail_chars: int = 30, fallback_chars: int = 150) -> str:
-    start_match = re.search(r"КТРУ\s*:", text, flags=re.IGNORECASE)
+    start_match = re.search(r"КТРУ(?:\s*/\s*\(?\s*ОКПД2\s*\)?)?\s*:", text, flags=re.IGNORECASE)
     if not start_match:
         return ""
 
     start = start_match.start()
     fragment = text[start:]
 
-    ktru_pattern = r"\d+(?:\.\d+){3}-\d+"
+    ktru_pattern = r"\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8}"
     matches = list(re.finditer(ktru_pattern, fragment))
 
     if not matches:
         return fragment[:fallback_chars].strip()
 
     last_match = matches[-1]
-    end = last_match.end() + tail_chars
+    tail = fragment[last_match.end():]
+    delimiter_match = re.search(r"[;\n\r]", tail)
+    if delimiter_match:
+        end = last_match.end() + delimiter_match.start()
+    else:
+        end = last_match.end() + tail_chars
 
     return fragment[:end].strip()
 
@@ -460,13 +516,17 @@ class DocumentParser:
                 ]
                 # assert len(selected_cells) == len(keywords), f"Не нашёл все колонки {keywords}"
                 # print("Нашёл колонки:", selected_cells)
-                if len(selected_cells) == 1 or "Дополнительные характеристики" in selected_cells[1]:
+                if len(selected_cells) < 3:
+                    continue
+                if len(selected_cells) > 1 and "Дополнительные характеристики" in selected_cells[1]:
                     continue
 
                 if (
                     first_col_is_number
                     and selected_cells[0].strip().isdigit()
                 ):
+                    if len(selected_cells) < 4:
+                        continue
                     num  = selected_cells[0]
                     code = f"№{num}. " + selected_cells[1].split()[0]
                     name = selected_cells[2]
