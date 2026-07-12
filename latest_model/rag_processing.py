@@ -4,7 +4,7 @@ from typing import Iterable, List
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda
 
-from shared_modules.llm_models import get_langchain_chat_model
+from shared_modules.llm_models import get_langchain_openai_chat_model
 
 from .prompts import prompt_rag
 
@@ -17,7 +17,7 @@ def _format_chunks(docs):
 
 
 def process_rag_points(retriever, plan_points: List[str]) -> str:
-    llm = get_langchain_chat_model()
+    llm = get_langchain_openai_chat_model()
 
     rag_chain = (
         {

@@ -8,6 +8,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import date, datetime
@@ -104,6 +105,19 @@ class ProcurementReferenceRegistry:
         self.sqlite_path = self.base_dir / sqlite_file
         self.index_json_path = self.base_dir / "okpd_index.json"
         self._ktru_provider: Any | None = None
+        self._ktru_html_cache: dict[str, str] = {}
+        self._http = requests.Session()
+        self._http.trust_env = os.getenv(
+            "KTRU_TRUST_ENV_PROXY",
+            "",
+        ).strip().casefold() in {"1", "true", "yes"}
+        ca_bundle = os.getenv("KTRU_CA_BUNDLE", "").strip()
+        verify_tls = os.getenv("KTRU_VERIFY_TLS", "0").strip().casefold()
+        self._tls_verify: bool | str = (
+            ca_bundle
+            if ca_bundle
+            else verify_tls not in {"0", "false", "no"}
+        )
 
     @staticmethod
     def _resolve_base_dir(base_dir: Path) -> Path:
@@ -483,7 +497,12 @@ class ProcurementReferenceRegistry:
 
     def _fetch_html(self, url: str, timeout: int = 60) -> str:
         try:
-            response = requests.get(url, headers=self.DEFAULT_HEADERS, timeout=timeout)
+            response = self._http.get(
+                url,
+                headers=self.DEFAULT_HEADERS,
+                timeout=(min(timeout, 15), timeout),
+                verify=self._tls_verify,
+            )
             response.raise_for_status()
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
@@ -663,10 +682,8 @@ class ProcurementReferenceRegistry:
                 ):
                     value_idx = idx
 
-            data_rows = rows[1:] if any(normalized_headers) else rows
-
             if name_idx is None and value_idx is None:
-                for row in data_rows:
+                for row in rows:
                     cells = row.find_all(["th", "td"])
                     if len(cells) < 2:
                         continue
@@ -677,6 +694,7 @@ class ProcurementReferenceRegistry:
                     )
                 continue
 
+            data_rows = rows[1:]
             if name_idx is None:
                 name_idx = 0
             if value_idx is None:
@@ -820,18 +838,27 @@ class ProcurementReferenceRegistry:
 
     def get_ktru_common_info(self, ktru_code: str) -> dict[str, Any]:
         code = self.normalize_ktru(ktru_code)
-        url = self._build_ktru_url("commonInfo", code)
-        html = self._fetch_html(url)
+        url = self._build_ktru_url("ktru-description", code)
+        try:
+            html = self._fetch_html(url)
+        except KTRUNotFoundError:
+            # Compatibility with installations where the former tab URL remains active.
+            url = self._build_ktru_url("commonInfo", code)
+            html = self._fetch_html(url)
 
         parsed = self.parse_ktru_common_info_html(html, code)
+        self._ktru_html_cache[code] = html
         parsed["url"] = url
         parsed["html"] = html
         return parsed
 
     def get_ktru_characteristics_detailed(self, ktru_code: str) -> dict[str, dict[str, Any]]:
         code = self.normalize_ktru(ktru_code)
-        url = self._build_ktru_url("ktru-description", code)
-        html = self._fetch_html(url)
+        html = self._ktru_html_cache.get(code)
+        if html is None:
+            url = self._build_ktru_url("ktru-description", code)
+            html = self._fetch_html(url)
+            self._ktru_html_cache[code] = html
         soup = BeautifulSoup(html, "html.parser")
 
         parsed = self._extract_detailed_characteristics_from_ktru_description_table(soup)
@@ -902,7 +929,7 @@ class ProcurementReferenceRegistry:
             reference_name=None,
             unit=None,
             short_description=[],
-            common_info_url=self._build_ktru_url("commonInfo", code),
+            common_info_url=self._build_ktru_url("ktru-description", code),
             payload=None,
             message=message,
         )
@@ -918,11 +945,14 @@ class ProcurementReferenceRegistry:
                 name=name,
                 message=f"Не удалось найти карточку КТРУ {code}\n",
             )
-        except requests.RequestException:
+        except requests.RequestException as exc:
             return self._build_ktru_error_result(
                 code=code,
                 name=name,
-                message=f"Не удалось получить карточку КТРУ {code}\n",
+                message=(
+                    f"Не удалось получить карточку КТРУ {code}: "
+                    f"{type(exc).__name__}\n"
+                ),
             )
 
         reference_name = common_info.get("name")

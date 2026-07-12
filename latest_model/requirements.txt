@@ -1,8 +1,6 @@
-﻿gigachat>=0.2.0b2,<0.3
 beautifulsoup4>=4.12.3
 langchain-community==0.4.1
 langchain-core==1.2.17
-langchain-gigachat-lc1==0.4.0b5
 langchain-openai==1.0.1
 langchain-text-splitters==1.1.1
 faiss-cpu==1.13.2
@@ -12,4 +10,3 @@ openai>=1.109.1,<3
 python-docx==1.2.0
 scikit-learn==1.7.2
 # torch is not used in the current latest_model pipeline
-

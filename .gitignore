@@ -45,6 +45,7 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+runtime/
 
 # Build artifacts
 build/

@@ -2,7 +2,7 @@
 
 from langchain_core.output_parsers import StrOutputParser
 
-from shared_modules.llm_models import get_langchain_chat_model
+from shared_modules.llm_models import get_langchain_openai_chat_model
 
 from .prompts import prompt_smart
 
@@ -15,7 +15,7 @@ def process_smart_points(
         ONMCK_points: str,
         available_documents: str,
         ) -> str:
-    llm = get_langchain_chat_model()
+    llm = get_langchain_openai_chat_model()
     chain = prompt_smart | llm | StrOutputParser()
 
 

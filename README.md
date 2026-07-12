@@ -40,19 +40,36 @@ SECRET_KEY=your-django-secret-key
 DEBUG=False
 ALLOWED_HOSTS=89.23.101.85,localhost,127.0.0.1
 
-GIGACHAT_AUTH_KEY=your-gigachat-auth-key
-GIGACHAT_MODEL=GigaChat-2-Max
-GIGACHAT_TIMEOUT=180
-
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1
-OPENAI_MODEL=gpt-5.3-chat-latest
 
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
 ```
 
-По умолчанию в проекте для LangChain используется OpenAI-совместимая модель, поэтому `OPENAI_API_KEY`, `OPENAI_BASE_URL` и `OPENAI_MODEL` нужно заполнить обязательно, если вы хотите, чтобы работала RAG-часть и остальные LLM-вызовы через OpenAI.
+В проекте используется OpenAI-совместимый провайдер. `OPENAI_API_KEY` и `OPENAI_BASE_URL` задаются через окружение, а chat- и embedding-модели централизованно зафиксированы в `shared_modules/llm_models.py`.
+
+## Независимый summary pipeline
+
+Новый schema-first pipeline разрабатывается отдельно от текущего web/Celery сценария:
+
+```bash
+python -m summary_model.cli \
+  --input-dir "doci_primery/PACK_06_05" \
+  --output-dir "runtime/summary_runs/PACK_06_05"
+```
+
+Для локальной проверки без LLM и внешней сети:
+
+```bash
+python -m summary_model.cli \
+  --input-dir "doci_primery/PACK_06_05" \
+  --output-dir "runtime/summary_runs/PACK_06_05" \
+  --no-llm \
+  --no-external
+```
+
+CLI создаёт `Document IR`, summaries, canonical package, findings и текстовый/DOCX-отчёт. Текущий worker пока продолжает использовать `latest_model`.
 
 ## Быстрый запуск через Docker Compose
 

@@ -24,7 +24,7 @@ def test_check_ktru_name_mismatch_message(
 
     expected_message = (
         "КТРУ 01.11.32.000-00000002 найден, но наименование отличается от эталонного.\n\n"
-        "Ссылка на карточку: https://zakupki.gov.ru/epz/ktru/ktruCard/commonInfo.html?itemId=01.11.32.000-00000002\n\n"
+        "Ссылка на карточку: https://zakupki.gov.ru/epz/ktru/ktruCard/ktru-description.html?itemId=01.11.32.000-00000002\n\n"
         "Эталонное наименование: Зерно ржи\n"
         "Проверьте соответствует ли ваше наименование 'ОВЁС??'."
     )
@@ -66,7 +66,7 @@ def test_check_ktru_exact_name_match(
 
     expected_message = (
         "КТРУ 01.11.32.000-00000002 найден.\n\n"
-        "Ссылка на карточку: https://zakupki.gov.ru/epz/ktru/ktruCard/commonInfo.html?itemId=01.11.32.000-00000002\n\n"
+        "Ссылка на карточку: https://zakupki.gov.ru/epz/ktru/ktruCard/ktru-description.html?itemId=01.11.32.000-00000002\n\n"
         "Наименование совпадает с эталонной записью КТРУ.\n"
         "Наименование: Зерно ржи"
     )

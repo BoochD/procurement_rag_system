@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from bs4 import BeautifulSoup
 
-from services.procurement_reference_registry import ProcurementReferenceRegistry
+from services.procurement_reference_registry import (
+    KTRUNotFoundError,
+    ProcurementReferenceRegistry,
+)
 
 
 def test_parse_ktru_common_info_html_minimal(
@@ -79,6 +82,62 @@ def test_extract_main_name_fallback_from_section_title(
     )
 
     assert payload["name"] == "Зерно ржи"
+
+
+def test_common_info_uses_description_route_and_caches_html(
+    registry: ProcurementReferenceRegistry,
+    monkeypatch,
+) -> None:
+    calls = []
+    html = """
+    <div class="cardMainInfo__section">
+      <div class="cardMainInfo__content">Зерно ржи</div>
+    </div>
+    """
+
+    def fake_fetch(url, timeout=60):
+        calls.append(url)
+        return html
+
+    monkeypatch.setattr(registry, "_fetch_html", fake_fetch)
+    registry._ktru_html_cache.clear()
+
+    payload = registry.get_ktru_common_info("01.11.32.000-00000002")
+    registry.get_ktru_characteristics_detailed("01.11.32.000-00000002")
+
+    assert payload["name"] == "Зерно ржи"
+    assert payload["url"].endswith(
+        "/ktru-description.html?itemId=01.11.32.000-00000002"
+    )
+    assert calls == [payload["url"]]
+    registry._ktru_html_cache.clear()
+
+
+def test_common_info_falls_back_to_legacy_route(
+    registry: ProcurementReferenceRegistry,
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def fake_fetch(url, timeout=60):
+        calls.append(url)
+        if "ktru-description" in url:
+            raise KTRUNotFoundError("not found")
+        return """
+        <div class="cardMainInfo__section">
+          <div class="cardMainInfo__content">Зерно ржи</div>
+        </div>
+        """
+
+    monkeypatch.setattr(registry, "_fetch_html", fake_fetch)
+    registry._ktru_html_cache.clear()
+
+    payload = registry.get_ktru_common_info("01.11.32.000-00000002")
+
+    assert payload["name"] == "Зерно ржи"
+    assert "commonInfo.html" in payload["url"]
+    assert len(calls) == 2
+    registry._ktru_html_cache.clear()
 
 
 def test_parse_ktru_characteristics_html_table(

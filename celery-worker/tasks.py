@@ -4,12 +4,13 @@ import tempfile
 import shutil
 from io import BytesIO
 import re
+import html
 from celery import shared_task
 from docx import Document
-from docx.shared import RGBColor
-from latest_model.ai_service import get_ai_service
+from docx.shared import Pt, RGBColor
+from summary_model.report_markup import mark_report_text
+from summary_model.web_service import WebPipelineOptions, process_uploaded_documents
 
-ai_service = get_ai_service()
 
 REQUIRED_DOCUMENTS = (
     ("plan", "Заявка в план-график"),
@@ -28,6 +29,7 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
 
     Поддерживает базовое форматирование:
     `<b>...</b>` -> жирный, `<u>...</u>` и `<ins>...</ins>` -> подчёркивание,
+    `<big>...</big>` -> увеличенный шрифт,
     `<ok>...</ok>` -> зелёный текст, `<warn>...</warn>` -> оранжевый текст,
     `<error>...</error>` -> красный текст.
     Абзацы создаются по пустым строкам.
@@ -37,7 +39,7 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
 
     clean_response = (ai_response or '').replace('\r\n', '\n')
     blocks = [block.strip() for block in clean_response.split('\n\n') if block.strip()]
-    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error)>", re.IGNORECASE)
+    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big)>", re.IGNORECASE)
 
     for block in blocks:
         paragraph = document.add_paragraph()
@@ -46,13 +48,16 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
         ok_active = False
         warn_active = False
         error_active = False
+        big_active = False
         cursor = 0
 
         for match in tag_pattern.finditer(block):
             if match.start() > cursor:
-                run = paragraph.add_run(block[cursor:match.start()])
+                run = paragraph.add_run(html.unescape(block[cursor:match.start()]))
                 run.bold = bold_active
                 run.underline = underline_active
+                if big_active:
+                    run.font.size = Pt(14)
                 if ok_active:
                     run.font.color.rgb = RGBColor(0x19, 0x87, 0x54)
                 elif warn_active:
@@ -81,13 +86,19 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
                 error_active = True
             elif tag == "</error>":
                 error_active = False
+            elif tag == "<big>":
+                big_active = True
+            elif tag == "</big>":
+                big_active = False
 
             cursor = match.end()
 
         if cursor < len(block):
-            run = paragraph.add_run(block[cursor:])
+            run = paragraph.add_run(html.unescape(block[cursor:]))
             run.bold = bold_active
             run.underline = underline_active
+            if big_active:
+                run.font.size = Pt(14)
             if ok_active:
                 run.font.color.rgb = RGBColor(0x19, 0x87, 0x54)
             elif warn_active:
@@ -146,18 +157,34 @@ def process_document_query(self, documents):
 
                 doc_paths[key] = temp_file_path
 
-            result = ai_service.process_query(
-                plan_path=doc_paths['plan'],
-                contract_path=doc_paths['contract'],
-                ooz_path=doc_paths['ooz'],
-                zapiska_path=doc_paths['zapiska'],
-                ONMCK_path=doc_paths['onmck'],
-                Obrasheniye_path=doc_paths['obrasheniye'],
+            pipeline_documents = [
+                {
+                    'key': key,
+                    'label': label,
+                    'name': docs_by_key[key]['name'],
+                    'path': doc_paths[key],
+                }
+                for key, label in REQUIRED_DOCUMENTS
+                if key in docs_by_key and doc_paths[key]
+            ]
+            pipeline_result = process_uploaded_documents(
+                pipeline_documents,
+                options=WebPipelineOptions(
+                    with_llm_extraction=True,
+                    with_semantic_llm=True,
+                    with_ktru=True,
+                    ktru_timeout_seconds=int(os.getenv("KTRU_TIMEOUT_SECONDS", "30")),
+                    llm_concurrency=int(os.getenv("SUMMARY_LLM_CONCURRENCY", "6")),
+                ),
             )
-            result_file_bytes = build_result_docx_bytes(result['ai_response'])
+            ai_response = mark_report_text(pipeline_result.report_text)
+            if pipeline_result.warnings:
+                warnings_text = "\n".join(f"- {warning}" for warning in pipeline_result.warnings)
+                ai_response = f"{ai_response}\n\n<b>Технические предупреждения</b>\n{warnings_text}"
+            result_file_bytes = build_result_docx_bytes(ai_response)
 
             return {
-                'ai_response': result['ai_response'],
+                'ai_response': ai_response,
                 'result_file_b64': base64.b64encode(result_file_bytes).decode('utf-8'),
                 'result_file_name': 'analysis_result.docx',
                 'documents': [

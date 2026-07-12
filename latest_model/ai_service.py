@@ -1,4 +1,4 @@
-import re
+﻿import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -114,6 +114,8 @@ class AIService:
         rag_keywords = [
             "Сроки поставки",
             "цена контракта",
+            "место поставки",
+            "Наименование объекта закупки"
         ]
 
         plan_points_use = filter_plan_points(plan_points, smart_keywords)

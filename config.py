@@ -29,12 +29,6 @@ TEXTS_CACHE_DIR = os.path.join(CACHE_DIR, "texts")
 PRAVO_BASE_URL = "http://publication.pravo.gov.ru"
 
 # ============================================================
-# API — GIGACHAT
-# ============================================================
-AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "your-gigachat-auth-key")
-GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2")
-
-# ============================================================
 # МОДЕЛЬ ЭМБЕДДИНГОВ
 # ============================================================
 EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
