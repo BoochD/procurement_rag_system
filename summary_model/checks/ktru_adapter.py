@@ -96,6 +96,8 @@ def run_ktru_characteristic_checks(
         extra_allowed = _can_add_extra_characteristics(
             registry=registry,
             common_info=common_info,
+            item_okpd2_code=item.okpd2_code,
+            ktru_code=ktru_code,
             method_kind=method_kind,
             method_label=method_label,
             has_ktru_characteristics=bool(legal_lookup),
@@ -488,6 +490,8 @@ def _can_add_extra_characteristics(
     *,
     registry: Any,
     common_info: dict[str, Any] | None,
+    item_okpd2_code: str | None,
+    ktru_code: str,
     method_kind: str,
     method_label: str,
     has_ktru_characteristics: bool,
@@ -508,39 +512,63 @@ def _can_add_extra_characteristics(
             "reason": "В карточке КТРУ отсутствуют характеристики; дополнительные характеристики допустимы.",
         }
 
-    okpd_candidates = _okpd_candidates(common_info)
+    okpd_candidates = _okpd_candidates(common_info, item_okpd2_code, ktru_code)
     if len(okpd_candidates) != 1:
         return {
             "can_add_extra_characteristics": None,
-            "reason": "Не удалось однозначно определить ОКПД2 для правила дополнительных характеристик.",
+            "reason": (
+                f"Не удалось однозначно определить ОКПД2 для правила дополнительных характеристик "
+                f"по КТРУ {ktru_code}: кандидаты {okpd_candidates or 'не найдены'}."
+            ),
         }
     try:
         okpd_result = registry.check_okpd2(okpd_candidates[0])
     except Exception:
         return {
             "can_add_extra_characteristics": None,
-            "reason": "Не удалось проверить ОКПД2 по ПП №1875 для правила дополнительных характеристик.",
+            "reason": (
+                f"Не удалось проверить ОКПД2 {okpd_candidates[0]} по ПП №1875 "
+                f"для правила дополнительных характеристик."
+            ),
         }
     if not getattr(okpd_result, "found", False):
         return {
             "can_add_extra_characteristics": True,
-            "reason": "ОКПД2 не найден в приложениях 1 и 2 ПП №1875; дополнительные характеристики допустимы.",
+            "reason": (
+                f"ОКПД2 {okpd_candidates[0]} не найден в приложениях 1 и 2 ПП №1875; "
+                f"дополнительные характеристики допустимы."
+            ),
         }
     if _is_special_pp1875_position(okpd_result):
         return {
             "can_add_extra_characteristics": False,
-            "reason": "ОКПД2 попадает в специальную позицию ПП №1875; дополнительные характеристики не допускаются.",
+            "reason": (
+                f"ОКПД2 {okpd_candidates[0]} попадает в специальную позицию ПП №1875; "
+                f"дополнительные характеристики не допускаются."
+            ),
         }
     return {
         "can_add_extra_characteristics": True,
-        "reason": "Связанный ОКПД2 не попадает в специальные позиции ПП №1875; дополнительные характеристики допустимы.",
+        "reason": (
+            f"ОКПД2 {okpd_candidates[0]} не попадает в специальные позиции ПП №1875; "
+            f"дополнительные характеристики допустимы."
+        ),
     }
 
 
-def _okpd_candidates(common_info: dict[str, Any] | None) -> list[str]:
-    if not common_info:
-        return []
+def _okpd_candidates(
+    common_info: dict[str, Any] | None,
+    item_okpd2_code: str | None,
+    ktru_code: str | None,
+) -> list[str]:
     candidates = []
+    for raw_value in (item_okpd2_code, _okpd2_from_ktru(ktru_code)):
+        if raw_value:
+            _append_unique(candidates, raw_value)
+    if candidates:
+        return candidates
+    if not common_info:
+        return candidates
     section_pairs = common_info.get("section_pairs") or {}
     for raw_value in (
         common_info.get("okpd2_code"),
@@ -551,6 +579,11 @@ def _okpd_candidates(common_info: dict[str, Any] | None) -> list[str]:
         for match in re.findall(r"\d{2}(?:\.\d{1,3}){1,4}", str(raw_value)):
             _append_unique(candidates, match)
     return candidates
+
+
+def _okpd2_from_ktru(ktru_code: str | None) -> str | None:
+    match = re.match(r"(\d{2}\.\d{2}\.\d{2}\.\d{3})-", str(ktru_code or ""))
+    return match.group(1) if match else None
 
 
 def _is_special_pp1875_position(okpd_result: Any) -> bool:

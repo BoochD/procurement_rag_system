@@ -46,6 +46,7 @@ def normalize_header_name(path: list[str]) -> str | None:
         ("unit_price", ("цена за ед",)),
         ("unit_price", ("цена за единицу",)),
         ("row_total", ("стоимость товаров",)),
+        ("row_total", ("стоимость в руб",)),
         ("row_total", ("сумма",)),
         ("row_total", ("цена контракта",)),
         ("row_total", ("всего",)),

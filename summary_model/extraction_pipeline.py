@@ -193,6 +193,45 @@ def _money_value(text: str | None) -> MoneyValue | None:
     return MoneyValue(raw=text or raw, amount=amount)
 
 
+def _money_value_from_raw(raw: str | None) -> MoneyValue | None:
+    raw = clean_text(raw)
+    if not raw:
+        return None
+    _, amount = extract_money(raw)
+    if amount is None:
+        return None
+    return MoneyValue(raw=raw, amount=amount)
+
+
+def _contract_price_value(
+    text: str,
+    specification_items: list[ContractSpecificationItem],
+) -> MoneyValue | None:
+    totals = [item.total_price for item in specification_items if item.total_price is not None]
+    if totals:
+        amount = sum(totals)
+        raw_values = [
+            item.raw_total_price
+            for item in specification_items
+            if item.raw_total_price
+        ]
+        raw = "; ".join(raw_values) if raw_values else str(amount)
+        return MoneyValue(raw=raw, amount=amount)
+
+    patterns = (
+        r"итого\s+к\s+оплате\s*:\s*([^\n\r]+?руб[^\n\r]*)",
+        r"цена\s+контракта\s+составляет\s*([^\n\r]+?руб[^\n\r]*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = _money_value_from_raw(match.group(1))
+        if value is not None:
+            return value
+    return None
+
+
 def _term_value(text: str | None) -> TermValue | None:
     text = clean_text(text)
     if not text:
@@ -716,7 +755,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         document_title=_title(ir),
         contract_number=_line_after_marker(text, "контракт №", "контракт n"),
         subject=_line_after_marker(text, "предмет контракта", "предмет закупки"),
-        price=_money_value(text),
+        price=_contract_price_value(text, specification_items),
         funding_source=_line_after_marker(text, "источник финансирования"),
         delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
         delivery_term_text=delivery_text,
