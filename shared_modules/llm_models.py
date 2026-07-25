@@ -5,30 +5,32 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-hydra-ai-4qkTBoAnIGQ_0RmSjib22YAGWiejpGBzg-Aqt2bFaEVE0-rH.vEOxLFyn1lho12X")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.hydraai.ru/v1")
-# Model selection is intentionally code-controlled to prevent stale environment
-# variables from silently switching production to a different model.
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_NANO_MODEL = os.getenv("OPENAI_NANO_MODEL", "gpt-5.4-nano")
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
+def _get_api_key() -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set in environment variables.")
+    return api_key
+
+
 def get_chatGPT_client() -> OpenAI:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
+    api_key = _get_api_key()
     return OpenAI(
-        api_key=OPENAI_API_KEY,
+        api_key=api_key,
         base_url=OPENAI_BASE_URL,
     )
 
 
 def get_langchain_openai_chat_model(model_name: str | None = None) -> ChatOpenAI:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
+    api_key = _get_api_key()
     selected_model = model_name or OPENAI_MODEL
     return ChatOpenAI(
-        api_key=SecretStr(OPENAI_API_KEY),
+        api_key=SecretStr(api_key),
         base_url=OPENAI_BASE_URL,
         model=selected_model,
         max_tokens=12000,

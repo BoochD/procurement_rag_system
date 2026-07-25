@@ -2,7 +2,7 @@ from langchain_openai import OpenAIEmbeddings
 from pydantic import SecretStr
 
 from .llm_models import (
-    OPENAI_API_KEY,
+    _get_api_key,
     OPENAI_BASE_URL,
     OPENAI_EMBEDDING_MODEL,
 )
@@ -10,7 +10,7 @@ from .llm_models import (
 
 def get_openai_embeddings() -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
-        api_key=SecretStr(OPENAI_API_KEY),
+        api_key=SecretStr(_get_api_key()),
         base_url=OPENAI_BASE_URL,
         model=OPENAI_EMBEDDING_MODEL,
     )
