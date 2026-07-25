@@ -8,8 +8,10 @@ from pathlib import Path
 from summary_model.checks import run_checks
 from summary_model.checks.report import build_checks_report_text
 from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks, run_pp1875_checks
+from summary_model.checks.penalty_llm import run_penalty_llm_checks
 from summary_model.checks.runner import external_manual_checks_with_replacements
 from summary_model.checks.semantic_llm import run_semantic_llm_checks
+from summary_model.checks.stage_llm import run_stage_llm_checks
 from summary_model.extraction_models import ProcurementPackageExtraction
 
 
@@ -45,8 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     semantic_results = None
     llm_metrics = None
+    stage_results = None
+    stage_llm_metrics = None
+    penalty_results = None
+    penalty_llm_metrics = None
     if args.with_llm:
         semantic_results, llm_metrics = run_semantic_llm_checks(package)
+        stage_results, stage_llm_metrics = run_stage_llm_checks(package)
+        penalty_results, penalty_llm_metrics = run_penalty_llm_checks(package)
     ktru_results = None
     ktru_error = None
     if args.with_ktru:
@@ -67,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     report = run_checks(
         package,
         semantic_results=semantic_results,
+        stage_results=stage_results,
+        penalty_results=penalty_results,
         external_results=external_results,
     )
 
@@ -94,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
                 "with_ktru": args.with_ktru,
                 "ktru_timeout": args.ktru_timeout if args.with_ktru else None,
                 "llm_metrics": llm_metrics,
+                "stage_llm_metrics": stage_llm_metrics,
+                "penalty_llm_metrics": penalty_llm_metrics,
                 "ktru_error": ktru_error,
                 "artifacts": ["checks.json", "report.txt", "run.json"],
             },

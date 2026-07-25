@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
+from contextlib import contextmanager
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -15,9 +18,27 @@ from .table_projection import render_table_for_llm
 T = TypeVar("T", bound=BaseModel)
 
 
+class EmptyStructuredOutputError(RuntimeError):
+    pass
+
+
 def _is_non_retryable(error: Exception) -> bool:
+    if isinstance(error, EmptyStructuredOutputError):
+        return True
     message = str(error).lower()
+    if "input_value=none" in message and "input_type=nonetype" in message:
+        return True
     return "error code: 400" in message and "invalid_request_error" in message
+
+
+def _structured_error_message(error: Exception) -> str:
+    if isinstance(error, EmptyStructuredOutputError):
+        return str(error)
+    message = str(error)
+    lowered = message.lower()
+    if "input_value=none" in lowered and "input_type=nonetype" in lowered:
+        return "LLM вернула пустой structured output (None). Использован deterministic fallback."
+    return message
 
 
 def _ir_preview(ir: DocumentIR, max_blocks: int = 20) -> str:
@@ -38,13 +59,14 @@ class StructuredLLMClient:
         self,
         model=None,
         *,
+        model_name: str | None = None,
         semaphore: asyncio.Semaphore | None = None,
         timeout_seconds: float = 180.0,
     ) -> None:
         if model is None:
             from shared_modules.llm_models import get_langchain_openai_chat_model
 
-            model = get_langchain_openai_chat_model()
+            model = get_langchain_openai_chat_model(model_name=model_name)
         self.model = model
         self.semaphore = semaphore or asyncio.Semaphore(3)
         self.timeout_seconds = timeout_seconds
@@ -54,19 +76,42 @@ class StructuredLLMClient:
         self.retry_reasons: list[str] = []
         self.input_characters = 0
         self.duration_seconds = 0.0
+        self.attempts: list[dict[str, object]] = []
+        self._call_context: dict[str, object] = {}
 
     def metrics(self) -> dict[str, object]:
+        output_characters = sum(
+            int(attempt.get("output_characters") or 0)
+            for attempt in self.attempts
+        )
         return {
             "calls": self.calls,
             "retries": self.retries,
             "errors": list(self.errors),
             "retry_reasons": list(self.retry_reasons),
             "input_characters": self.input_characters,
+            "estimated_input_tokens": _estimate_tokens(self.input_characters),
+            "output_characters": output_characters,
+            "estimated_output_tokens": _estimate_tokens(output_characters) if output_characters else 0,
+            "estimated_total_tokens": (
+                _estimate_tokens(self.input_characters)
+                + (_estimate_tokens(output_characters) if output_characters else 0)
+            ),
             "duration_seconds": round(self.duration_seconds, 3),
             "model": getattr(self.model, "model_name", None),
             "reasoning_effort": getattr(self.model, "reasoning_effort", None),
             "max_tokens": getattr(self.model, "max_tokens", None),
+            "attempts": list(self.attempts),
         }
+
+    @contextmanager
+    def call_context(self, **values: object):
+        previous = dict(self._call_context)
+        self._call_context = {**previous, **{key: value for key, value in values.items() if value is not None}}
+        try:
+            yield
+        finally:
+            self._call_context = previous
 
     def extract(
         self,
@@ -83,11 +128,31 @@ class StructuredLLMClient:
         try:
             self.calls += 1
             self.input_characters += len(prompt)
+            attempt_started = time.perf_counter()
             result = structured.invoke(prompt)
-            return schema.model_validate(result), None
+            if result is None:
+                raise EmptyStructuredOutputError(
+                    "LLM вернула пустой structured output (None). Использован deterministic fallback."
+                )
+            validated = schema.model_validate(result)
+            self._record_attempt(
+                schema=schema,
+                prompt=prompt,
+                output=_model_output_text(validated),
+                duration_seconds=time.perf_counter() - attempt_started,
+                success=True,
+            )
+            return validated, None
         except Exception as first_error:
+            self._record_attempt(
+                schema=schema,
+                prompt=prompt,
+                duration_seconds=time.perf_counter() - started,
+                success=False,
+                error=first_error,
+            )
             if _is_non_retryable(first_error):
-                message = f"Structured extraction failed: {first_error}"
+                message = f"Structured extraction failed: {_structured_error_message(first_error)}"
                 self.errors.append(message)
                 return None, message
             retry_prompt = (
@@ -100,10 +165,32 @@ class StructuredLLMClient:
             try:
                 self.calls += 1
                 self.input_characters += len(retry_prompt)
+                attempt_started = time.perf_counter()
                 result = structured.invoke(retry_prompt)
-                return schema.model_validate(result), None
+                if result is None:
+                    raise EmptyStructuredOutputError(
+                        "LLM вернула пустой structured output (None). Использован deterministic fallback."
+                    )
+                validated = schema.model_validate(result)
+                self._record_attempt(
+                    schema=schema,
+                    prompt=retry_prompt,
+                    output=_model_output_text(validated),
+                    duration_seconds=time.perf_counter() - attempt_started,
+                    success=True,
+                    is_retry=True,
+                )
+                return validated, None
             except Exception as second_error:
-                message = f"Structured extraction failed after retry: {second_error}"
+                self._record_attempt(
+                    schema=schema,
+                    prompt=retry_prompt,
+                    duration_seconds=time.perf_counter() - started,
+                    success=False,
+                    error=second_error,
+                    is_retry=True,
+                )
+                message = f"Structured extraction failed after retry: {_structured_error_message(second_error)}"
                 self.errors.append(message)
                 return None, message
         finally:
@@ -138,20 +225,42 @@ class StructuredLLMClient:
                     async with self.semaphore:
                         self.calls += 1
                         self.input_characters += len(request_prompt)
+                        attempt_started = time.perf_counter()
                         result = await asyncio.wait_for(
                             structured.ainvoke(request_prompt),
                             timeout=self.timeout_seconds,
                         )
-                    return schema.model_validate(result), None
+                    if result is None:
+                        raise EmptyStructuredOutputError(
+                            "LLM вернула пустой structured output (None). Использован deterministic fallback."
+                        )
+                    validated = schema.model_validate(result)
+                    self._record_attempt(
+                        schema=schema,
+                        prompt=request_prompt,
+                        output=_model_output_text(validated),
+                        duration_seconds=time.perf_counter() - attempt_started,
+                        success=True,
+                        is_retry=bool(attempt),
+                    )
+                    return validated, None
                 except Exception as error:
+                    self._record_attempt(
+                        schema=schema,
+                        prompt=request_prompt,
+                        duration_seconds=time.perf_counter() - started,
+                        success=False,
+                        error=error,
+                        is_retry=bool(attempt),
+                    )
                     first_error = error
                     if _is_non_retryable(error):
-                        message = f"Structured extraction failed: {error}"
+                        message = f"Structured extraction failed: {_structured_error_message(error)}"
                         self.errors.append(message)
                         return None, message
                     if attempt == 0:
                         self.retry_reasons.append(str(error)[:500])
-            message = f"Structured extraction failed after retry: {first_error}"
+            message = f"Structured extraction failed after retry: {_structured_error_message(first_error)}"
             self.errors.append(message)
             return None, message
         finally:
@@ -178,6 +287,65 @@ class StructuredLLMClient:
             f"{_ir_preview(ir)}"
         )
         return await self.aextract(ClassificationDecision, CLASSIFIER_PROMPT, payload)
+
+    def _record_attempt(
+        self,
+        *,
+        schema: type[BaseModel],
+        prompt: str,
+        output: str | None = None,
+        duration_seconds: float,
+        success: bool,
+        error: Exception | None = None,
+        is_retry: bool = False,
+    ) -> None:
+        payload_file_name = self._call_context.get("file_name") or _file_name_from_prompt(prompt)
+        payload_document_type = self._call_context.get("document_type") or _document_type_from_prompt(prompt)
+        record: dict[str, object] = {
+            "schema": schema.__name__,
+            "file_name": payload_file_name,
+            "document_type": str(payload_document_type) if payload_document_type else None,
+            "is_retry": is_retry,
+            "success": success,
+            "input_characters": len(prompt),
+            "estimated_input_tokens": _estimate_tokens(len(prompt)),
+            "duration_seconds": round(duration_seconds, 3),
+        }
+        if output is not None:
+            record["output_characters"] = len(output)
+            record["estimated_output_tokens"] = _estimate_tokens(len(output))
+        if error is not None:
+            record["error"] = _structured_error_message(error)[:500]
+        self.attempts.append(record)
+
+
+def _estimate_tokens(characters: int) -> int:
+    return max(1, round(characters / 4))
+
+
+def _file_name_from_prompt(prompt: str) -> str | None:
+    for pattern in (r'"file_name"\s*:\s*"([^"]+)"', r"file_name=([^\n]+)"):
+        match = re.search(pattern, prompt)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _document_type_from_prompt(prompt: str) -> str | None:
+    match = re.search(r'"document_type"\s*:\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    try:
+        payload = prompt.split("DOCUMENT:\n", 1)[1]
+        data = json.loads(payload)
+    except (IndexError, json.JSONDecodeError):
+        return None
+    document = data.get("document") if isinstance(data, dict) else None
+    return document.get("document_type") if isinstance(document, dict) else None
+
+
+def _model_output_text(value: BaseModel) -> str:
+    return value.model_dump_json(exclude_none=True)
 
 
 def render_ir_for_llm(

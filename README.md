@@ -41,7 +41,7 @@ DEBUG=False
 ALLOWED_HOSTS=89.23.101.85,localhost,127.0.0.1
 
 OPENAI_API_KEY=your-openai-api-key
-OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1
+OPENAI_BASE_URL=https://api.hydraai.ru/v1
 
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0

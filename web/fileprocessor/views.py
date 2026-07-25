@@ -15,6 +15,8 @@ DOCUMENT_FIELDS = (
     ("onmck", "ОНМЦК"),
     ("obrasheniye", "Обращение о проведении закупки"),
 )
+COMMERCIAL_OFFER_FIELD = "commercial_offers"
+COMMERCIAL_OFFER_LABEL = "Коммерческое предложение"
 REQUIRED_DOCUMENT_KEYS = {"plan"}
 
 celery_app = Celery("django_client")
@@ -29,6 +31,8 @@ def index(request):
     context = {
         "document_fields": DOCUMENT_FIELDS,
         "required_document_keys": REQUIRED_DOCUMENT_KEYS,
+        "commercial_offer_field": COMMERCIAL_OFFER_FIELD,
+        "commercial_offer_label": COMMERCIAL_OFFER_LABEL,
     }
     if "error" in request.GET:
         context["error"] = request.GET["error"]
@@ -51,6 +55,16 @@ def upload_and_process(request):
             documents.append({
                 "key": field_name,
                 "label": field_label,
+                "name": uploaded_file.name,
+                "content_b64": base64.b64encode(uploaded_file.read()).decode("utf-8"),
+            })
+
+        for index, uploaded_file in enumerate(request.FILES.getlist(COMMERCIAL_OFFER_FIELD), 1):
+            if not uploaded_file:
+                continue
+            documents.append({
+                "key": "commercial_offer",
+                "label": f"{COMMERCIAL_OFFER_LABEL} {index}",
                 "name": uploaded_file.name,
                 "content_b64": base64.b64encode(uploaded_file.read()).decode("utf-8"),
             })

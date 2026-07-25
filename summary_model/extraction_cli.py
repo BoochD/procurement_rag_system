@@ -8,7 +8,9 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from summary_model.classification import DocumentClassifier
+from summary_model.commercial_offer_vlm import CommercialOfferVlmOptions, extract_commercial_offer_with_vlm
 from summary_model.domain.models import DocumentType, InputDocument
+from summary_model.extraction_models import DocumentEnvelope
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction.llm_document_extractor import (
     apply_llm_document_result,
@@ -19,6 +21,7 @@ from summary_model.extraction.llm_prompts import prompt_versions
 from summary_model.extraction_pipeline import extract_package
 from summary_model.ingestion import read_docx
 from summary_model.tables import export_table_debug, extract_tables
+from summary_model.vlm_fallback import VlmFallbackOptions, VlmFallbackRepairer
 
 
 def _load_manifest(path: Path | None) -> dict[str, dict]:
@@ -37,11 +40,16 @@ def _load_manifest(path: Path | None) -> dict[str, dict]:
 
 def _inputs(input_dir: Path, manifest: dict[str, dict]) -> list[InputDocument]:
     result = []
-    for path in sorted(input_dir.glob("*.docx")):
-        if path.name.startswith("~$"):
+    for path in sorted(input_dir.glob("*")):
+        if path.name.startswith("~$") or path.is_dir():
+            continue
+        ext = path.suffix.lower()
+        if ext not in (".docx", ".pdf", ".png", ".jpg", ".jpeg", ".webp"):
             continue
         entry = manifest.get(path.name, {})
         raw_hint = entry.get("type_hint")
+        if not raw_hint and ext in (".pdf", ".png", ".jpg", ".jpeg", ".webp"):
+            raw_hint = "commercial_offer"
         result.append(
             InputDocument(
                 path=path,
@@ -77,6 +85,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run paid/live structured LLM extraction after deterministic parsing.",
     )
+    parser.add_argument(
+        "--with-vlm",
+        action="store_true",
+        help="Run paid/live VLM repair for complex tables and VLM parsing for PDF/media commercial offers.",
+    )
+    parser.add_argument(
+        "--vlm-max-tables-per-document",
+        type=int,
+        default=4,
+        help="Maximum important complex tables sent to VLM per document.",
+    )
+    parser.add_argument(
+        "--vlm-max-commercial-offer-pages",
+        type=int,
+        default=8,
+        help="Maximum pages sent to VLM per PDF commercial offer.",
+    )
     return parser
 
 
@@ -85,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = _load_manifest(args.manifest)
     documents = _inputs(args.input_dir, manifest)
     if not documents:
-        raise SystemExit(f"No DOCX files found in {args.input_dir}")
+        raise SystemExit(f"No supported files found in {args.input_dir}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     documents_dir = args.output_dir / "documents"
@@ -100,13 +125,46 @@ def main(argv: list[str] | None = None) -> int:
         llm_documents_dir.mkdir(exist_ok=True)
     debug_dir.mkdir(exist_ok=True)
 
-    result = extract_package(documents)
+    vlm_repairer = VlmFallbackRepairer(
+        VlmFallbackOptions(
+            enabled=args.with_vlm,
+            output_dir=args.output_dir / "vlm_tables",
+            max_tables_per_document=max(1, args.vlm_max_tables_per_document),
+        )
+    )
+
+    docx_documents = [doc for doc in documents if doc.path.suffix.lower() == ".docx"]
+    media_commercial_offers = [doc for doc in documents if doc.path.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg", ".webp")]
+
+    result = extract_package(
+        docx_documents,
+        table_repairer=vlm_repairer.repair_document_tables if args.with_vlm else None,
+    )
+
+    for doc in media_commercial_offers:
+        vlm_res = extract_commercial_offer_with_vlm(
+            doc.path,
+            options=CommercialOfferVlmOptions(
+                enabled=args.with_vlm,
+                max_pages=args.vlm_max_commercial_offer_pages,
+            ),
+        )
+        result.commercial_offers.append(vlm_res.offer)
+        result.files.append(
+            DocumentEnvelope(
+                file_name=doc.path.name,
+                file_path=str(doc.path),
+                document_type="commercial_offer",
+                confidence=0.75 if not vlm_res.offer.parser_warnings else 0.35,
+                parser_warnings=vlm_res.offer.parser_warnings,
+            )
+        )
     _write_json(args.output_dir / "extraction_result.json", result)
     classifier = DocumentClassifier()
     llm_client = StructuredLLMClient() if args.with_llm else None
     llm_errors: list[str] = []
 
-    for document in documents:
+    for document in docx_documents:
         ir = read_docx(document.path)
         decision = classifier.classify(ir, document.type_hint)
         envelope = next(
@@ -114,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
             if item.file_name == ir.file_name
         )
         document_tables = extract_tables(ir, decision.document_type)
+        if args.with_vlm:
+            document_tables = vlm_repairer.repair_document_tables(
+                ir,
+                decision.document_type,
+                document_tables,
+            )
         deterministic_schema = _schema_for_document_type(result, decision.document_type)
         llm_payload = build_document_llm_payload(
             ir=ir,
@@ -138,12 +202,16 @@ def main(argv: list[str] | None = None) -> int:
             llm_payload,
         )
         if llm_client is not None:
-            llm_schema, error = extract_document_schema_with_llm(
-                payload=llm_payload,
-                document_type=decision.document_type,
-                deterministic_schema=deterministic_schema,
-                llm_client=llm_client,
-            )
+            with llm_client.call_context(
+                file_name=ir.file_name,
+                document_type=decision.document_type.value,
+            ):
+                llm_schema, error = extract_document_schema_with_llm(
+                    payload=llm_payload,
+                    document_type=decision.document_type,
+                    deterministic_schema=deterministic_schema,
+                    llm_client=llm_client,
+                )
             if error:
                 llm_errors.append(f"{ir.file_name}: {error}")
             apply_llm_document_result(result, decision.document_type, llm_schema)
@@ -172,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
                 "debug/tables/<file>/table_N_logical.json",
                 "debug/tables/<file>/table_N_compact.md",
             ],
+            "vlm": vlm_repairer.metrics if args.with_vlm else {"enabled": False},
+            "vlm_warnings": vlm_repairer.warnings if args.with_vlm else [],
         }
     if args.with_llm:
         run_payload["artifacts"].extend(
@@ -188,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         }
     else:
         run_payload["llm"] = {"enabled": False}
+    if args.with_vlm:
+        run_payload["artifacts"].append("vlm_tables/<file>/table_N/*")
     _write_json(args.output_dir / "run.json", run_payload)
     return 0
 

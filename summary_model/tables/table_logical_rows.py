@@ -28,6 +28,24 @@ def normalize_header_name(path: list[str]) -> str | None:
     if not text:
         return None
     rules = (
+        ("stage_number", ("№", "этап")),
+        ("stage_number", ("номер", "этап")),
+        ("stage_result", ("результат", "этап")),
+        ("stage_start", ("дата начала", "этап")),
+        ("stage_start", ("начало", "этап")),
+        ("stage_service_term", ("срок оказания", "этап")),
+        ("stage_service_term", ("срок выполнения", "этап")),
+        ("stage_service_term", ("срок поставки", "этап")),
+        ("stage_service_term", ("период оказания", "этап")),
+        ("stage_service_term", ("период выполнения", "этап")),
+        ("stage_service_term", ("период поставки", "этап")),
+        ("stage_service_term", ("период исполнения", "этап")),
+        ("stage_service_term", ("срок предоставления", "этап")),
+        ("stage_end", ("дата окончания", "этап")),
+        ("stage_end", ("окончание", "этап")),
+        ("stage_price", ("цена этапа",)),
+        ("stage_price", ("стоимость этапа",)),
+        ("stage_price", ("сумма этапа",)),
         ("row_number", ("№", "номер", "п/п")),
         ("characteristic_unit", ("единица измерения характерист",)),
         ("characteristic_value", ("значение",)),
@@ -144,8 +162,12 @@ def build_logical_rows(
         return _ooz_rows(table, paths)
     if table_type == "nmck_calculation_table":
         return _nmck_rows(table, paths)
+    if table_type == "nmck_staged_calculation_table":
+        return _nmck_staged_rows(table, paths)
     if table_type == "contract_specification_table":
         return _contract_specification_rows(table, paths)
+    if table_type == "contract_stages_table":
+        return _stage_rows(table, paths)
     return _generic_rows(table, paths)
 
 
@@ -379,11 +401,6 @@ def _item_key(
 
 def _nmck_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     mapping = _header_map(paths)
-    name_index = mapping.get("name")
-    quantity_index = mapping.get("quantity")
-    unit_index = mapping.get("unit")
-    selected_index = mapping.get("selected_min_unit_price")
-    total_index = _first_index(_first_path_index(paths, "цена контракта"), mapping.get("row_total"))
     row_number_index = mapping.get("row_number") if mapping.get("row_number") is not None else 0
     logical: list[LogicalTableRow] = []
     start = max(table.header_rows, default=-1) + 1
@@ -391,32 +408,18 @@ def _nmck_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]
         row = _row_dense(table, row_index)
         if not _raw_text(row):
             continue
-        name = _value(row, name_index)
         row_text = _raw_text(row)
+        name = _value(row, mapping.get("name"))
         if _is_total_label(name) or _is_total_label(row_text):
             continue
         if not name and not (OKPD2_RE.search(row_text) or KTRU_RE.search(row_text)):
             continue
-        cells_by_header = {
-            "row_number": _value(row, row_number_index),
-            "name": name,
-            "unit": _value(row, unit_index),
-            "quantity": _value(row, quantity_index),
-            "selected_min_unit_price": _value(row, selected_index),
-            "row_total_declared": _value(row, total_index),
-        }
-        for path in paths:
-            joined = " ".join(path.parts).casefold()
-            supplier = _supplier_ref(joined)
-            if supplier is None or path.col_index >= len(row):
-                continue
-            value = clean_text(row[path.col_index])
-            if not value:
-                continue
-            if _is_unit_price_header(joined):
-                cells_by_header[f"{supplier}.unit_price"] = value
-            elif _is_supplier_total_header(joined):
-                cells_by_header[f"{supplier}.row_total"] = value
+        cells_by_header = _nmck_cells_by_header(
+            row,
+            paths,
+            mapping,
+            _value(row, row_number_index),
+        )
         logical.append(
             LogicalTableRow(
                 table_id=table.table_id,
@@ -431,12 +434,146 @@ def _nmck_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]
     return logical
 
 
+def _nmck_cells_by_header(
+    row: list[str],
+    paths: list[HeaderPath],
+    mapping: dict[str, int],
+    row_number: str | None,
+) -> dict[str, str | None]:
+    name_index = mapping.get("name")
+    quantity_index = mapping.get("quantity")
+    unit_index = mapping.get("unit")
+    selected_index = mapping.get("selected_min_unit_price")
+    total_index = _first_index(_first_path_index(paths, "цена контракта"), mapping.get("row_total"))
+    cells_by_header = {
+        "row_number": row_number,
+        "name": _value(row, name_index),
+        "unit": _value(row, unit_index),
+        "quantity": _value(row, quantity_index),
+        "selected_min_unit_price": _value(row, selected_index),
+        "row_total_declared": _value(row, total_index),
+    }
+    for path in paths:
+        joined = " ".join(path.parts).casefold()
+        supplier = _supplier_ref(joined)
+        if supplier is None or path.col_index >= len(row):
+            continue
+        value = clean_text(row[path.col_index])
+        if not value:
+            continue
+        if _is_unit_price_header(joined):
+            cells_by_header[f"{supplier}.unit_price"] = value
+        elif _is_supplier_total_header(joined):
+            cells_by_header[f"{supplier}.row_total"] = value
+    if not any(key.startswith("supplier_") for key in cells_by_header):
+        supplier_start = max(
+            index
+            for index in (name_index, quantity_index, unit_index)
+            if index is not None
+        ) + 1
+        supplier_end = selected_index if selected_index is not None else total_index
+        if supplier_end is not None and supplier_end > supplier_start:
+            for pair_index, column_index in enumerate(range(supplier_start, supplier_end, 2), start=1):
+                unit_price = _value(row, column_index)
+                row_total = _value(row, column_index + 1)
+                if unit_price:
+                    cells_by_header[f"supplier_{pair_index}.unit_price"] = unit_price
+                if row_total:
+                    cells_by_header[f"supplier_{pair_index}.row_total"] = row_total
+    return cells_by_header
+
+
+def _nmck_staged_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
+    mapping = _header_map(paths)
+    row_number_index = mapping.get("row_number") if mapping.get("row_number") is not None else 0
+    logical: list[LogicalTableRow] = []
+    start = max(table.header_rows, default=-1) + 1
+    for row_index in range(start, table.row_count):
+        row = _row_dense(table, row_index)
+        row_text = _raw_text(row)
+        if not row_text:
+            continue
+        lowered = row_text.casefold()
+        if _looks_like_stage_header_row(lowered):
+            continue
+        name = _value(row, mapping.get("name"))
+        row_number = _value(row, row_number_index)
+        if _is_total_label(name) or _is_total_label(row_text):
+            logical.append(
+                LogicalTableRow(
+                    table_id=table.table_id,
+                    row_index=row_index,
+                    row_type="total",
+                    cells_by_col=_cells_by_col(row),
+                    cells_by_header={"total": row_text},
+                    raw_text=row_text,
+                    confidence=0.85,
+                )
+            )
+            continue
+        if not row_number and not name:
+            continue
+        cells_by_header = _nmck_cells_by_header(row, paths, mapping, row_number)
+        cleaned_number = clean_text(row_number)
+        is_child_item = bool(re.fullmatch(r"\d+\.\d+\.?", cleaned_number))
+        is_stage = bool(
+            re.fullmatch(r"\d+\.?", cleaned_number)
+            and ("этап" in lowered or re.search(r"\(\s*\d+\s*этап", lowered))
+        )
+        if not is_stage and not is_child_item:
+            continue
+        logical.append(
+            LogicalTableRow(
+                table_id=table.table_id,
+                row_index=row_index,
+                row_type="item" if is_child_item else "section",
+                cells_by_col=_cells_by_col(row),
+                cells_by_header=cells_by_header,
+                raw_text=row_text,
+                confidence=0.84 if is_stage else 0.82,
+            )
+        )
+    return logical
+
+
 def _first_path_index(paths: list[HeaderPath], marker: str) -> int | None:
     marker = marker.casefold()
     for path in paths:
         if marker in " ".join(path.parts).casefold():
             return path.col_index
     return None
+
+
+def _first_stage_path_index(paths: list[HeaderPath], *markers: str) -> int | None:
+    marker_values = tuple(marker.casefold() for marker in markers)
+    for path in paths:
+        text = " ".join(path.parts).casefold()
+        if not text:
+            continue
+        if any(marker in text for marker in marker_values):
+            return path.col_index
+    return None
+
+
+def _last_stage_path_index(paths: list[HeaderPath], *markers: str) -> int | None:
+    marker_values = tuple(marker.casefold() for marker in markers)
+    result: int | None = None
+    for path in paths:
+        text = " ".join(path.parts).casefold()
+        if text and any(marker in text for marker in marker_values):
+            result = path.col_index
+    return result
+
+
+def _stage_number_index(paths: list[HeaderPath], mapping: dict[str, int]) -> int | None:
+    for path in paths:
+        text = " ".join(path.parts).casefold()
+        normalized = clean_text(text)
+        if normalized in {"этап", "№ этапа", "номер этапа", "n этапа", "№", "номер"}:
+            return path.col_index
+        if re.search(r"(?:^|\s)(?:№|n|номер)\s*этап", text):
+            return path.col_index
+    return _first_index(mapping.get("stage_number"), mapping.get("row_number"), 0)
 
 
 def _is_total_label(text: str | None) -> bool:
@@ -556,6 +693,160 @@ def _contract_specification_rows(table: TableIR, paths: list[HeaderPath]) -> lis
             )
         )
     return logical
+
+
+def _stage_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
+    mapping = _header_map(paths)
+    stage_number_index = _stage_number_index(paths, mapping)
+    name_index = _first_index(
+        _first_stage_path_index(paths, "наименование этапа", "название этапа", "этап работ"),
+        mapping.get("name"),
+    )
+    result_index = _first_index(
+        mapping.get("stage_result"),
+        _first_stage_path_index(paths, "результат выполнения", "результат этапа"),
+    )
+    start_index = _first_index(
+        mapping.get("stage_start"),
+        _first_stage_path_index(paths, "дата начала", "начало исполнения", "начало этапа"),
+    )
+    service_term_index = _first_index(
+        _last_stage_path_index(
+            paths,
+            "срок оказания",
+            "срок выполнения",
+            "срок поставки",
+            "период оказания",
+            "период выполнения",
+            "период поставки",
+            "период исполнения",
+            "срок предоставления",
+            "срок этапа",
+        ),
+        mapping.get("stage_service_term"),
+    )
+    end_index = _first_index(
+        mapping.get("stage_end"),
+        _first_stage_path_index(paths, "дата окончания", "окончание исполнения", "окончание этапа"),
+    )
+    price_index = _first_index(
+        mapping.get("stage_price"),
+        mapping.get("row_total"),
+        _first_stage_path_index(paths, "цена этапа", "стоимость этапа", "сумма этапа"),
+    )
+    quantity_index = mapping.get("quantity")
+
+    logical: list[LogicalTableRow] = []
+    start = max(table.header_rows, default=-1) + 1
+    inferred_stage_counter = 0
+    for row_index in range(start, table.row_count):
+        row = _row_dense(table, row_index)
+        row_text = _raw_text(row)
+        if not row_text:
+            continue
+        if _is_technical_numbering_row(row):
+            continue
+        lowered = row_text.casefold()
+        if _looks_like_stage_header_row(lowered):
+            continue
+        if lowered.startswith("итого") or lowered.startswith("всего"):
+            logical.append(
+                LogicalTableRow(
+                    table_id=table.table_id,
+                    row_index=row_index,
+                    row_type="total",
+                    cells_by_col=_cells_by_col(row),
+                    cells_by_header={"total": row_text},
+                    raw_text=row_text,
+                    confidence=0.85,
+                )
+            )
+            continue
+
+        stage_number = _value(row, stage_number_index)
+        stage_name = _value(row, name_index)
+        service_term = _value(row, service_term_index)
+        start_text = _value(row, start_index)
+        end_text = _value(row, end_index)
+        price = _value(row, price_index)
+        quantity = _value(row, quantity_index)
+        result = _value(row, result_index)
+        if (
+            stage_number
+            and re.fullmatch(r"\d+\.\d+\.?", clean_text(stage_number))
+            and "этап" not in lowered
+        ):
+            logical.append(
+                LogicalTableRow(
+                    table_id=table.table_id,
+                    row_index=row_index,
+                    row_type="unknown",
+                    cells_by_col=_cells_by_col(row),
+                    cells_by_header={},
+                    raw_text=row_text,
+                    confidence=0.4,
+                    warnings=["Decimal row number treated as nested item, not execution stage."],
+                )
+            )
+            continue
+        has_stage_marker = bool(
+            stage_number
+            and re.search(r"\d+", stage_number)
+            or "этап" in lowered
+            or service_term
+            or price
+        )
+        if not has_stage_marker:
+            logical.append(
+                LogicalTableRow(
+                    table_id=table.table_id,
+                    row_index=row_index,
+                    row_type="unknown",
+                    cells_by_col=_cells_by_col(row),
+                    cells_by_header={},
+                    raw_text=row_text,
+                    confidence=0.35,
+                    warnings=["Stage table row did not contain reliable stage markers."],
+                )
+            )
+            continue
+        warnings: list[str] = []
+        if not clean_text(stage_number):
+            inferred_stage_counter += 1
+            stage_number = str(inferred_stage_counter)
+            warnings.append(
+                "Stage number inferred from row order because the stage-number cell is empty."
+            )
+        logical.append(
+            LogicalTableRow(
+                table_id=table.table_id,
+                row_index=row_index,
+                row_type="item",
+                cells_by_col=_cells_by_col(row),
+                cells_by_header={
+                    "stage_number": stage_number,
+                    "stage_name": stage_name,
+                    "result": result,
+                    "start_text": start_text,
+                    "service_term_text": service_term,
+                    "execution_end_text": end_text,
+                    "price": price,
+                    "quantity": quantity,
+                },
+                raw_text=row_text,
+                confidence=0.82,
+                warnings=warnings,
+            )
+        )
+    return logical
+
+
+def _looks_like_stage_header_row(text: str) -> bool:
+    has_stage_column = any(marker in text for marker in ("№", "номер", "этап"))
+    return has_stage_column and "наименование" in text and any(
+        marker in text
+        for marker in ("кол-во", "количество", "срок", "период", "цена", "стоимость", "результат")
+    )
 
 
 def _is_technical_numbering_row(row: list[str]) -> bool:

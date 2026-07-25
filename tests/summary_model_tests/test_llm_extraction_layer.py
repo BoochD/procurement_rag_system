@@ -1,5 +1,6 @@
 import json
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,9 @@ from summary_model.extraction_pipeline import extract_package
 from summary_model.extraction_models import (
     ContractDraftSchema,
     ExplanatoryNoteSchema,
+    MoneyValue,
     NmckJustificationSchema,
+    ProcurementStage,
     ProcurementPackageExtraction,
     PurchaseDescriptionSchema,
     PurchaseItem,
@@ -69,6 +72,18 @@ class FakeStructuredModel:
         class Runner:
             def invoke(self, prompt):
                 return schema(purchase_subject="Поставка картриджей")
+
+        return Runner()
+
+
+class FakeNoneStructuredModel:
+    model_name = "fake-none-model"
+    max_tokens = 123
+
+    def with_structured_output(self, schema, method):
+        class Runner:
+            def invoke(self, prompt):
+                return None
 
         return Runner()
 
@@ -193,6 +208,53 @@ def test_llm_result_restores_missing_item_fields_when_item_count_matches():
     assert result.items[0].okpd2_code == "28.13.28.190"
     assert result.items[0].unit == "шт"
     assert any("restored" in warning for warning in result.parser_warnings)
+
+
+def test_empty_llm_response_does_not_retry_full_prompt():
+    client = StructuredLLMClient(model=FakeNoneStructuredModel())
+
+    result, error = client.extract(
+        ScheduleApplicationSchema,
+        "Extract schedule.",
+        "large payload",
+    )
+
+    assert result is None
+    assert error is not None
+    assert client.calls == 1
+    assert client.retries == 0
+
+
+def test_llm_result_restores_stage_fields_and_removes_empty_money():
+    deterministic = ContractDraftSchema(
+        stages=[
+            ProcurementStage(
+                stage_number="1",
+                service_term_text="С даты заключения контракта по 13.07.2026",
+                price=MoneyValue(raw="40 000,00", amount=Decimal("40000.00")),
+            )
+        ]
+    )
+
+    class ContractLLMClient:
+        def extract(self, schema, system_prompt, payload):
+            return schema(
+                price=MoneyValue(),
+                stages=[ProcurementStage(stage_name="Подготовка")],
+            ), None
+
+    result, error = extract_document_schema_with_llm(
+        payload={"known_extracted": deterministic.model_dump(mode="json")},
+        document_type=DocumentType.CONTRACT,
+        deterministic_schema=deterministic,
+        llm_client=ContractLLMClient(),
+    )
+
+    assert error is None
+    assert result.price is None
+    assert result.stages[0].stage_number == "1"
+    assert result.stages[0].service_term_text == "С даты заключения контракта по 13.07.2026"
+    assert result.stages[0].price.amount == Decimal("40000.00")
 
 
 def test_llm_error_returns_deterministic_schema_with_warning(tmp_path):

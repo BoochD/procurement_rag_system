@@ -29,10 +29,19 @@ INTERNAL_CHECK_ORDER = [
     "strict.nmck.amounts",
     "strict.onmck.arithmetic",
     "strict.onmck.min_price",
+    "strict.onmck.stage_prices",
     "strict.codes.okpd2",
     "strict.codes.ktru",
+    "strict.plan.subject",
+    "strict.plan.delivery_term",
+    "strict.plan.delivery_place",
+    "strict.plan.contract_execution_term",
+    "strict.plan.stages",
+    "strict.plan.warranty",
     "strict.funding_source",
     "strict.securities",
+    "strict.contract.penalties",
+    "strict.smp_sonko_subcontract",
     "strict.contract.attachments",
 ]
 
@@ -81,11 +90,15 @@ FIELD_LABELS = {
     "attachments": "приложения",
     "codes": "коды",
     "contract_security": "обеспечение исполнения контракта",
+    "contract_price": "цена контракта",
     "commercial_offers_found_count": "количество приложенных КП",
     "commercial_offers_required_count": "требуемое количество КП",
     "delivery_place": "место поставки",
+    "delivery_place_mentions": "места поставки",
     "delivery_term": "срок поставки",
     "delivery_term_text": "срок поставки",
+    "contract_execution_term": "срок исполнения контракта",
+    "contract_execution_term_text": "срок исполнения контракта",
     "document_type": "тип документа",
     "extra": "лишнее",
     "extra_characteristics": "дополнительные характеристики",
@@ -103,15 +116,32 @@ FIELD_LABELS = {
     "okpd2_code": "код ОКПД2",
     "present": "наличие",
     "procurement_method": "способ закупки",
+    "procurement_method_raw": "способ закупки",
     "purchase_subject": "предмет закупки",
     "raw_fields": "поля заявки",
     "referenced": "указанные приложения",
     "required": "требуется",
     "schedule_contract_security": "обеспечение исполнения контракта в заявке",
     "schedule_warranty_security": "обеспечение гарантийных обязательств в заявке",
+    "penalty_clauses": "штрафы",
+    "peni_clauses": "пени",
+    "expected_supplier_value_percent": "ожидаемый штраф поставщика",
+    "expected_fixed_fine": "ожидаемый фиксированный штраф",
+    "expected_smp_sonko_percent": "ожидаемый штраф за непривлечение СМП/СОНКО",
+    "clauses": "найденные условия",
+    "manual_review": "требует проверки",
+    "failures": "расхождения",
     "single_supplier_basis": "основание единственного поставщика",
+    "single_supplier_basis_text": "основание единственного поставщика",
     "smp_preference": "преференции СМП/СОНКО",
+    "subcontract_smp_sonko_required": "обязанность привлечения СМП/СОНКО",
+    "subcontract_smp_sonko_required_raw": "обязанность привлечения СМП/СОНКО",
+    "subcontract_smp_sonko_percent": "процент привлечения СМП/СОНКО",
+    "subcontract_smp_sonko_percent_raw": "процент привлечения СМП/СОНКО",
+    "schedule_percent": "процент в заявке",
+    "contract_percent": "процент в проекте контракта",
     "stage_execution_terms": "этапы исполнения",
+    "stages": "этапы исполнения",
     "summary_lines": "краткое описание",
     "uploaded": "загружено",
     "warranty_security": "обеспечение гарантийных обязательств",
@@ -256,10 +286,15 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
 
 def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[str]:
     lines = ["6) Сравнение характеристик из ООЗ с КТРУ на сайте:"]
-    for check_id in ("manual.ktru.characteristics", "manual.ktru.additional"):
-        result = by_id.get(check_id)
-        if result is not None:
-            lines.extend(_render_result(result))
+    characteristics = by_id.get("manual.ktru.characteristics")
+    if characteristics is not None:
+        rendered = _render_ktru_characteristic_rows(characteristics)
+        lines.extend(rendered if rendered else _render_result(characteristics))
+    additional = by_id.get("manual.ktru.additional")
+    if additional is not None:
+        lines.append("")
+        rendered = _render_ktru_additional_rows(additional)
+        lines.extend(rendered if rendered else _render_result(additional))
     return lines
 
 
@@ -400,6 +435,71 @@ def _field_lines(details: dict[str, object], keys: list[str]) -> list[str]:
         for key in keys
         if details.get(key)
     ]
+
+
+def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
+    details = result.details or {}
+    rows = details.get("characteristic_rows")
+    if not isinstance(rows, list) or not rows:
+        return []
+    lines = [f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. {_human_text(result.report_text)}"]
+    summary_lines = details.get("summary_lines")
+    if isinstance(summary_lines, list):
+        for item in summary_lines:
+            if item:
+                lines.append(f"  - {_human_text(str(item))}")
+    lines.append("")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or ""))
+        ktru_code = row.get("ktru_code") or "КТРУ не найден"
+        item_name = row.get("item_name") or "позиция"
+        char_name = row.get("characteristic_name") or "характеристика"
+        ooz_value = row.get("ooz_value") or "не найдено"
+        ooz_unit = row.get("ooz_unit") or "не указана"
+        allowed = row.get("ktru_allowed_values") or []
+        legal_unit = row.get("ktru_unit") or "не указана"
+        message = row.get("message") or ""
+        allowed_text = ", ".join(str(value) for value in allowed) if isinstance(allowed, list) else str(allowed)
+        lines.append(f"- <b>{item_name}</b>; КТРУ {ktru_code}; характеристика: {char_name} — {status}")
+        lines.append(f"  Значение в ООЗ: {ooz_value}; единица в ООЗ: {ooz_unit}")
+        if allowed_text:
+            lines.append(f"  Допустимые значения КТРУ: {allowed_text}")
+        lines.append(f"  Единица КТРУ: {legal_unit}")
+        if message and message != "ОК":
+            lines.append(f"  {_human_text(str(message))}")
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
+    details = result.details or {}
+    rows = details.get("additional_rows")
+    if not isinstance(rows, list) or not rows:
+        return []
+    lines = [f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. {_human_text(result.report_text)}"]
+    justification = details.get("justification_text")
+    lines.append(
+        f"  - Обоснование включения дополнительных характеристик: "
+        f"{justification if justification else 'не найдено'}"
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or ""))
+        lines.append(
+            f"- {row.get('item_name') or 'позиция'}; КТРУ {row.get('ktru_code') or 'не найден'}; "
+            f"ОКПД2 {row.get('okpd2_code') or 'не найден'}; "
+            f"доп. характеристика: {row.get('characteristic_name') or 'характеристика'} — {status}"
+        )
+        if row.get("value"):
+            lines.append(f"  Значение: {row['value']}")
+        if row.get("rule_reason"):
+            lines.append(f"  {row['rule_reason']}")
+    return lines
 
 
 def _security_lines(details: dict[str, object]) -> list[str]:

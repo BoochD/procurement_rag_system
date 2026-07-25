@@ -29,26 +29,53 @@
                         <form method="post" action="{% url 'fileprocessor:upload_and_process' %}" enctype="multipart/form-data">
                             {% csrf_token %}
 
-                            {% for field_name, field_label in document_fields %}
-                            <div class="mb-4">
-                                <label for="{{ field_name }}" class="form-label">
-                                    Загрузите "{{ field_label }}"
-                                    {% if field_name in required_document_keys %}
-                                    <span class="text-danger">*</span>
-                                    {% else %}
-                                    <span class="text-muted">(необязательно)</span>
-                                    {% endif %}
-                                </label>
-                                <input
-                                    type="file"
-                                    class="form-control"
-                                    id="{{ field_name }}"
-                                    name="{{ field_name }}"
-                                    {% if field_name in required_document_keys %}required{% endif %}
-                                >
-                                <div class="form-text">Форматы: .txt, .docx, .pdf</div>
+                            <div class="row g-4">
+                                <div class="col-lg-7">
+                                    {% for field_name, field_label in document_fields %}
+                                    <div class="mb-4">
+                                        <label for="{{ field_name }}" class="form-label">
+                                            Загрузите "{{ field_label }}"
+                                            {% if field_name in required_document_keys %}
+                                            <span class="text-danger">*</span>
+                                            {% else %}
+                                            <span class="text-muted">(необязательно)</span>
+                                            {% endif %}
+                                        </label>
+                                        <input
+                                            type="file"
+                                            class="form-control"
+                                            id="{{ field_name }}"
+                                            name="{{ field_name }}"
+                                            {% if field_name in required_document_keys %}required{% endif %}
+                                        >
+                                        <div class="form-text">Форматы: .txt, .docx, .pdf</div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+
+                                <div class="col-lg-5">
+                                    <div class="border rounded p-3 h-100 bg-light">
+                                        <label class="form-label mb-2">
+                                            Коммерческие предложения
+                                            <span class="text-muted">(необязательно)</span>
+                                        </label>
+                                        <div class="form-text mb-3">
+                                            Можно загрузить любое количество КП. Сейчас система фиксирует их наличие; содержательная OCR-проверка КП будет отдельным этапом.
+                                        </div>
+                                        <div id="commercialOfferInputs"></div>
+                                        <div id="commercialOfferList" class="small mb-3 text-muted">
+                                            КП не загружены
+                                        </div>
+                                        <button
+                                            type="button"
+                                            class="btn btn-outline-primary w-100"
+                                            id="addCommercialOffer"
+                                        >
+                                            Загрузить ещё КП
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
-                            {% endfor %}
 
                             <div class="d-grid">
                                 <button type="submit" class="btn btn-primary btn-lg">
@@ -63,5 +90,46 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        (function () {
+            const fieldName = "{{ commercial_offer_field }}";
+            const addButton = document.getElementById("addCommercialOffer");
+            const inputs = document.getElementById("commercialOfferInputs");
+            const list = document.getElementById("commercialOfferList");
+            let counter = 0;
+
+            function refreshList() {
+                const names = [];
+                inputs.querySelectorAll("input[type='file']").forEach((input) => {
+                    Array.from(input.files || []).forEach((file) => names.push(file.name));
+                });
+                if (!names.length) {
+                    list.className = "small mb-3 text-muted";
+                    list.textContent = "КП не загружены";
+                    return;
+                }
+                list.className = "small mb-3";
+                list.replaceChildren();
+                names.forEach((name) => {
+                    const row = document.createElement("div");
+                    row.className = "py-1 border-bottom";
+                    row.textContent = name;
+                    list.appendChild(row);
+                });
+            }
+
+            addButton.addEventListener("click", function () {
+                counter += 1;
+                const input = document.createElement("input");
+                input.type = "file";
+                input.name = fieldName;
+                input.id = `${fieldName}_${counter}`;
+                input.className = "d-none";
+                input.addEventListener("change", refreshList);
+                inputs.appendChild(input);
+                input.click();
+            });
+        })();
+    </script>
 </body>
 </html>

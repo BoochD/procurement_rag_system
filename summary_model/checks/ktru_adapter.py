@@ -78,6 +78,8 @@ def run_ktru_characteristic_checks(
     extra_characteristics: list[str] = []
     forbidden_extra: list[str] = []
     extra_reasons: list[str] = []
+    characteristic_rows: list[dict[str, Any]] = []
+    additional_rows: list[dict[str, Any]] = []
     checked_characteristics = 0
 
     for item in items:
@@ -111,21 +113,71 @@ def run_ktru_characteristic_checks(
             if legal_item is None:
                 label = _char_label(item, characteristic.name, characteristic.value)
                 _append_unique(extra_characteristics, label)
+                additional_rows.append(
+                    {
+                        "ktru_code": ktru_code,
+                        "okpd2_code": item.okpd2_code,
+                        "item_name": item.name,
+                        "characteristic_name": characteristic.name,
+                        "value": characteristic.value,
+                        "unit": characteristic.unit,
+                        "status": (
+                            "failed"
+                            if extra_allowed["can_add_extra_characteristics"] is False
+                            else "manual_review"
+                            if extra_allowed["can_add_extra_characteristics"] is None
+                            else "passed"
+                        ),
+                        "rule_reason": extra_allowed["reason"],
+                    }
+                )
                 if extra_allowed["can_add_extra_characteristics"] is False:
                     _append_unique(forbidden_extra, label)
                 continue
 
             checked_characteristics += 1
-            legal_key, legal_name, legal_values, _ = legal_item
+            legal_key, legal_name, legal_values, _, legal_unit = legal_item
             present_required_names.add(legal_key)
             values = _split_value(characteristic.value)
             bad_values = [value for value in values if not _is_value_allowed(value, legal_values)]
+            unit_status = _unit_status(characteristic.unit, legal_unit)
+            row_status = "passed"
+            if bad_values or unit_status == "failed":
+                row_status = "failed"
+            characteristic_rows.append(
+                {
+                    "ktru_code": ktru_code,
+                    "item_name": item.name,
+                    "characteristic_name": legal_name,
+                    "ooz_value": characteristic.value,
+                    "ooz_unit": characteristic.unit,
+                    "ktru_allowed_values": legal_values,
+                    "ktru_unit": legal_unit,
+                    "required": legal_key in required_names,
+                    "status": row_status,
+                    "message": _characteristic_row_message(bad_values, characteristic.unit, legal_unit),
+                }
+            )
             if bad_values:
                 invalid_values.append(f"{ktru_code} / {legal_name}: {', '.join(bad_values)}")
 
         for legal_key, legal_name in required_names.items():
             if legal_key not in present_required_names:
                 missing_required.append(f"{ktru_code} / {legal_name}")
+                characteristic_rows.append(
+                    {
+                        "ktru_code": ktru_code,
+                        "item_name": item.name,
+                        "characteristic_name": legal_name,
+                        "ooz_value": None,
+                        "ooz_unit": None,
+                        "ktru_allowed_values": [],
+                        "ktru_unit": None,
+                        "required": True,
+                        "status": "failed",
+                        "message": "обязательная характеристика не найдена в ООЗ",
+                    }
+                )
 
     characteristic_status = "passed"
     characteristic_message = "Характеристики ООЗ соответствуют значениям КТРУ."
@@ -138,6 +190,11 @@ def run_ktru_characteristic_checks(
 
     additional_status = "passed"
     additional_message = "Дополнительные характеристики КТРУ допустимы или не обнаружены."
+    justification_text = (
+        package.purchase_description.additional_characteristics_justification_text
+        if package.purchase_description
+        else None
+    )
     if forbidden_extra:
         additional_status = "failed"
         additional_message = "Найдены дополнительные характеристики, которые нельзя добавлять по текущему правилу."
@@ -147,6 +204,9 @@ def run_ktru_characteristic_checks(
     elif extra_characteristics and any("не удалось" in reason.casefold() for reason in extra_reasons):
         additional_status = "manual_review"
         additional_message = "Дополнительные характеристики найдены, но правило допустимости определено не полностью."
+    elif extra_characteristics and not justification_text:
+        additional_status = "warning"
+        additional_message = "Дополнительные характеристики допустимы, но обоснование включения не найдено."
 
     return [
         _result(
@@ -157,6 +217,7 @@ def run_ktru_characteristic_checks(
             {
                 "ktru_cards": _ktru_card_summaries(item_names_by_ktru, common_cache, unavailable),
                 "checked_characteristics": checked_characteristics,
+                "characteristic_rows": characteristic_rows,
                 "invalid_values": invalid_values,
                 "missing_required": missing_required,
                 "unavailable_ktru": unavailable,
@@ -178,10 +239,19 @@ def run_ktru_characteristic_checks(
             additional_message,
             {
                 "extra_characteristics": extra_characteristics,
+                "additional_rows": additional_rows,
                 "forbidden_extra": forbidden_extra,
                 "reasons": extra_reasons,
+                "justification_text": justification_text,
                 "summary_lines": [
                     f"дополнительных характеристик: {len(extra_characteristics)}",
+                    *(
+                        ["обоснование дополнительных характеристик: найдено"]
+                        if justification_text
+                        else ["обоснование дополнительных характеристик: не найдено"]
+                        if extra_characteristics
+                        else []
+                    ),
                     *([f"недоступные КТРУ: {', '.join(unavailable[:5])}"] if unavailable else []),
                     *extra_reasons[:3],
                 ],
@@ -434,14 +504,15 @@ def _apply_fetch_timeout(registry: Any, timeout_seconds: int) -> None:
 
 def _build_legal_lookup(
     legal_characteristics: dict[str, dict[str, Any]],
-) -> tuple[dict[str, tuple[str, str, list[str], bool]], dict[str, str]]:
-    lookup: dict[str, tuple[str, str, list[str], bool]] = {}
+) -> tuple[dict[str, tuple[str, str, list[str], bool, str | None]], dict[str, str]]:
+    lookup: dict[str, tuple[str, str, list[str], bool, str | None]] = {}
     required_names: dict[str, str] = {}
     for name, payload in legal_characteristics.items():
         values = list(payload.get("values") or [])
         required = bool(payload.get("required"))
+        unit = payload.get("unit") or payload.get("okei_unit") or payload.get("measure_unit")
         legal_key = _name_key(name)
-        record = (legal_key, name, values, required)
+        record = (legal_key, name, values, required, unit)
         lookup[legal_key] = record
         lookup[_visual_key(name)] = record
         if required:
@@ -450,14 +521,16 @@ def _build_legal_lookup(
 
 
 def _lookup_legal_characteristic(
-    legal_lookup: dict[str, tuple[str, str, list[str], bool]],
+    legal_lookup: dict[str, tuple[str, str, list[str], bool, str | None]],
     name: str,
-) -> tuple[str, str, list[str], bool] | None:
+) -> tuple[str, str, list[str], bool, str | None] | None:
     return legal_lookup.get(_name_key(name)) or legal_lookup.get(_visual_key(name))
 
 
 def _procurement_method_label(package: ProcurementPackageExtraction) -> str:
     values = [
+        getattr(package.schedule_application, "procurement_method_raw", None) if package.schedule_application else None,
+        getattr(package.schedule_application, "single_supplier_basis_text", None) if package.schedule_application else None,
         getattr(package.purchase_request, "procurement_method_raw", None) if package.purchase_request else None,
         getattr(package.purchase_request, "single_supplier_basis_text", None) if package.purchase_request else None,
         getattr(package.explanatory_note, "procurement_method_raw", None) if package.explanatory_note else None,
@@ -648,6 +721,25 @@ def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
         if value_number is not None and allowed_number is not None and value_number == allowed_number:
             return True
     return False
+
+
+def _unit_status(ooz_unit: str | None, legal_unit: str | None) -> str:
+    if not legal_unit or not ooz_unit:
+        return "not_checked"
+    return "passed" if _name_key(ooz_unit) == _name_key(legal_unit) else "failed"
+
+
+def _characteristic_row_message(
+    bad_values: list[str],
+    ooz_unit: str | None,
+    legal_unit: str | None,
+) -> str:
+    messages = []
+    if bad_values:
+        messages.append(f"недопустимые значения: {', '.join(bad_values)}")
+    if _unit_status(ooz_unit, legal_unit) == "failed":
+        messages.append(f"единица измерения отличается: ООЗ '{ooz_unit}', КТРУ '{legal_unit}'")
+    return "; ".join(messages) if messages else "ОК"
 
 
 def _range_match(value: str, allowed: str) -> bool:

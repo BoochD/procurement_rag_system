@@ -56,7 +56,7 @@ def extract_document_schema_with_llm(
     if error or result is None:
         fallback = _copy_model(deterministic_schema)
         if fallback is not None:
-            _append_warning(fallback, error or "LLM extraction returned no result.")
+            _append_warning(fallback, _friendly_llm_warning(error))
         return fallback, error
 
     merged = _merge_with_deterministic_guard(
@@ -88,7 +88,7 @@ async def aextract_document_schema_with_llm(
     if error or result is None:
         fallback = _copy_model(deterministic_schema)
         if fallback is not None:
-            _append_warning(fallback, error or "LLM extraction returned no result.")
+            _append_warning(fallback, _friendly_llm_warning(error))
         return fallback, error
 
     merged = _merge_with_deterministic_guard(
@@ -151,15 +151,31 @@ def _merge_with_deterministic_guard(
     warnings: list[str] = []
 
     if document_type == DocumentType.PLAN:
-        _preserve_list(merged, deterministic_schema, "raw_fields", warnings, warn=False)
-        _preserve_dict(merged, deterministic_schema, "raw_fields_dict", warnings, warn=False)
+        setattr(merged, "raw_fields", deepcopy(getattr(deterministic_schema, "raw_fields", []) or []))
+        setattr(
+            merged,
+            "raw_fields_dict",
+            deepcopy(getattr(deterministic_schema, "raw_fields_dict", {}) or {}),
+        )
         _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
         _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
+        _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
+        _preserve_list(merged, deterministic_schema, "included_goods", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "procurement_method_raw", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "procurement_method", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "single_supplier_basis_text", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "delivery_place", warnings, warn=False)
+        _preserve_stage_fields(merged, deterministic_schema, warnings)
     elif document_type == DocumentType.REQUEST:
         _preserve_list(merged, deterministic_schema, "attachments", warnings)
+        _preserve_stage_fields(merged, deterministic_schema, warnings)
     elif document_type == DocumentType.ONMCK:
+        _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
+        _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
+        _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "price_sources", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
+        _preserve_stage_fields(merged, deterministic_schema, warnings)
         _preserve_list_item_fields(
             merged,
             deterministic_schema,
@@ -179,7 +195,11 @@ def _merge_with_deterministic_guard(
             warnings,
         )
     elif document_type == DocumentType.OOZ:
+        _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
+        _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
+        _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
+        _preserve_stage_fields(merged, deterministic_schema, warnings)
         _preserve_list_item_fields(
             merged,
             deterministic_schema,
@@ -196,9 +216,20 @@ def _merge_with_deterministic_guard(
             ],
             warnings,
         )
+        _preserve_scalar(
+            merged,
+            deterministic_schema,
+            "additional_characteristics_justification_text",
+            warnings,
+            warn=False,
+        )
     elif document_type == DocumentType.CONTRACT:
+        _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
+        _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
+        _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "specification_items", warnings, warn=False)
+        _preserve_stage_fields(merged, deterministic_schema, warnings)
         _preserve_list_item_fields(
             merged,
             deterministic_schema,
@@ -226,13 +257,34 @@ def _merge_with_deterministic_guard(
         _preserve_list(merged, deterministic_schema, "actual_attachments", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_execution_term_text", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_execution_term", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "responsibility_section_text", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_required_raw", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_required", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_percent_raw", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_percent", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_security_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_security", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "warranty_security_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "warranty_security", warnings, warn=False)
+        _preserve_list(merged, deterministic_schema, "penalty_clauses", warnings, warn=False)
+        _preserve_list(merged, deterministic_schema, "peni_clauses", warnings, warn=False)
         _preserve_embedded_description(merged, deterministic_schema, warnings, warn=False)
     elif document_type == DocumentType.COMMERCIAL_OFFER:
         _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
+        for field_name in (
+            "supplier_name",
+            "inn",
+            "outgoing_number",
+            "outgoing_date",
+            "offer_date",
+            "purchase_subject",
+            "delivery_term_text",
+            "delivery_place",
+            "advance_payment_text",
+            "vat_text",
+            "total_amount",
+        ):
+            _preserve_scalar(merged, deterministic_schema, field_name, warnings, warn=False)
 
     for warning in warnings:
         _append_warning(merged, warning)
@@ -250,6 +302,22 @@ def _append_warning(model: BaseModel, warning: str) -> None:
     if warning not in current:
         current.append(warning)
     setattr(model, "parser_warnings", current)
+
+
+def _friendly_llm_warning(error: str | None) -> str:
+    text = error or ""
+    lowered = text.casefold()
+    if (
+        "input_value=None" in text
+        or "returned no result" in lowered
+        or "structured output (none)" in lowered
+        or "пустой structured output" in lowered
+    ):
+        return (
+            "LLM не вернула структурированный результат; использованы данные "
+            "deterministic/table/VLM parser."
+        )
+    return f"LLM extraction не применена; использованы данные parser fallback. Причина: {text}"
 
 
 def _preserve_list(
@@ -375,6 +443,54 @@ def _preserve_list_item_fields(
         )
 
 
+def _preserve_stage_fields(
+    target: BaseModel,
+    source: BaseModel,
+    warnings: list[str],
+) -> None:
+    source_stages = list(getattr(source, "stages", []) or [])
+    target_stages = list(getattr(target, "stages", []) or [])
+    if hasattr(source, "has_stages"):
+        setattr(target, "has_stages", getattr(source, "has_stages"))
+    if not source_stages:
+        setattr(target, "stages", [])
+        return
+    if len(target_stages) < len(source_stages):
+        setattr(target, "stages", deepcopy(source_stages))
+        warnings.append("LLM output lost parsed stages; deterministic stages were restored.")
+        return
+
+    restored_fields: set[str] = set()
+    field_names = [
+        "stage_number",
+        "stage_name",
+        "result_text",
+        "start_text",
+        "service_term_text",
+        "service_start_date",
+        "service_end_date",
+        "execution_end_date",
+        "price",
+        "quantity_text",
+    ]
+    for index, source_stage in enumerate(source_stages):
+        if index >= len(target_stages):
+            break
+        target_stage = target_stages[index]
+        for field_name in field_names:
+            source_value = getattr(source_stage, field_name, None)
+            target_value = getattr(target_stage, field_name, None)
+            if not _is_missing_value(source_value) and _is_missing_value(target_value):
+                setattr(target_stage, field_name, deepcopy(source_value))
+                restored_fields.add(field_name)
+    if restored_fields:
+        warnings.append(
+            "LLM output lost parsed stage fields; restored: "
+            + ", ".join(sorted(restored_fields))
+            + "."
+        )
+
+
 def _matching_source_item(
     *,
     target_item: Any,
@@ -449,6 +565,7 @@ def _postprocess_document_schema(
 ) -> None:
     if source is not None:
         _fill_missing_text(target, source, "document_title")
+    _clear_empty_money_fields(target)
     if document_type == DocumentType.REQUEST and hasattr(target, "purchase_subject"):
         subject = getattr(target, "purchase_subject", None)
         cleaned = _clean_purchase_subject(subject)
@@ -464,6 +581,17 @@ def _fill_missing_text(target: BaseModel, source: BaseModel, field_name: str) ->
     source_value = getattr(source, field_name, None)
     if isinstance(source_value, str) and source_value.strip():
         setattr(target, field_name, source_value.strip())
+
+
+def _clear_empty_money_fields(target: BaseModel) -> None:
+    for field_name in ("price", "nmck", "total_amount"):
+        if not hasattr(target, field_name):
+            continue
+        value = getattr(target, field_name, None)
+        if value is None:
+            continue
+        if _is_missing_value(getattr(value, "amount", None)) and _is_missing_value(getattr(value, "raw", None)):
+            setattr(target, field_name, None)
 
 
 def _clean_purchase_subject(value: str | None) -> str | None:

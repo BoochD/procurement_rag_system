@@ -63,6 +63,7 @@ Always reread this `AGENTS.md` at the start of a new coding task or after contex
 - The new extraction layer must remain independent from web/Celery until a separate explicit switch task.
 - New extraction work must not call PP 1875, live KTRU, or package-level LLM analyzers unless the user explicitly asks for validation/report integration.
 - For the new extraction layer, table parsing is the primary source for items, quantities, units, supplier prices, characteristics, and key-value plan fields.
+- The schedule application / plan-график (`plan`, ПГ) is the ground truth for package comparisons. Names, dates, delivery/place terms, quantities, NMCK, stages, procurement method, and SMP/SONKO fields are compared against the ПГ values when those values are present.
 - LLM extraction should receive compact table artifacts plus relevant text, not raw dense tables or debug `logical_rows`.
 - `logical_rows` are debug/parser artifacts; final document schemas should use deduplicated item structures such as `item -> characteristics[]`.
 - Contract product description tables and contract specification/price tables are separate concepts and must not be merged as one OOZ table.

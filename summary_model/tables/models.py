@@ -9,6 +9,7 @@ ParsedTableType = Literal[
     "schedule_application_table",
     "request_attachments_table",
     "nmck_calculation_table",
+    "nmck_staged_calculation_table",
     "ooz_items_table",
     "contract_specification_table",
     "contract_stages_table",

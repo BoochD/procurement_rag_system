@@ -10,6 +10,7 @@ from summary_model.extraction_models import (
     ExplanatoryNoteSchema,
     MoneyValue,
     NmckItem,
+    PenaltyClause,
     NmckJustificationSchema,
     PriceSource,
     ProcurementPackageExtraction,
@@ -102,6 +103,8 @@ def _base_package() -> ProcurementPackageExtraction:
             ktru_codes=["20.59.12.120-00000002"],
             nmck=MoneyValue(amount=Decimal("200")),
             funding_source_text="средства областного бюджета",
+            subcontract_smp_sonko_required_raw="Отсутствует",
+            subcontract_smp_sonko_required=False,
         ),
         nmck_justification=NmckJustificationSchema(
             total_amount=MoneyValue(amount=Decimal("200")),
@@ -149,6 +152,33 @@ def _base_package() -> ProcurementPackageExtraction:
                     total_price=Decimal("200"),
                 )
             ],
+            penalty_clauses=[
+                PenaltyClause(
+                    party="customer",
+                    obligation_kind="value_obligation",
+                    raw_text="Размер штрафа устанавливается в размере 1000 рублей.",
+                    amount=Decimal("1000"),
+                ),
+                PenaltyClause(
+                    party="supplier",
+                    obligation_kind="value_obligation",
+                    raw_text="Штраф составляет 10 процентов цены Контракта.",
+                    percent=Decimal("10"),
+                ),
+                PenaltyClause(
+                    party="supplier",
+                    obligation_kind="non_value_obligation",
+                    raw_text="Штраф за ненадлежащее исполнение обязательства без стоимостного выражения составляет 1000 рублей.",
+                    amount=Decimal("1000"),
+                ),
+            ],
+            peni_clauses=[
+                PenaltyClause(
+                    party="supplier",
+                    obligation_kind="delay_peni",
+                    raw_text="Пени начисляются за каждый день просрочки исполнения обязательства.",
+                )
+            ],
         ),
         explanatory_note=ExplanatoryNoteSchema(
             nmck=MoneyValue(amount=Decimal("200")),
@@ -185,6 +215,8 @@ def test_checks_pass_core_strict_rules_and_create_manual_reviews():
     assert checks["strict.codes.ktru"].status == "passed"
     assert checks["strict.funding_source"].status == "passed"
     assert checks["strict.securities"].status == "passed"
+    assert checks["strict.contract.penalties"].status == "passed"
+    assert checks["strict.smp_sonko_subcontract"].status == "passed"
     assert checks["strict.contract.attachments"].status == "passed"
     assert checks["manual.commercial_offers.count"].status == "manual_review"
     assert checks["manual.ktru.characteristics"].status == "manual_review"
@@ -206,6 +238,20 @@ def test_nmck_mismatch_fails():
     checks = _by_id(run_checks(package))
 
     assert checks["strict.nmck.amounts"].status == "failed"
+
+
+def test_nmck_money_compares_kopeks_and_report_lines():
+    package = _base_package()
+    package.schedule_application.nmck = MoneyValue(raw="200 рублей 00 копеек", amount=Decimal("200.00"))
+    package.purchase_request.nmck = MoneyValue(raw="200,00", amount=Decimal("200.00"))
+    package.nmck_justification.total_amount = MoneyValue(raw="200.00", amount=Decimal("200.00"))
+    package.contract_draft.price = MoneyValue(raw="Итого к оплате: 200 рублей 00 копеек", amount=Decimal("200.00"))
+    package.explanatory_note.nmck = MoneyValue(raw="200 рублей 00 копеек", amount=Decimal("200.00"))
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.nmck.amounts"].status == "passed"
+    assert "Заявка в план-график: 200.00" in checks["strict.nmck.amounts"].details["summary_lines"]
 
 
 def test_schedule_negative_values_are_valid_filled_fields():
@@ -230,6 +276,45 @@ def test_schedule_negative_values_are_valid_filled_fields():
     assert checks["strict.schedule.fields"].details["summary_lines"] == ["строк извлечено: 1"]
 
 
+def test_smp_sonko_subcontract_fails_when_plan_requires_percent_missing_in_contract():
+    package = _base_package()
+    package.schedule_application.subcontract_smp_sonko_required_raw = "Требуется привлечь СМП/СОНКО"
+    package.schedule_application.subcontract_smp_sonko_required = True
+    package.schedule_application.subcontract_smp_sonko_percent_raw = "25%"
+    package.schedule_application.subcontract_smp_sonko_percent = Decimal("25")
+    package.contract_draft.subcontract_smp_sonko_required_raw = "Исполнитель обязан привлечь СМП/СОНКО"
+    package.contract_draft.subcontract_smp_sonko_required = True
+    package.contract_draft.subcontract_smp_sonko_percent = None
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.smp_sonko_subcontract"].status == "failed"
+    assert "процент" in checks["strict.smp_sonko_subcontract"].message.casefold()
+
+
+def test_contract_penalties_check_pp1042_thresholds():
+    package = _base_package()
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["strict.contract.penalties"]
+    assert result.status == "passed"
+    assert result.details["expected_supplier_value_percent"] == "10"
+    assert result.details["expected_fixed_fine"] == "1000.00"
+    assert any("Штраф заказчика" in line for line in result.details["summary_lines"])
+
+
+def test_contract_penalties_fail_on_wrong_supplier_percent():
+    package = _base_package()
+    package.contract_draft.penalty_clauses[1].percent = Decimal("5")
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["strict.contract.penalties"]
+    assert result.status == "failed"
+    assert any("ожидалось 10%" in line for line in result.details["summary_lines"])
+
+
 def test_onmck_arithmetic_and_min_price_fail():
     package = _base_package()
     item = package.nmck_justification.items[0]
@@ -240,6 +325,20 @@ def test_onmck_arithmetic_and_min_price_fail():
 
     assert checks["strict.onmck.arithmetic"].status == "failed"
     assert checks["strict.onmck.min_price"].status == "failed"
+
+
+def test_onmck_supplier_price_report_contains_variation_and_supplier_labels():
+    package = _base_package()
+
+    checks = _by_id(run_checks(package))
+
+    supplier_check = checks["strict.onmck.supplier_prices"]
+    min_check = checks["strict.onmck.min_price"]
+
+    assert supplier_check.status == "passed"
+    assert any("коэффициент вариации" in line for line in supplier_check.details["summary_lines"])
+    assert any("Поставщик1 = 100" in line for line in supplier_check.details["summary_lines"])
+    assert any("выбранная минимальная цена 100" in line for line in min_check.details["summary_lines"])
 
 
 def test_code_mismatch_fails_and_missing_codes_manual_review():
@@ -428,8 +527,10 @@ def test_ktru_adapter_checks_characteristics_without_docx_parsing():
 
     assert results["manual.ktru.characteristics"].status == "passed"
     assert results["manual.ktru.characteristics"].details["checked_characteristics"] == 2
-    assert results["manual.ktru.additional"].status == "passed"
+    assert results["manual.ktru.additional"].status == "warning"
     assert results["manual.ktru.additional"].details["extra_characteristics"]
+    assert results["manual.ktru.characteristics"].details["characteristic_rows"]
+    assert results["manual.ktru.additional"].details["additional_rows"]
 
 
 def test_ktru_adapter_uses_common_info_fallback_and_visual_aliases():

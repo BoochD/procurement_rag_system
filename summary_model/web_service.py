@@ -9,11 +9,15 @@ from pydantic import BaseModel
 
 from summary_model.checks import run_checks
 from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks, run_pp1875_checks
+from summary_model.checks.penalty_llm import run_penalty_llm_checks
 from summary_model.checks.report import build_checks_report_text
 from summary_model.checks.runner import external_manual_checks_with_replacements
 from summary_model.checks.semantic_llm import run_semantic_llm_checks
+from summary_model.checks.stage_llm import run_stage_llm_checks
 from summary_model.classification import DocumentClassifier
+from summary_model.commercial_offer_vlm import CommercialOfferVlmOptions, extract_commercial_offer_with_vlm
 from summary_model.domain.models import DocumentType, InputDocument
+from summary_model.extraction_models import DocumentEnvelope
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction.llm_document_extractor import (
     aextract_document_schema_with_llm,
@@ -23,6 +27,7 @@ from summary_model.extraction.llm_payloads import build_document_llm_payload
 from summary_model.extraction_pipeline import extract_package
 from summary_model.ingestion import read_docx
 from summary_model.tables import extract_tables
+from summary_model.vlm_fallback import VlmFallbackOptions, VlmFallbackRepairer
 
 
 DOCUMENT_TYPE_HINTS = {
@@ -32,6 +37,7 @@ DOCUMENT_TYPE_HINTS = {
     "zapiska": DocumentType.EXPLANATORY_NOTE,
     "onmck": DocumentType.ONMCK,
     "obrasheniye": DocumentType.REQUEST,
+    "commercial_offer": DocumentType.COMMERCIAL_OFFER,
 }
 
 
@@ -40,8 +46,12 @@ class WebPipelineOptions:
     with_llm_extraction: bool = True
     with_semantic_llm: bool = True
     with_ktru: bool = True
+    with_vlm_tables: bool = False
+    with_vlm_commercial_offers: bool = True
     ktru_timeout_seconds: int = 30
     llm_concurrency: int = 6
+    vlm_max_tables_per_document: int = 4
+    vlm_max_commercial_offer_pages: int = 8
 
 
 @dataclass
@@ -67,23 +77,81 @@ async def _aprocess_uploaded_documents(
 ) -> WebPipelineResult:
     options = options or WebPipelineOptions()
     input_documents = _input_documents(uploaded_documents)
-    package = extract_package(input_documents)
+    docx_documents, media_commercial_offers, unsupported_documents = _split_input_documents(input_documents)
+    vlm_repairer = VlmFallbackRepairer(
+        VlmFallbackOptions(
+            enabled=options.with_vlm_tables,
+            output_dir=Path("runtime/web_vlm_tables"),
+            max_tables_per_document=max(1, options.vlm_max_tables_per_document),
+        )
+    )
+    package = extract_package(
+        docx_documents,
+        table_repairer=vlm_repairer.repair_document_tables if options.with_vlm_tables else None,
+    )
     warnings: list[str] = []
-    metrics: dict[str, Any] = {}
+    metrics: dict[str, Any] = {
+        "vlm_tables": vlm_repairer.metrics if options.with_vlm_tables else {"enabled": False}
+    }
+    warnings.extend(vlm_repairer.warnings)
+    if unsupported_documents:
+        warnings.extend(
+            f"{document.path.name}: формат поддерживается только для КП через VLM."
+            for document in unsupported_documents
+        )
+
+    commercial_offer_metrics = []
+    for document in media_commercial_offers:
+        result = extract_commercial_offer_with_vlm(
+            document.path,
+            options=CommercialOfferVlmOptions(
+                enabled=options.with_vlm_commercial_offers,
+                max_pages=options.vlm_max_commercial_offer_pages,
+            ),
+        )
+        package.commercial_offers.append(result.offer)
+        package.files.append(
+            DocumentEnvelope(
+                file_name=document.path.name,
+                file_path=str(document.path),
+                document_type="commercial_offer",
+                confidence=0.75 if not result.offer.parser_warnings else 0.35,
+                parser_warnings=result.offer.parser_warnings,
+            )
+        )
+        commercial_offer_metrics.append(
+            {
+                "file_name": document.path.name,
+                **result.metrics,
+            }
+        )
+    if media_commercial_offers:
+        package.commercial_offers_found_count = len(package.commercial_offers)
+        package.commercial_offers_missing = (
+            package.commercial_offers_found_count < package.commercial_offers_required_count
+        )
+        metrics["commercial_offer_vlm"] = commercial_offer_metrics
 
     if options.with_llm_extraction:
         llm_warnings, llm_metrics = await _apply_llm_extraction(
             package,
-            input_documents,
+            docx_documents,
             concurrency=options.llm_concurrency,
+            vlm_repairer=vlm_repairer if options.with_vlm_tables else None,
         )
         warnings.extend(llm_warnings)
         metrics["document_llm"] = llm_metrics
 
     semantic_results = None
+    stage_results = None
+    penalty_results = None
     if options.with_semantic_llm:
         semantic_results, semantic_metrics = run_semantic_llm_checks(package)
         metrics["semantic_llm"] = semantic_metrics
+        stage_results, stage_metrics = run_stage_llm_checks(package)
+        metrics["stage_llm"] = stage_metrics
+        penalty_results, penalty_metrics = run_penalty_llm_checks(package)
+        metrics["penalty_llm"] = penalty_metrics
 
     external_results = None
     if options.with_ktru:
@@ -100,6 +168,8 @@ async def _aprocess_uploaded_documents(
     checks_report = run_checks(
         package,
         semantic_results=semantic_results,
+        stage_results=stage_results,
+        penalty_results=penalty_results,
         external_results=external_results,
     )
     return WebPipelineResult(
@@ -125,11 +195,35 @@ def _input_documents(uploaded_documents: list[dict[str, Any]]) -> list[InputDocu
     return result
 
 
+def _split_input_documents(
+    documents: list[InputDocument],
+) -> tuple[list[InputDocument], list[InputDocument], list[InputDocument]]:
+    docx_documents: list[InputDocument] = []
+    media_commercial_offers: list[InputDocument] = []
+    unsupported_documents: list[InputDocument] = []
+    for document in documents:
+        suffix = document.path.suffix.casefold()
+        if suffix == ".docx":
+            docx_documents.append(document)
+        elif document.type_hint == DocumentType.COMMERCIAL_OFFER and suffix in {
+            ".pdf",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+        }:
+            media_commercial_offers.append(document)
+        else:
+            unsupported_documents.append(document)
+    return docx_documents, media_commercial_offers, unsupported_documents
+
+
 async def _apply_llm_extraction(
     package,
     documents: list[InputDocument],
     *,
     concurrency: int = 6,
+    vlm_repairer: VlmFallbackRepairer | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     classifier = DocumentClassifier()
     llm_client = StructuredLLMClient(
@@ -142,6 +236,12 @@ async def _apply_llm_extraction(
         ir = read_docx(document.path)
         decision = classifier.classify(ir, document.type_hint)
         document_tables = extract_tables(ir, decision.document_type)
+        if vlm_repairer is not None:
+            document_tables = vlm_repairer.repair_document_tables(
+                ir,
+                decision.document_type,
+                document_tables,
+            )
         deterministic_schema = _schema_for_document_type(package, decision.document_type)
         payload = build_document_llm_payload(
             ir=ir,

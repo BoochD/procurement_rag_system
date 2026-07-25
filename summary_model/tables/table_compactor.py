@@ -16,8 +16,12 @@ def build_compact_json(table_type: str, rows: list[LogicalTableRow]) -> dict[str
         return _items_json(rows)
     if table_type == "nmck_calculation_table":
         return _nmck_json(rows)
+    if table_type == "nmck_staged_calculation_table":
+        return _nmck_staged_json(rows)
     if table_type == "contract_specification_table":
         return _contract_specification_json(rows)
+    if table_type == "contract_stages_table":
+        return _stages_json(rows)
     if table_type in {"signature_table", "ignored_table"}:
         return {"rows": []}
     return {"rows": [_row_payload(row) for row in rows]}
@@ -37,10 +41,12 @@ def build_compact_markdown(parsed: ParsedTable) -> str:
     elif parsed.table_type == "ooz_items_table":
         for item in parsed.compact_json.get("items", []):
             lines.extend(_item_markdown(item))
-    elif parsed.table_type == "nmck_calculation_table":
+    elif parsed.table_type in {"nmck_calculation_table", "nmck_staged_calculation_table"}:
         lines.append("SOURCES:")
         for source in parsed.compact_json.get("price_sources", []):
             lines.append(f"- {source['source_id']}: {source.get('raw_header')}")
+        for stage in parsed.compact_json.get("stages", []):
+            lines.extend(_stage_markdown(stage))
         for item in parsed.compact_json.get("items", []):
             lines.extend(_nmck_item_markdown(item))
     elif parsed.table_type == "contract_specification_table":
@@ -52,6 +58,15 @@ def build_compact_markdown(parsed: ParsedTable) -> str:
             lines.append("TOTALS:")
             for total in totals:
                 lines.append(f"- {total.get('raw_text')}")
+    elif parsed.table_type == "contract_stages_table":
+        for stage in parsed.compact_json.get("stages", []):
+            lines.extend(_stage_markdown(stage))
+        fallback_rows = parsed.compact_json.get("fallback_rows") or []
+        if fallback_rows:
+            lines.append("")
+            lines.append("FALLBACK ROWS:")
+            for row in fallback_rows:
+                lines.append(f"- r{row.get('row_index')}: {row.get('raw_text')}")
     elif parsed.table_type in {"signature_table", "ignored_table"}:
         lines.append("ignored: true")
     else:
@@ -153,44 +168,11 @@ def _nmck_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     source_ids: set[str] = set()
     items = []
     for row in rows:
-        by_supplier: dict[str, dict[str, Any]] = {}
-        for key, value in row.cells_by_header.items():
-            if "." not in key or not value:
-                continue
-            source_id, field = key.split(".", 1)
-            if not source_id.startswith("supplier_"):
-                continue
-            source_ids.add(source_id)
-            supplier = by_supplier.setdefault(source_id, {"source_id": source_id})
-            if field == "unit_price":
-                supplier["unit_price"] = _decimal_json(value)
-                supplier["raw_unit_price"] = value
-            elif field == "row_total":
-                supplier["row_total"] = _decimal_json(value)
-                supplier["raw_row_total"] = value
-        supplier_prices = [
-            by_supplier[source_id]
-            for source_id in sorted(by_supplier, key=_source_sort_key)
-        ]
-        selected = row.cells_by_header.get("selected_min_unit_price")
-        total = row.cells_by_header.get("row_total_declared")
-        quantity = row.cells_by_header.get("quantity")
-        items.append(
-            {
-                "row_number": row.cells_by_header.get("row_number"),
-                "name": row.cells_by_header.get("name"),
-                "unit": row.cells_by_header.get("unit"),
-                "quantity_raw": quantity,
-                "quantity": _decimal_json(quantity),
-                "supplier_prices": supplier_prices,
-                "selected_min_unit_price": _decimal_json(selected),
-                "selected_min_unit_price_raw": selected,
-                "row_total_declared": _decimal_json(total),
-                "row_total_declared_raw": total,
-                "row_index": row.row_index,
-                "raw_text": row.raw_text,
-            }
-        )
+        if row.row_type != "item":
+            continue
+        payload = _nmck_item_payload(row)
+        source_ids.update(_source_ids_from_payload(payload))
+        items.append(payload)
     price_sources = [
         {
             "source_id": source_id,
@@ -199,6 +181,128 @@ def _nmck_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
         for source_id in sorted(source_ids, key=_source_sort_key)
     ]
     return {"price_sources": price_sources, "items": items}
+
+
+def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
+    source_ids: set[str] = set()
+    section_rows = [row for row in rows if row.row_type == "section"]
+    child_rows = [row for row in rows if row.row_type == "item"]
+    totals = [
+        {
+            "row_index": row.row_index,
+            "raw_text": row.raw_text,
+        }
+        for row in rows
+        if row.row_type == "total"
+    ]
+    child_by_prefix: dict[str, list[dict[str, Any]]] = {}
+    for row in child_rows:
+        payload = _nmck_item_payload(row)
+        source_ids.update(_source_ids_from_payload(payload))
+        row_number = clean_text(payload.get("row_number"))
+        prefix = row_number.split(".", 1)[0] if "." in row_number else ""
+        child_by_prefix.setdefault(prefix, []).append(payload)
+
+    stages: list[dict[str, Any]] = []
+    leaf_items: list[dict[str, Any]] = []
+    for row in section_rows:
+        payload = _nmck_item_payload(row)
+        source_ids.update(_source_ids_from_payload(payload))
+        stage_number = clean_text(payload.get("row_number")).rstrip(".")
+        children = child_by_prefix.get(stage_number, [])
+        stage_payload = {
+            "stage_number": stage_number,
+            "stage_name": payload.get("name"),
+            "unit": payload.get("unit"),
+            "quantity_raw": payload.get("quantity_raw"),
+            "quantity": payload.get("quantity"),
+            "supplier_prices": payload.get("supplier_prices", []),
+            "selected_min_unit_price": payload.get("selected_min_unit_price"),
+            "selected_min_unit_price_raw": payload.get("selected_min_unit_price_raw"),
+            "row_total_declared": payload.get("row_total_declared"),
+            "row_total_declared_raw": payload.get("row_total_declared_raw"),
+            "price_raw": payload.get("row_total_declared_raw") or payload.get("selected_min_unit_price_raw"),
+            "quantity_text": _quantity_text(payload),
+            "child_items": children,
+            "row_index": payload.get("row_index"),
+            "raw_text": payload.get("raw_text"),
+        }
+        stages.append(stage_payload)
+        if children:
+            leaf_items.extend(children)
+        else:
+            leaf_items.append(payload)
+    for prefix, children in child_by_prefix.items():
+        if not any(clean_text(stage.get("stage_number")) == prefix for stage in stages):
+            leaf_items.extend(children)
+
+    price_sources = [
+        {
+            "source_id": source_id,
+            "raw_header": _source_label(source_id),
+        }
+        for source_id in sorted(source_ids, key=_source_sort_key)
+    ]
+    return {
+        "price_sources": price_sources,
+        "stages": stages,
+        "items": leaf_items,
+        "totals": totals,
+    }
+
+
+def _nmck_item_payload(row: LogicalTableRow) -> dict[str, Any]:
+    by_supplier: dict[str, dict[str, Any]] = {}
+    for key, value in row.cells_by_header.items():
+        if "." not in key or not value:
+            continue
+        source_id, field = key.split(".", 1)
+        if not source_id.startswith("supplier_"):
+            continue
+        supplier = by_supplier.setdefault(source_id, {"source_id": source_id})
+        if field == "unit_price":
+            supplier["unit_price"] = _decimal_json(value)
+            supplier["raw_unit_price"] = value
+        elif field == "row_total":
+            supplier["row_total"] = _decimal_json(value)
+            supplier["raw_row_total"] = value
+    supplier_prices = [
+        by_supplier[source_id]
+        for source_id in sorted(by_supplier, key=_source_sort_key)
+    ]
+    selected = row.cells_by_header.get("selected_min_unit_price")
+    total = row.cells_by_header.get("row_total_declared")
+    quantity = row.cells_by_header.get("quantity")
+    return {
+        "row_number": row.cells_by_header.get("row_number"),
+        "name": row.cells_by_header.get("name"),
+        "unit": row.cells_by_header.get("unit"),
+        "quantity_raw": quantity,
+        "quantity": _decimal_json(quantity),
+        "supplier_prices": supplier_prices,
+        "selected_min_unit_price": _decimal_json(selected),
+        "selected_min_unit_price_raw": selected,
+        "row_total_declared": _decimal_json(total),
+        "row_total_declared_raw": total,
+        "row_index": row.row_index,
+        "raw_text": row.raw_text,
+    }
+
+
+def _source_ids_from_payload(payload: dict[str, Any]) -> set[str]:
+    return {
+        price["source_id"]
+        for price in payload.get("supplier_prices", [])
+        if price.get("source_id")
+    }
+
+
+def _quantity_text(payload: dict[str, Any]) -> str | None:
+    quantity = clean_text(payload.get("quantity_raw"))
+    unit = clean_text(payload.get("unit"))
+    if quantity and unit:
+        return f"{quantity} {unit}"
+    return quantity or unit or None
 
 
 def _source_label(source_id: str) -> str:
@@ -248,6 +352,41 @@ def _contract_specification_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
             }
         )
     return {"items": items, "totals": totals}
+
+
+def _stages_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
+    stages = []
+    fallback_rows = []
+    totals = []
+    for row in rows:
+        if row.row_type == "total":
+            totals.append(
+                {
+                    "row_index": row.row_index,
+                    "raw_text": row.raw_text,
+                }
+            )
+            continue
+        if row.row_type != "item":
+            fallback_rows.append(_row_payload(row))
+            continue
+        values = row.cells_by_header
+        stages.append(
+            {
+                "stage_number": values.get("stage_number"),
+                "stage_name": values.get("stage_name"),
+                "result_text": values.get("result"),
+                "start_text": values.get("start_text"),
+                "service_term_text": values.get("service_term_text"),
+                "execution_end_text": values.get("execution_end_text"),
+                "price_raw": values.get("price"),
+                "quantity_text": values.get("quantity"),
+                "row_index": row.row_index,
+                "raw_text": row.raw_text,
+                "warnings": row.warnings,
+            }
+        )
+    return {"stages": stages, "fallback_rows": fallback_rows, "totals": totals}
 
 
 def _source_sort_key(value: str) -> tuple[int, str]:
@@ -307,5 +446,20 @@ def _specification_item_markdown(item: dict[str, Any]) -> list[str]:
         f"unit_price_without_vat: {item.get('raw_unit_price_without_vat') or ''}",
         f"unit_price_with_vat: {item.get('raw_unit_price_with_vat') or ''}",
         f"total_price: {item.get('raw_total_price') or ''}",
+    ]
+    return lines
+
+
+def _stage_markdown(stage: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        f"STAGE {stage.get('stage_number') or stage.get('row_index')}",
+        f"name: {stage.get('stage_name') or ''}",
+        f"result: {stage.get('result_text') or ''}",
+        f"start: {stage.get('start_text') or ''}",
+        f"service_term: {stage.get('service_term_text') or ''}",
+        f"execution_end: {stage.get('execution_end_text') or ''}",
+        f"price: {stage.get('price_raw') or ''}",
+        f"quantity: {stage.get('quantity_text') or ''}",
     ]
     return lines

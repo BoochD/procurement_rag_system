@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from summary_model.checks.models import CheckResult
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction_models import ProcurementPackageExtraction
+from shared_modules.llm_models import OPENAI_NANO_MODEL
 
 
 SEMANTIC_CHECK_IDS = {
@@ -68,7 +69,9 @@ SEMANTIC_CHECKS_PROMPT = """
 исполнения Контракта противоречием сроку поставки. Например, "поставка в течение 15 рабочих дней" и
 "срок исполнения Контракта 70 календарных дней" описывают разные сущности; при совпадении сроков поставки
 между ООЗ и контрактом это passed.
-Для semantic.stages отдельно оценивай этапы и общий срок исполнения Контракта.
+Для semantic.stages отдельно оценивай этапы, стоимость этапов и общий срок исполнения Контракта.
+Если этапы явно не предусмотрены во всех документах, это passed. Если этапы есть только в одном документе,
+ставь manual_review или failed и укажи, где они найдены.
 Если документы явно противоречат друг другу, это failed.
 Если есть слабый риск или частично неполные данные, это warning/manual_review.
 
@@ -83,7 +86,7 @@ def run_semantic_llm_checks(
     *,
     llm_client: StructuredLLMClient | None = None,
 ) -> tuple[list[CheckResult], dict[str, object]]:
-    client = llm_client or StructuredLLMClient()
+    client = llm_client or StructuredLLMClient(model_name=OPENAI_NANO_MODEL)
     payload = json.dumps(_semantic_payload(package), ensure_ascii=False, default=str)
     result, error = client.extract(
         SemanticChecksLLMResult,
@@ -149,9 +152,11 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
     return {
         "schedule_application": {
             "purchase_subject": getattr(schedule, "purchase_subject", None),
+            "delivery_place": getattr(schedule, "delivery_place", None),
             "delivery_term_text": getattr(schedule, "delivery_term_text", None),
             "contract_execution_term_text": getattr(schedule, "contract_execution_term_text", None),
             "has_stages": getattr(schedule, "has_stages", None),
+            "stages": _dump(getattr(schedule, "stages", [])),
             "stage_execution_terms": _dump(getattr(schedule, "stage_execution_terms", [])),
             "smp_preference_raw": getattr(schedule, "smp_preference_raw", None),
             "smp_preference": getattr(schedule, "smp_preference", None),
@@ -173,6 +178,7 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "purchase_subject": getattr(ooz, "purchase_subject", None),
             "delivery_place": getattr(ooz, "delivery_place", None),
             "delivery_term_text": getattr(ooz, "delivery_term_text", None),
+            "stages": _dump(getattr(ooz, "stages", [])),
             "warranty_requirements_text": getattr(ooz, "warranty_requirements_text", None),
         },
         "contract_draft": {
@@ -180,7 +186,11 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "delivery_place": getattr(contract, "delivery_place", None),
             "delivery_term_text": getattr(contract, "delivery_term_text", None),
             "contract_execution_term_text_for_stages_only": getattr(contract, "contract_execution_term_text", None),
+            "stages": _dump(getattr(contract, "stages", [])),
             "warranty_text": getattr(contract, "warranty_text", None),
+            "subcontract_smp_sonko_required_raw": getattr(contract, "subcontract_smp_sonko_required_raw", None),
+            "subcontract_smp_sonko_required": getattr(contract, "subcontract_smp_sonko_required", None),
+            "subcontract_smp_sonko_percent": getattr(contract, "subcontract_smp_sonko_percent", None),
         },
         "explanatory_note": {
             "subject": getattr(note, "subject", None),
@@ -219,19 +229,23 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
             ("Проект контракта", getattr(contract, "delivery_term_text", None)),
         ],
         "semantic.delivery_place": [
+            ("Заявка в план-график", getattr(schedule, "delivery_place", None)),
             ("ООЗ", getattr(ooz, "delivery_place", None)),
             ("Проект контракта", getattr(contract, "delivery_place", None)),
         ],
         "semantic.stages": [
-            ("Заявка в план-график", _stage_text(getattr(schedule, "has_stages", None), getattr(schedule, "stage_execution_terms", []))),
+            ("Заявка в план-график", _stage_text(getattr(schedule, "has_stages", None), getattr(schedule, "stages", []))),
             ("Обращение", getattr(request, "stages_text", None) or _stage_text(getattr(request, "has_stages", None), getattr(request, "stages", []))),
-            ("Проект контракта", getattr(contract, "contract_execution_term_text", None)),
+            ("ООЗ", _stage_text(bool(getattr(ooz, "stages", [])), getattr(ooz, "stages", []))),
+            ("Проект контракта", _stage_text(bool(getattr(contract, "stages", [])), getattr(contract, "stages", [])) or getattr(contract, "contract_execution_term_text", None)),
         ],
         "semantic.warranty": [
             ("ООЗ", getattr(ooz, "warranty_requirements_text", None)),
             ("Проект контракта", getattr(contract, "warranty_text", None)),
         ],
         "semantic.procurement_method": [
+            ("Заявка в план-график", getattr(schedule, "procurement_method_raw", None) or getattr(schedule, "procurement_method", None)),
+            ("Заявка в план-график, основание", getattr(schedule, "single_supplier_basis_text", None)),
             ("Обращение", getattr(request, "procurement_method_raw", None) or getattr(request, "procurement_method", None)),
             ("Обращение, основание", getattr(request, "single_supplier_basis_text", None)),
             ("Пояснительная записка", getattr(note, "procurement_method_raw", None) or getattr(note, "procurement_method", None)),
@@ -240,6 +254,7 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
         "semantic.smp_preferences": [
             ("Заявка в план-график, преференции СМП", getattr(schedule, "smp_preference_raw", None)),
             ("Заявка в план-график, субподряд СМП/СОНКО", getattr(schedule, "subcontract_smp_sonko_required_raw", None)),
+            ("Проект контракта, субподряд СМП/СОНКО", getattr(contract, "subcontract_smp_sonko_required_raw", None)),
         ],
     }
     return [

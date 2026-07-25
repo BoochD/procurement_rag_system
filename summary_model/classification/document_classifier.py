@@ -49,6 +49,11 @@ def _paragraph_text(ir: DocumentIR) -> str:
 
 class DocumentClassifier:
     def __init__(self, llm_client=None) -> None:
+        if llm_client is True:
+            from summary_model.extraction.llm_client import StructuredLLMClient
+            from shared_modules.llm_models import OPENAI_NANO_MODEL
+
+            llm_client = StructuredLLMClient(model_name=OPENAI_NANO_MODEL)
         self.llm_client = llm_client
 
     def classify(

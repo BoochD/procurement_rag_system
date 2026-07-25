@@ -70,6 +70,13 @@ def _looks_like_contract_specification(text: str) -> bool:
     )
 
 
+def _looks_like_staged_nmck(text: str) -> bool:
+    has_stage_rows = bool(re.search(r"(?:^|\s)\d+\.\s+[^|.]{0,160}этап", text))
+    has_child_rows = bool(re.search(r"(?:^|\s)\d+\.\d+\s+", text))
+    has_nmck_prices = _has_any(text, ("минимальная цена", "начальная", "цена контракта"))
+    return has_stage_rows and has_child_rows and has_nmck_prices
+
+
 def classify_parsed_table(
     table: TableIR,
     document_type: DocumentType | None,
@@ -89,6 +96,8 @@ def classify_parsed_table(
         return "schedule_application_table"
     if document_type == DocumentType.PLAN and table.kind == "key_value":
         return "schedule_application_table"
+    if document_type == DocumentType.ONMCK and _looks_like_staged_nmck(text):
+        return "nmck_staged_calculation_table"
     if document_type == DocumentType.ONMCK and table.kind == "supplier_matrix":
         return "nmck_calculation_table"
     if document_type == DocumentType.OOZ and table.kind in {"characteristics", "item_list"}:

@@ -118,23 +118,28 @@ def process_document_query(self, documents):
         if not isinstance(documents, list):
             raise ValueError("Expected a list of uploaded documents.")
 
-        docs_by_key = {}
+        prepared_documents = []
+        present_keys = set()
         for document in documents:
             doc_key = document.get('key')
+            doc_label = document.get('label') or doc_key
             file_name = document.get('name')
             file_content_b64 = document.get('content_b64')
 
             if not doc_key or not file_name or not file_content_b64:
                 raise ValueError("Each uploaded document must contain key, name and content_b64.")
 
-            docs_by_key[doc_key] = {
+            prepared_documents.append({
+                'key': doc_key,
+                'label': doc_label,
                 'name': file_name,
                 'content': base64.b64decode(file_content_b64),
-            }
+            })
+            present_keys.add(doc_key)
 
         missing_docs = [
             label for key, label in REQUIRED_DOCUMENTS
-            if key in MANDATORY_DOCUMENT_KEYS and key not in docs_by_key
+            if key in MANDATORY_DOCUMENT_KEYS and key not in present_keys
         ]
         if missing_docs:
             raise ValueError(
@@ -143,38 +148,34 @@ def process_document_query(self, documents):
 
         temp_dir = tempfile.mkdtemp()
         try:
-            doc_paths = {}
-            for key, _label in REQUIRED_DOCUMENTS:
-                if key not in docs_by_key:
-                    doc_paths[key] = None
-                    continue
-
-                file_name = os.path.basename(docs_by_key[key]['name'])
-                temp_file_path = os.path.join(temp_dir, f"{key}_{file_name}")
+            pipeline_documents = []
+            for index, document in enumerate(prepared_documents, 1):
+                key = document['key']
+                file_name = os.path.basename(document['name'])
+                temp_file_path = os.path.join(temp_dir, f"{index:02d}_{key}_{file_name}")
 
                 with open(temp_file_path, 'wb') as f:
-                    f.write(docs_by_key[key]['content'])
+                    f.write(document['content'])
 
-                doc_paths[key] = temp_file_path
-
-            pipeline_documents = [
-                {
+                pipeline_documents.append({
                     'key': key,
-                    'label': label,
-                    'name': docs_by_key[key]['name'],
-                    'path': doc_paths[key],
-                }
-                for key, label in REQUIRED_DOCUMENTS
-                if key in docs_by_key and doc_paths[key]
-            ]
+                    'label': document['label'],
+                    'name': document['name'],
+                    'path': temp_file_path,
+                })
+
             pipeline_result = process_uploaded_documents(
                 pipeline_documents,
                 options=WebPipelineOptions(
                     with_llm_extraction=True,
                     with_semantic_llm=True,
                     with_ktru=True,
+                    with_vlm_tables=os.getenv("SUMMARY_WITH_VLM_TABLES", "0") == "1",
+                    with_vlm_commercial_offers=os.getenv("SUMMARY_WITH_VLM_COMMERCIAL_OFFERS", "1") == "1",
                     ktru_timeout_seconds=int(os.getenv("KTRU_TIMEOUT_SECONDS", "30")),
                     llm_concurrency=int(os.getenv("SUMMARY_LLM_CONCURRENCY", "6")),
+                    vlm_max_tables_per_document=int(os.getenv("SUMMARY_VLM_MAX_TABLES_PER_DOCUMENT", "4")),
+                    vlm_max_commercial_offer_pages=int(os.getenv("SUMMARY_VLM_MAX_COMMERCIAL_OFFER_PAGES", "8")),
                 ),
             )
             ai_response = mark_report_text(pipeline_result.report_text)
@@ -189,12 +190,11 @@ def process_document_query(self, documents):
                 'result_file_name': 'analysis_result.docx',
                 'documents': [
                     {
-                        'key': key,
-                        'label': label,
-                        'name': docs_by_key[key]['name'],
+                        'key': document['key'],
+                        'label': document['label'],
+                        'name': document['name'],
                     }
-                    for key, label in REQUIRED_DOCUMENTS
-                    if key in docs_by_key
+                    for document in prepared_documents
                 ],
                 'status': 'completed'
             }

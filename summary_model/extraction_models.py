@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 ExtractionDocumentType = Literal[
@@ -53,6 +53,41 @@ class StageTerm(BaseModel):
     deadline_days: int | None = None
 
 
+class ProcurementStage(BaseModel):
+    stage_number: str | None = None
+    stage_name: str | None = None
+    result_text: str | None = None
+    start_text: str | None = None
+    service_term_text: str | None = None
+    service_start_date: date | None = None
+    service_end_date: date | None = None
+    execution_end_date: date | None = None
+    price: MoneyValue | None = None
+    quantity_text: str | None = None
+    evidence: str | None = None
+    parser_warnings: list[str] = Field(default_factory=list)
+
+
+class StageDeliverable(BaseModel):
+    stage_number: str | None = None
+    stage_name: str | None = None
+    name: str | None = None
+    unit: str | None = None
+    quantity: Decimal | None = None
+    quantity_raw: str | None = None
+    evidence: str | None = None
+    parser_warnings: list[str] = Field(default_factory=list)
+
+
+class CodeReference(BaseModel):
+    code_type: Literal["okpd2", "ktru"]
+    code: str
+    name: str | None = None
+    role: Literal["service", "goods", "software_rights", "unknown"] = "unknown"
+    raw_text: str | None = None
+    evidence: str | None = None
+
+
 class WarrantyTerm(BaseModel):
     item_scope: str | None = None
     warranty_period_text: str | None = None
@@ -63,6 +98,29 @@ class WarrantyTerm(BaseModel):
         "contractor",
         "unknown",
     ] = "unknown"
+
+
+class PenaltyClause(BaseModel):
+    party: Literal["supplier", "customer", "unknown"] = "unknown"
+    obligation_kind: Literal[
+        "value_obligation",
+        "non_value_obligation",
+        "delay_peni",
+        "smp_sonko_subcontract",
+        "unknown",
+    ] = "unknown"
+    raw_text: str
+    percent: Decimal | None = None
+    amount: Decimal | None = None
+    basis: str | None = None
+    evidence: str | None = None
+
+    @field_validator("percent", mode="before")
+    @classmethod
+    def _fraction_formula_is_not_percent(cls, value: Any) -> Any:
+        if isinstance(value, str) and "/" in value:
+            return None
+        return value
 
 
 class RawField(BaseModel):
@@ -122,6 +180,7 @@ class PurchaseItemCharacteristic(BaseModel):
     name: str | None = None
     value: str | None = None
     unit: str | None = None
+    is_additional: bool | None = None
     evidence: str | None = None
 
 
@@ -134,6 +193,7 @@ class PurchaseItem(BaseModel):
     quantity: Decimal | None = None
     quantity_raw: str | None = None
     characteristics: list[PurchaseItemCharacteristic] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     evidence: str | None = None
     parser_warnings: list[str] = Field(default_factory=list)
 
@@ -158,6 +218,29 @@ class ContractSpecificationItem(BaseModel):
     raw_total_price: str | None = None
     evidence: str | None = None
     parser_warnings: list[str] = Field(default_factory=list)
+
+
+class CommercialOfferItem(BaseModel):
+    row_number: int | str | None = None
+    name: str | None = None
+    okpd2_code: str | None = None
+    ktru_code: str | None = None
+    trademark: str | None = None
+    model: str | None = None
+    unit: str | None = None
+    quantity: Decimal | None = None
+    quantity_raw: str | None = None
+    unit_price: Decimal | None = None
+    unit_price_raw: str | None = None
+    total_price: Decimal | None = None
+    total_price_raw: str | None = None
+    vat_rate: Decimal | None = None
+    vat_amount: Decimal | None = None
+    vat_text: str | None = None
+    delivery_term_text: str | None = None
+    delivery_place: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    evidence_text: str | None = None
 
 
 class NmckItem(BaseModel):
@@ -191,12 +274,28 @@ class ScheduleApplicationSchema(BaseModel):
     purchase_subject: str | None = None
     okpd2_codes: list[str] = Field(default_factory=list)
     ktru_codes: list[str] = Field(default_factory=list)
+    subject_codes: list[CodeReference] = Field(default_factory=list)
     nmck: MoneyValue | None = None
+    procurement_method_raw: str | None = None
+    procurement_method: Literal[
+        "single_supplier",
+        "auction",
+        "competition",
+        "request_for_quotations",
+        "other",
+        "unknown",
+    ] | None = None
+    single_supplier_basis_text: str | None = None
     funding_source_text: str | None = None
+    delivery_place: str | None = None
     delivery_term_text: str | None = None
     delivery_term: TermValue | None = None
     contract_execution_term_text: str | None = None
     contract_execution_term: TermValue | None = None
+    aggregate_quantity_text: str | None = None
+    stage_deliverables: list[StageDeliverable] = Field(default_factory=list)
+    included_goods: list[PurchaseItem] = Field(default_factory=list)
+    stages: list[ProcurementStage] = Field(default_factory=list)
     stage_execution_terms: list[StageTerm] = Field(default_factory=list)
     has_stages: bool | None = None
     smp_preference_raw: str | None = None
@@ -213,6 +312,8 @@ class ScheduleApplicationSchema(BaseModel):
     warranty_security: SecurityValue | None = None
     additional_requirements_raw: str | None = None
     national_regime_raw: str | None = None
+    national_regime_fields: list[RawField] = Field(default_factory=list)
+    additional_participant_requirements_text: str | None = None
     parser_warnings: list[str] = Field(default_factory=list)
 
 
@@ -237,7 +338,7 @@ class PurchaseRequestSchema(BaseModel):
     delivery_term: TermValue | None = None
     stages_text: str | None = None
     has_stages: bool | None = None
-    stages: list[StageTerm] = Field(default_factory=list)
+    stages: list[ProcurementStage] = Field(default_factory=list)
     attachments: list[RequestAttachment] = Field(default_factory=list)
     parser_warnings: list[str] = Field(default_factory=list)
 
@@ -247,10 +348,14 @@ class NmckJustificationSchema(BaseModel):
     document_title: str | None = None
     nmck_method: str | None = None
     purchase_subject: str | None = None
+    okpd2_codes: list[str] = Field(default_factory=list)
+    ktru_codes: list[str] = Field(default_factory=list)
+    subject_codes: list[CodeReference] = Field(default_factory=list)
     total_amount: MoneyValue | None = None
     total_amount_text: str | None = None
     price_sources: list[PriceSource] = Field(default_factory=list)
     items: list[NmckItem] = Field(default_factory=list)
+    stages: list[ProcurementStage] = Field(default_factory=list)
     variation_coefficient_raw: str | None = None
     variation_coefficient: Decimal | None = None
     parser_warnings: list[str] = Field(default_factory=list)
@@ -260,11 +365,19 @@ class PurchaseDescriptionSchema(BaseModel):
     document_type: Literal["purchase_description"] = "purchase_description"
     document_title: str | None = None
     purchase_subject: str | None = None
+    okpd2_codes: list[str] = Field(default_factory=list)
+    ktru_codes: list[str] = Field(default_factory=list)
+    subject_codes: list[CodeReference] = Field(default_factory=list)
     delivery_place: str | None = None
     delivery_term_text: str | None = None
     delivery_term: TermValue | None = None
+    stages: list[ProcurementStage] = Field(default_factory=list)
     items: list[PurchaseItem] = Field(default_factory=list)
     warranty_requirements_text: str | None = None
+    additional_characteristics_justification_text: str | None = None
+    trademark_justification_text: str | None = None
+    rights_transfer_text: str | None = None
+    required_rights_documents: list[RequestAttachment] = Field(default_factory=list)
     parser_warnings: list[str] = Field(default_factory=list)
 
 
@@ -273,6 +386,9 @@ class ContractDraftSchema(BaseModel):
     document_title: str | None = None
     contract_number: str | None = None
     subject: str | None = None
+    okpd2_codes: list[str] = Field(default_factory=list)
+    ktru_codes: list[str] = Field(default_factory=list)
+    subject_codes: list[CodeReference] = Field(default_factory=list)
     price: MoneyValue | None = None
     funding_source: str | None = None
     delivery_place: str | None = None
@@ -280,7 +396,13 @@ class ContractDraftSchema(BaseModel):
     delivery_term: TermValue | None = None
     contract_execution_term_text: str | None = None
     contract_execution_term: TermValue | None = None
+    stages: list[ProcurementStage] = Field(default_factory=list)
     warranty_text: str | None = None
+    responsibility_section_text: str | None = None
+    subcontract_smp_sonko_required_raw: str | None = None
+    subcontract_smp_sonko_required: bool | None = None
+    subcontract_smp_sonko_percent_raw: str | None = None
+    subcontract_smp_sonko_percent: Decimal | None = None
     contract_security_raw: str | None = None
     contract_security: SecurityValue | None = None
     warranty_security_raw: str | None = None
@@ -290,6 +412,8 @@ class ContractDraftSchema(BaseModel):
     embedded_purchase_description: PurchaseDescriptionSchema | None = None
     items: list[PurchaseItem] = Field(default_factory=list)
     specification_items: list[ContractSpecificationItem] = Field(default_factory=list)
+    penalty_clauses: list[PenaltyClause] = Field(default_factory=list)
+    peni_clauses: list[PenaltyClause] = Field(default_factory=list)
     parser_warnings: list[str] = Field(default_factory=list)
 
 
@@ -310,9 +434,19 @@ class CommercialOfferSchema(BaseModel):
     supplier_name: str | None = None
     inn: str | None = None
     outgoing_number: str | None = None
+    outgoing_date: date | None = None
     offer_date: date | None = None
-    items: list[PurchaseItem] = Field(default_factory=list)
+    purchase_subject: str | None = None
+    delivery_term_text: str | None = None
+    delivery_place: str | None = None
+    advance_payment_text: str | None = None
+    vat_text: str | None = None
+    vat_rate: Decimal | None = None
+    vat_included: bool | None = None
+    vat_amount: Decimal | None = None
+    items: list[CommercialOfferItem] = Field(default_factory=list)
     total_amount: MoneyValue | None = None
+    source_pages: list[int] = Field(default_factory=list)
     parser_warnings: list[str] = Field(default_factory=list)
 
 

@@ -47,6 +47,13 @@ def normalize_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def normalize_money(value: Any) -> Decimal | None:
+    amount = normalize_decimal(_amount(value))
+    if amount is None:
+        return None
+    return amount.quantize(Decimal("0.01"))
+
+
 def decimal_equal(left: Any, right: Any) -> bool:
     left_decimal = normalize_decimal(left)
     right_decimal = normalize_decimal(right)
@@ -54,7 +61,9 @@ def decimal_equal(left: Any, right: Any) -> bool:
 
 
 def money_equal(left: Any, right: Any) -> bool:
-    return decimal_equal(_amount(left), _amount(right))
+    left_decimal = normalize_money(left)
+    right_decimal = normalize_money(right)
+    return left_decimal is not None and right_decimal is not None and left_decimal == right_decimal
 
 
 def normalize_attachment_title(value: Any) -> str:

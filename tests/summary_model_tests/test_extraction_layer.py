@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 
 from docx import Document
 
@@ -7,6 +8,7 @@ from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import extract_package
 from summary_model.ingestion import read_docx
 from summary_model.tables import extract_tables
+from summary_model.tables.utils import extract_money
 
 
 def _save_plan(path):
@@ -51,6 +53,79 @@ def _save_plan_with_distinct_value_columns(path):
     values = ("", "Применение национального режима", "Нет", "Основание неприменения")
     for col_index, value in enumerate(values):
         table.cell(0, col_index).text = value
+    document.save(path)
+
+
+def _save_plan_with_stages(path):
+    document = Document()
+    document.add_paragraph("Заявка на внесение в план-график")
+    fields = document.add_table(rows=3, cols=2)
+    rows = [
+        ("Наименование объекта закупки", "Оказание услуг по расширению ЦОД"),
+        ("Этапы исполнения контракта", "Предусмотрены"),
+        ("Срок исполнения контракта", "С даты заключения контракта по 06.10.2026"),
+    ]
+    for row_index, values in enumerate(rows):
+        for col_index, value in enumerate(values):
+            fields.cell(row_index, col_index).text = value
+
+    stages = document.add_table(rows=4, cols=5)
+    stage_rows = [
+        [
+            "№ этапа",
+            "Дата начала исполнения этапа",
+            "Срок оказания услуг по этапу",
+            "Дата окончания исполнения этапа",
+            "Цена этапа, руб.",
+        ],
+        ["1", "С даты заключения контракта", "13.07.2026", "26.08.2026", "40 000,00"],
+        ["2", "14.07.2026", "С 14.07.2026 по 10.08.2026", "23.09.2026", "106 212 006,00"],
+        ["3", "11.08.2026", "С 11.08.2026 по 21.08.2026", "06.10.2026", "60 000,00"],
+    ]
+    for row_index, values in enumerate(stage_rows):
+        for col_index, value in enumerate(values):
+            stages.cell(row_index, col_index).text = value
+    document.save(path)
+
+
+def _save_stage_table_with_empty_numbers(path):
+    document = Document()
+    document.add_paragraph("Описание объекта закупки")
+    document.add_paragraph("Таблица №2 Этапность оказания услуг")
+    table = document.add_table(rows=4, cols=5)
+    rows = [
+        [
+            "Этап",
+            "Наименование этапа",
+            "Результат выполнения этапа",
+            "Срок оказания услуг по этапу",
+            "Срок оказания услуг по этапу",
+        ],
+        [
+            "",
+            "Подготовка документов",
+            "Документы согласованы",
+            "С даты заключения контракта по 13.07.2026.",
+            "С даты заключения контракта по 13.07.2026.",
+        ],
+        [
+            "",
+            "Поставка оборудования",
+            "Оборудование поставлено",
+            "Оборудование поставлено",
+            "С 14.07.2026 по 10.08.2026.",
+        ],
+        [
+            "",
+            "Пусконаладка",
+            "Работы выполнены",
+            "Работы выполнены",
+            "С 11.08.2026 по 21.08.2026.",
+        ],
+    ]
+    for row_index, values in enumerate(rows):
+        for col_index, value in enumerate(values):
+            table.cell(row_index, col_index).text = value
     document.save(path)
 
 
@@ -264,6 +339,63 @@ def _save_onmck_with_executors(path):
     document.save(path)
 
 
+def _save_staged_onmck(path):
+    document = Document()
+    document.add_paragraph("Обоснование начальной максимальной цены контракта")
+    table = document.add_table(rows=9, cols=11)
+    rows = [
+        [
+            "№ п/п",
+            "Наименование",
+            "Кол-во",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Цена услуги (руб.)/источники информации о ценах",
+            "Минимальная цена за услугу (руб.)",
+            "Начальная (максимальная) цена контракта (руб.)",
+        ],
+        [
+            "№ п/п",
+            "Наименование",
+            "Кол-во",
+            "Исполнитель 1",
+            "Исполнитель 1",
+            "Исполнитель 2",
+            "Исполнитель 2",
+            "Исполнитель 3",
+            "Исполнитель 3",
+            "Минимальная цена за услугу (руб.)",
+            "Начальная (максимальная) цена контракта (руб.)",
+        ],
+        [
+            "№ п/п",
+            "Наименование",
+            "Кол-во",
+            "Цена за ед.",
+            "Общая стоимость",
+            "Цена за ед.",
+            "Общая стоимость",
+            "Цена за ед.",
+            "Общая стоимость",
+            "Минимальная цена за услугу (руб.)",
+            "Начальная (максимальная) цена контракта (руб.)",
+        ],
+        ["1.", "Подготовка (1 этап, с даты заключения контракта по 13.07.2026)", "1 усл.ед.", "43000", "43000", "52000", "52000", "40000", "40000", "40000", "40000"],
+        ["2.", "Поставка оборудования (2 этап, с 14.07.2026 по 10.08.2026)", "1 усл.ед.", "300", "300", "250", "250", "200", "200", "200", "200"],
+        ["2.1", "Сервер", "1", "100", "100", "90", "90", "80", "80", "80", "80"],
+        ["2.2", "Лицензия", "2", "110", "220", "100", "200", "60", "120", "60", "120"],
+        ["3.", "Пусконаладка (3 этап, с 11.08.2026 по 21.08.2026)", "1 усл.ед.", "70000", "70000", "63000", "63000", "60000", "60000", "60000", "60000"],
+        ["ИТОГО", "ИТОГО", "", "113300", "113300", "115250", "115250", "100200", "100200", "100200", "100200"],
+    ]
+    for row_index, values in enumerate(rows):
+        for col_index, value in enumerate(values):
+            table.cell(row_index, col_index).text = value
+    document.save(path)
+
+
 def _save_contract(path):
     document = Document()
     document.add_paragraph("Проект контракта")
@@ -422,6 +554,46 @@ def test_key_value_table_preserves_distinct_value_columns(tmp_path):
     assert plan.raw_fields_dict["Применение национального режима"] == "Нет; Основание неприменения"
 
 
+def test_plan_stage_table_populates_structured_stages(tmp_path):
+    path = tmp_path / "plan_stages.docx"
+    _save_plan_with_stages(path)
+    package = extract_package(
+        [InputDocument(path=path, type_hint=DocumentType.PLAN, display_name="plan")]
+    )
+
+    plan = package.schedule_application
+    assert plan is not None
+    assert plan.has_stages is True
+    assert len(plan.stages) == 3
+    assert plan.stages[0].stage_number == "1"
+    assert plan.stages[0].price is not None
+    assert plan.stages[0].price.amount == Decimal("40000.00")
+    assert plan.stages[1].service_start_date is not None
+    assert plan.stages[1].service_start_date.isoformat() == "2026-07-14"
+    assert plan.stages[1].service_end_date is not None
+    assert plan.stages[1].service_end_date.isoformat() == "2026-08-10"
+    assert plan.stages[2].execution_end_date is not None
+    assert plan.stages[2].execution_end_date.isoformat() == "2026-10-06"
+    assert plan.stage_execution_terms == []
+
+
+def test_stage_table_infers_empty_stage_numbers_and_prefers_last_term_column(tmp_path):
+    path = tmp_path / "ooz_stage_table.docx"
+    _save_stage_table_with_empty_numbers(path)
+    package = extract_package(
+        [InputDocument(path=path, type_hint=DocumentType.OOZ, display_name="ooz")]
+    )
+
+    ooz = package.purchase_description
+    assert ooz is not None
+    assert len(ooz.stages) == 3
+    assert [stage.stage_number for stage in ooz.stages] == ["1", "2", "3"]
+    assert ooz.stages[1].service_term_text == "С 14.07.2026 по 10.08.2026."
+    assert ooz.stages[2].service_end_date is not None
+    assert ooz.stages[2].service_end_date.isoformat() == "2026-08-21"
+    assert "row order" in ooz.stages[0].parser_warnings[0]
+
+
 def test_purchase_request_extracts_text_attachment_list_from_small_table(tmp_path):
     path = tmp_path / "request_attachments.docx"
     _save_request_with_text_attachment_table(path)
@@ -559,6 +731,36 @@ def test_onmck_table_accepts_executor_price_sources(tmp_path):
     assert item.is_row_total_correct is True
 
 
+def test_staged_onmck_keeps_stage_rows_and_leaf_items_separate(tmp_path):
+    path = tmp_path / "staged_onmck.docx"
+    _save_staged_onmck(path)
+    package = extract_package(
+        [InputDocument(path=path, type_hint=DocumentType.ONMCK, display_name="onmck")]
+    )
+    tables = extract_tables(read_docx(path), DocumentType.ONMCK)
+
+    onmck = package.nmck_justification
+    assert onmck is not None
+    assert tables[0].table_type == "nmck_staged_calculation_table"
+    assert len(onmck.price_sources) == 3
+    assert len(onmck.stages) == 3
+    assert [stage.stage_number for stage in onmck.stages] == ["1", "2", "3"]
+    assert [stage.price.amount for stage in onmck.stages if stage.price] == [
+        Decimal("40000"),
+        Decimal("200"),
+        Decimal("60000"),
+    ]
+    assert len(onmck.items) == 4
+    assert [item.row_number for item in onmck.items] == ["1.", "2.1", "2.2", "3."]
+    assert onmck.items[0].is_declared_min_price_correct is True
+    assert onmck.items[0].is_row_total_correct is True
+    assert [price.unit_price for price in onmck.items[0].supplier_prices] == [
+        Decimal("43000"),
+        Decimal("52000"),
+        Decimal("40000"),
+    ]
+
+
 def test_contract_keeps_description_and_specification_separate(tmp_path):
     path = tmp_path / "contract.docx"
     _save_contract(path)
@@ -666,3 +868,19 @@ def test_extraction_cli_creates_result_tables_and_debug_artifacts(tmp_path):
     ]
     assert "compact_json" not in llm_payload["tables"][0]
     assert "compact_markdown" not in llm_payload["tables"][0]
+
+
+def test_extract_money_preserves_kopeks_and_ignores_long_technical_numbers():
+    raw, amount = extract_money(
+        "Итого к оплате: 2 109 514 (два миллиона сто девять тысяч пятьсот четырнадцать) рублей 25 копеек"
+    )
+    assert raw is not None
+    assert amount == Decimal("2109514.25")
+
+    raw, amount = extract_money("Стоимость в руб., НДС не облагается 2 109 514,25.")
+    assert raw == "2 109 514,25"
+    assert amount == Decimal("2109514.25")
+
+    raw, amount = extract_money("КБК 252540664361154060100100440015829242")
+    assert raw is None
+    assert amount is None

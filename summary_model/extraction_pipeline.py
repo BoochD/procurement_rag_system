@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import hashlib
 import re
+from datetime import date
 from pathlib import Path
+from typing import Callable
 
 from summary_model.classification import DocumentClassifier
 from summary_model.domain.models import DocumentIR, DocumentType, InputDocument
 from summary_model.extraction_models import (
+    CommercialOfferItem,
     CommercialOfferSchema,
     ContractSpecificationItem,
     ContractDraftSchema,
@@ -17,7 +22,9 @@ from summary_model.extraction_models import (
     NmckItem,
     NmckJustificationSchema,
     PercentValue,
+    CodeReference,
     PriceSource,
+    ProcurementStage,
     ProcurementPackageExtraction,
     PurchaseDescriptionSchema,
     PurchaseItem,
@@ -58,7 +65,14 @@ TYPE_MAP: dict[DocumentType, ExtractionDocumentType] = {
 }
 
 
-def extract_package(documents: list[InputDocument]) -> ProcurementPackageExtraction:
+TableRepairer = Callable[[DocumentIR, DocumentType, list[ParsedTable]], list[ParsedTable]]
+
+
+def extract_package(
+    documents: list[InputDocument],
+    *,
+    table_repairer: TableRepairer | None = None,
+) -> ProcurementPackageExtraction:
     classifier = DocumentClassifier()
     files: list[DocumentEnvelope] = []
     parsed_by_document: list[tuple[InputDocument, DocumentIR, DocumentType, list[ParsedTable]]] = []
@@ -68,6 +82,8 @@ def extract_package(documents: list[InputDocument]) -> ProcurementPackageExtract
         ir = read_docx(document.path)
         decision = classifier.classify(ir, document.type_hint)
         parsed_tables = extract_tables(ir, decision.document_type)
+        if table_repairer is not None:
+            parsed_tables = table_repairer(ir, decision.document_type, parsed_tables)
         parsed_by_document.append((document, ir, decision.document_type, parsed_tables))
         files.append(_envelope(document, ir, decision.document_type, decision.confidence, parsed_tables))
 
@@ -156,25 +172,53 @@ def _envelope(
 
 def _raw_fields(tables: list[ParsedTable]) -> list[RawField]:
     result = []
+    seen: set[tuple[str, str]] = set()
     for table in tables:
-        if table.table_type not in {"schedule_application_table", "generic_table"}:
-            continue
-        for field in table.compact_json.get("raw_fields", []):
-            key = clean_text(field.get("key"))
-            value = clean_text(field.get("value")) or None
-            if not key:
-                continue
-            result.append(
-                RawField(
-                    key=key,
-                    value=value,
-                    normalized_key=normalize_key(key),
-                    is_empty=is_empty_value(value),
-                    is_negative_value=is_negative_value(value),
-                    evidence=f"{table.table_id}:r{field.get('row_index')}",
+        if table.table_type in {"schedule_application_table", "generic_table"}:
+            for field in table.compact_json.get("raw_fields", []):
+                _append_raw_field(result, seen, table, field)
+        if table.document_type_hint == DocumentType.PLAN.value:
+            for row in table.logical_rows:
+                if row.row_type != "key_value":
+                    continue
+                _append_raw_field(
+                    result,
+                    seen,
+                    table,
+                    {
+                        "key": row.cells_by_header.get("key"),
+                        "value": row.cells_by_header.get("value"),
+                        "row_index": row.row_index,
+                    },
                 )
-            )
     return result
+
+
+def _append_raw_field(
+    result: list[RawField],
+    seen: set[tuple[str, str]],
+    table: ParsedTable,
+    field: dict,
+) -> None:
+    key = clean_text(field.get("key"))
+    value = clean_text(field.get("value")) or None
+    if not key:
+        return
+    normalized_key = normalize_key(key)
+    dedupe_key = (normalized_key, clean_text(value).casefold())
+    if dedupe_key in seen:
+        return
+    seen.add(dedupe_key)
+    result.append(
+        RawField(
+            key=key,
+            value=value,
+            normalized_key=normalized_key,
+            is_empty=is_empty_value(value),
+            is_negative_value=is_negative_value(value),
+            evidence=f"{table.table_id}:r{field.get('row_index')}",
+        )
+    )
 
 
 def _field_value(fields: list[RawField], *markers: str) -> str | None:
@@ -226,10 +270,20 @@ def _contract_price_value(
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if not match:
             continue
-        value = _money_value_from_raw(match.group(1))
+        raw = clean_text(match.group(1))
+        if _looks_like_money_range(raw):
+            continue
+        value = _money_value_from_raw(raw)
         if value is not None:
             return value
     return None
+
+
+def _looks_like_money_range(text: str | None) -> bool:
+    text = clean_text(text).casefold()
+    if not text:
+        return False
+    return bool(re.search(r"\bот\b.{0,80}\bдо\b", text))
 
 
 def _term_value(text: str | None) -> TermValue | None:
@@ -259,13 +313,193 @@ def _infer_start_event(text: str) -> str | None:
     return None
 
 
+def _date_from_text(text: str | None) -> date | None:
+    text = clean_text(text)
+    if not text:
+        return None
+    match = re.search(r"\b(\d{2})\.(\d{2})\.(\d{4})\b", text)
+    if not match:
+        return None
+    day, month, year = (int(part) for part in match.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _stage_from_payload(table: ParsedTable, payload: dict) -> ProcurementStage:
+    price = _money_value_from_raw(payload.get("price_raw"))
+    service_term_text = clean_text(payload.get("service_term_text")) or None
+    execution_end_text = clean_text(payload.get("execution_end_text")) or None
+    start_text = clean_text(payload.get("start_text")) or None
+    raw_stage_number = clean_text(payload.get("stage_number")) or None
+    raw_stage_name = clean_text(payload.get("stage_name")) or None
+    if raw_stage_name and not service_term_text:
+        embedded_term = re.search(
+            r"\(\s*\d+\s*этап\s*,\s*([^)]+)\)",
+            raw_stage_name,
+            flags=re.IGNORECASE,
+        )
+        if embedded_term:
+            service_term_text = clean_text(embedded_term.group(1))
+    stage_name = _clean_stage_name(raw_stage_name)
+    return ProcurementStage(
+        stage_number=_clean_stage_number(raw_stage_number),
+        stage_name=stage_name,
+        result_text=clean_text(payload.get("result_text")) or None,
+        start_text=start_text,
+        service_term_text=service_term_text,
+        service_start_date=_date_from_text(service_term_text) or _date_from_text(start_text),
+        service_end_date=_last_date_from_text(service_term_text),
+        execution_end_date=_date_from_text(execution_end_text),
+        price=price,
+        quantity_text=clean_text(payload.get("quantity_text")) or None,
+        evidence=f"{table.table_id}:r{payload.get('row_index')}",
+        parser_warnings=payload.get("warnings", []),
+    )
+
+
+def _clean_stage_number(text: str | None) -> str | None:
+    text = clean_text(text)
+    if not text:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return text
+    return match.group(0).rstrip(".")
+
+
+def _clean_stage_name(text: str | None) -> str | None:
+    text = clean_text(text)
+    if not text:
+        return None
+    text = re.sub(r"^\d+(?:\.\d+)?[.)]?\s*", "", text)
+    text = re.sub(r"\(\s*\d+\s*этап[^)]*\)", "", text, flags=re.IGNORECASE)
+    return clean_text(text) or None
+
+
+def _last_date_from_text(text: str | None) -> date | None:
+    text = clean_text(text)
+    if not text:
+        return None
+    matches = list(re.finditer(r"\b(\d{2})\.(\d{2})\.(\d{4})\b", text))
+    if not matches:
+        return None
+    day, month, year = (int(part) for part in matches[-1].groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _is_valid_stage(stage: ProcurementStage) -> bool:
+    if (
+        stage.service_term_text
+        or stage.service_start_date
+        or stage.service_end_date
+        or stage.execution_end_date
+        or stage.price
+        or stage.quantity_text
+        or stage.result_text
+    ):
+        return True
+    if stage.stage_name:
+        text = clean_text(stage.stage_name)
+        if text and not is_negative_value(text) and not is_empty_value(text):
+            lowered = text.casefold()
+            if "этап" in lowered and not re.search(r"\b\d+\s*этап\b", lowered):
+                return False
+            return True
+    return False
+
+
+def _stages_from_tables(tables: list[ParsedTable]) -> list[ProcurementStage]:
+    stages: list[ProcurementStage] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for table in tables:
+        if table.table_type not in {"contract_stages_table", "nmck_staged_calculation_table"}:
+            continue
+        for payload in table.compact_json.get("stages", []):
+            stage = _stage_from_payload(table, payload)
+            if not _is_valid_stage(stage):
+                continue
+            key = (
+                stage.stage_number or "",
+                clean_text(stage.stage_name).casefold(),
+                clean_text(stage.service_term_text).casefold(),
+                clean_text(stage.price.raw if stage.price else "").casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            stages.append(stage)
+    return stages
+
+
+def _stage_fragments(text: str | None) -> list[tuple[str, str]]:
+    text = clean_text(text)
+    if not text:
+        return []
+    matches = list(re.finditer(r"(\d+)\s*этап\s*[-:]", text, flags=re.IGNORECASE))
+    result: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        fragment = clean_text(text[match.end() : end].strip(" ;."))
+        tail = re.search(
+            r"\b(?:товар(?:ы)?|неисключительные|пользовательские права)\b",
+            fragment,
+            flags=re.IGNORECASE,
+        )
+        if tail:
+            fragment = clean_text(fragment[: tail.start()].strip(" ;."))
+        if fragment:
+            result.append((match.group(1), fragment))
+    return result
+
+
+def _stages_from_schedule_fields(fields: list[RawField]) -> list[ProcurementStage]:
+    delivery_text = _field_value(
+        fields,
+        "сроки поставки товара",
+        "срок поставки",
+        "срок оказания",
+        "срок выполнения",
+    )
+    quantity_text = _field_value(fields, "количество")
+    delivery_by_number = dict(_stage_fragments(delivery_text))
+    quantity_by_number = dict(_stage_fragments(quantity_text))
+    stage_numbers = sorted(
+        set(delivery_by_number) | set(quantity_by_number),
+        key=lambda value: int(value) if value.isdigit() else 9999,
+    )
+    stages: list[ProcurementStage] = []
+    for number in stage_numbers:
+        service_term_text = delivery_by_number.get(number)
+        quantity = quantity_by_number.get(number)
+        stages.append(
+            ProcurementStage(
+                stage_number=number,
+                stage_name=f"{number} этап",
+                service_term_text=service_term_text,
+                service_start_date=_date_from_text(service_term_text),
+                service_end_date=_last_date_from_text(service_term_text),
+                quantity_text=quantity,
+                evidence="schedule_application:raw_fields",
+                parser_warnings=[
+                    "Stage inferred from schedule application text fields, not a physical stage table."
+                ],
+            )
+        )
+    return stages
+
+
 def _bool_from_text(text: str | None) -> bool | None:
     text = clean_text(text).casefold()
     if not text:
         return None
     if is_negative_value(text):
         return False
-    if any(marker in text for marker in ("да", "установлено", "предусмотрено", "требуется")):
+    if any(marker in text for marker in ("да", "установлено", "предусмотрен", "требуется")):
         return True
     return None
 
@@ -295,38 +529,333 @@ def _security_value(text: str | None) -> SecurityValue | None:
     )
 
 
+def _contract_smp_sonko_clause(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    best_window: str | None = None
+    best_score = -1
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        has_smp = (
+            "смп" in lowered
+            or "сонко" in lowered
+            or "субъектов малого предпринимательства" in lowered
+            or "социально ориентированных" in lowered
+        )
+        has_subcontract = any(
+            marker in lowered
+            for marker in ("субподряд", "соисполн", "привлеч")
+        )
+        if not has_smp or not has_subcontract:
+            continue
+        window = " ".join(lines[index : index + 3])
+        window_lowered = window.casefold()
+        score = 0
+        if "привлечь к исполнению" in window_lowered:
+            score += 4
+        if "привлеч" in window_lowered:
+            score += 2
+        if "соисполн" in window_lowered or "субподряд" in window_lowered:
+            score += 2
+        if _percent_from_text(window) is not None:
+            score += 3
+        if re.search(r"\b5\.\d+", window):
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_window = window
+    return best_window[:1200] if best_window else None
+
+
+def _contract_smp_sonko_required(text: str | None) -> bool | None:
+    text = clean_text(text).casefold()
+    if not text:
+        return None
+    if is_negative_value(text) or any(
+        marker in text
+        for marker in (
+            "не предусмотр",
+            "не установлен",
+            "не требует",
+            "отсутств",
+            "нет обязанности",
+            "не обязан",
+        )
+    ):
+        return False
+    if any(
+        marker in text
+        for marker in (
+            "обязан",
+            "обязатель",
+            "должен привлеч",
+            "требуется привлеч",
+            "привлечь к исполнению",
+        )
+    ):
+        return True
+    return None
+
+
+def _percent_from_text(text: str | None) -> Decimal | None:
+    text = clean_text(text)
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:[,.]\d+)?", text):
+        return parse_decimal(text)
+    match = re.search(
+        r"(\d+(?:[,.]\d+)?)\s*(?:\([^)]*\)\s*)?(?:%|процент)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return parse_decimal(match.group(1)) if match else None
+
+
+def _code_references_from_text(
+    text: str | None,
+    *,
+    role: str,
+    evidence: str,
+) -> list[CodeReference]:
+    raw_text = str(text or "").replace("\r", "\n")
+    if not clean_text(raw_text):
+        return []
+    code_pattern = rf"(?:{KTRU_RE.pattern}|{OKPD2_RE.pattern})"
+    pattern = re.compile(
+        rf"({code_pattern})\s*[–—-]?\s*(.*?)(?=(?:{code_pattern})|[;\n]|$)",
+        flags=re.IGNORECASE,
+    )
+    result: list[CodeReference] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(raw_text):
+        code = match.group(1)
+        if code in seen:
+            continue
+        seen.add(code)
+        name = clean_text(match.group(2)).rstrip(".;") or None
+        code_type = "ktru" if "-" in code else "okpd2"
+        resolved_role = _role_from_code_name(name, default=role)
+        result.append(
+            CodeReference(
+                code_type=code_type,
+                code=code,
+                name=name,
+                role=resolved_role,  # type: ignore[arg-type]
+                raw_text=clean_text(match.group(0)),
+                evidence=evidence,
+            )
+        )
+    return result
+
+
+def _role_from_code_name(name: str | None, *, default: str) -> str:
+    lowered = clean_text(name).casefold()
+    if any(marker in lowered for marker in ("программ", "неисключительн", "пользовательск", "лицензи")):
+        return "software_rights"
+    return default
+
+
+def _purchase_item_from_code_reference(reference: CodeReference) -> PurchaseItem:
+    return PurchaseItem(
+        name=reference.name,
+        okpd2_code=reference.code if reference.code_type == "okpd2" else None,
+        ktru_code=reference.code if reference.code_type == "ktru" else None,
+        evidence=reference.evidence,
+        notes=[f"role:{reference.role}"],
+    )
+
+
+def _schedule_code_roles(
+    fields: list[RawField],
+    *,
+    subject_text: str | None,
+) -> tuple[list[CodeReference], list[PurchaseItem]]:
+    code_text = _field_value(fields, "код окпд")
+    if not code_text:
+        return [], []
+    marker = re.search(
+        r"товар(?:ы)?\s+и\s+неисключительные.*?поставляем",
+        code_text,
+        flags=re.IGNORECASE,
+    )
+    if marker:
+        subject_refs = _code_references_from_text(
+            code_text[: marker.start()],
+            role="service",
+            evidence="schedule_application:okpd2_field",
+        )
+        included_refs = _code_references_from_text(
+            code_text[marker.start() :],
+            role="goods",
+            evidence="schedule_application:included_goods_field",
+        )
+        return subject_refs, [_purchase_item_from_code_reference(item) for item in included_refs]
+
+    refs = _code_references_from_text(
+        code_text,
+        role="service" if _looks_like_service_subject(subject_text) else "goods",
+        evidence="schedule_application:okpd2_field",
+    )
+    if _looks_like_service_subject(subject_text):
+        return refs, []
+    return [], [_purchase_item_from_code_reference(item) for item in refs]
+
+
+def _looks_like_service_subject(text: str | None) -> bool:
+    lowered = clean_text(text).casefold()
+    return bool(lowered and any(marker in lowered for marker in ("услуг", "работ", "оказан", "выполнен")))
+
+
+def _subject_codes_from_document_text(text: str, *, evidence: str) -> list[CodeReference]:
+    result: list[CodeReference] = []
+    lines = [clean_text(line) for line in text.splitlines()]
+    for index, line in enumerate(lines):
+        cleaned = clean_text(line)
+        lowered = cleaned.casefold()
+        if "окпд" not in lowered and "ктру" not in lowered:
+            continue
+        block_lines = [cleaned]
+        found_code_after_marker = bool(KTRU_RE.search(cleaned) or OKPD2_RE.search(cleaned))
+        for next_line in lines[index + 1 : index + 12]:
+            if not clean_text(next_line):
+                if found_code_after_marker:
+                    break
+                continue
+            if KTRU_RE.search(next_line) or OKPD2_RE.search(next_line):
+                found_code_after_marker = True
+                block_lines.append(next_line)
+                continue
+            if found_code_after_marker:
+                break
+        result.extend(
+            _code_references_from_text(
+                "\n".join(block_lines),
+                role="service",
+                evidence=evidence,
+            )
+        )
+    return _dedupe_code_references(result)
+
+
+def _link_codes_to_items_from_text(
+    items: list[PurchaseItem],
+    references: list[CodeReference],
+) -> None:
+    if not items or not references:
+        return
+    for item in items:
+        item_name = clean_text(item.name)
+        if not item_name:
+            continue
+        matches = [
+            reference
+            for reference in references
+            if reference.name and _names_match(item_name, reference.name)
+        ]
+        if not matches:
+            continue
+        ktru_matches = [match for match in matches if match.code_type == "ktru"]
+        okpd2_matches = [match for match in matches if match.code_type == "okpd2"]
+        if not item.ktru_code and len(ktru_matches) == 1:
+            item.ktru_code = ktru_matches[0].code
+            item.parser_warnings.append(
+                "КТРУ проставлен из plain text документа; в таблице отдельной колонки с кодом нет."
+            )
+        if not item.okpd2_code and len(okpd2_matches) == 1:
+            item.okpd2_code = okpd2_matches[0].code
+            item.parser_warnings.append(
+                "ОКПД2 проставлен из plain text документа; в таблице отдельной колонки с кодом нет."
+            )
+        if (len(ktru_matches) > 1 or len(okpd2_matches) > 1) and item.parser_warnings is not None:
+            item.parser_warnings.append(
+                "Для позиции найдено несколько похожих кодов в plain text; код не проставлен автоматически."
+            )
+
+
+def _names_match(left: str, right: str) -> bool:
+    left_norm = _name_key(left)
+    right_norm = _name_key(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm in right_norm or right_norm in left_norm:
+        return True
+    left_tokens = set(left_norm.split())
+    right_tokens = set(right_norm.split())
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    return len(overlap) >= min(3, len(left_tokens), len(right_tokens))
+
+
+def _name_key(value: str | None) -> str:
+    text = clean_text(value).casefold().replace("ё", "е")
+    text = re.sub(r"[^а-яa-z0-9]+", " ", text)
+    stop_words = {"для", "и", "или", "по", "на", "в", "с", "со", "из", "к", "у"}
+    return " ".join(token for token in text.split() if token not in stop_words)
+
+
+def _dedupe_code_references(values: list[CodeReference]) -> list[CodeReference]:
+    result: list[CodeReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for value in values:
+        key = (value.code_type, value.code, value.role)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
 def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> ScheduleApplicationSchema:
     fields = _raw_fields(tables)
+    raw_stages = _stages_from_tables(tables) or _stages_from_schedule_fields(fields)
+    stages = [stage for stage in raw_stages if _is_valid_stage(stage)]
     raw_dict = {field.key: field.value for field in fields}
     full_text = _document_text(ir) + "\n" + "\n".join(
         f"{field.key}: {field.value or ''}" for field in fields
     )
-    delivery_text = _field_value(fields, "срок поставки", "срок выполнения")
+    delivery_text = _field_value(
+        fields,
+        "сроки поставки товара",
+        "срок поставки",
+        "срок оказания",
+        "срок выполнения",
+    )
     contract_term_text = _field_value(fields, "срок исполнения контракта")
     smp_raw = _field_value(fields, "преимуществ", "смп")
     subcontract_raw = _field_value(fields, "субподряд", "сонко")
-    subcontract_percent_raw = _field_value(fields, "процент", "объем привлечения")
+    subcontract_percent_raw = _field_value(fields, "процент", "объем привлечения") or subcontract_raw
+    method_raw = _field_value(fields, "способ закупки", "способ определения", "способ выбора")
+    subject_text = _field_value(fields, "наименование объекта закупки", "предмет закупки")
+    subject_codes, included_goods = _schedule_code_roles(fields, subject_text=subject_text)
     return ScheduleApplicationSchema(
         document_title=_title(ir),
         raw_fields=fields,
         raw_fields_dict=raw_dict,
         empty_fields=[field.key for field in fields if field.is_empty],
         negative_value_fields=[field.key for field in fields if field.is_negative_value],
-        purchase_subject=_field_value(fields, "наименование объекта закупки", "предмет закупки"),
+        purchase_subject=subject_text,
         okpd2_codes=unique_codes(OKPD2_RE, full_text),
         ktru_codes=unique_codes(KTRU_RE, full_text),
+        subject_codes=subject_codes,
         nmck=_money_value(_field_value(fields, "начальная", "нмцк", "цена контракта")),
+        procurement_method_raw=method_raw,
+        procurement_method=_procurement_method(method_raw or full_text),
+        single_supplier_basis_text=_field_value(fields, "основание", "единственный поставщик"),
         funding_source_text=_field_value(fields, "источник финансирования"),
+        delivery_place=_field_value(fields, "место поставки", "адрес поставки", "место оказания"),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
         contract_execution_term_text=contract_term_text,
         contract_execution_term=_term_value(contract_term_text),
+        included_goods=included_goods,
+        stages=stages,
+        has_stages=True if stages else _bool_from_text(_field_value(fields, "этапы исполнения")),
         smp_preference_raw=smp_raw,
         smp_preference=_bool_from_text(smp_raw),
         subcontract_smp_sonko_required_raw=subcontract_raw,
         subcontract_smp_sonko_required=_bool_from_text(subcontract_raw),
         subcontract_smp_sonko_percent_raw=subcontract_percent_raw,
-        subcontract_smp_sonko_percent=parse_decimal(subcontract_percent_raw),
+        subcontract_smp_sonko_percent=_percent_from_text(subcontract_percent_raw),
         application_security_raw=_field_value(fields, "обеспечение заявки"),
         application_security=_security_value(_field_value(fields, "обеспечение заявки")),
         contract_security_raw=_field_value(fields, "обеспечение исполнения контракта"),
@@ -505,13 +1034,13 @@ def _contract_attachment_warnings(
     )
     if expects_description and not description_items:
         warnings.append(
-            "Contract references an 'Описание объекта закупки' attachment, "
-            "but no embedded purchase-description item table was parsed."
+            "В контракте указано приложение 'Описание объекта закупки', "
+            "но заполненная таблица описания объекта закупки внутри контракта не найдена."
         )
     if expects_specification and not specification_items:
         warnings.append(
-            "Contract references a 'Спецификация' attachment, "
-            "but no embedded specification item table was parsed."
+            "В контракте указано приложение 'Спецификация', "
+            "но заполненные позиции спецификации не найдены; таблица может быть пустой или шаблонной."
         )
     return warnings
 
@@ -519,6 +1048,8 @@ def _contract_attachment_warnings(
 def _purchase_request(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseRequestSchema:
     text = _document_text(ir)
     nmck = _money_value(text)
+    stages = _stages_from_tables(tables)
+    stages_text = _line_after_marker(text, "этапы исполнения", "этапность")
     return PurchaseRequestSchema(
         document_title=_title(ir),
         purchase_subject=_line_after_marker(text, "предмет закупки", "объект закупки"),
@@ -528,6 +1059,9 @@ def _purchase_request(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseRequ
         single_supplier_basis_text=_line_after_marker(text, "основание"),
         delivery_term_text=_line_after_marker(text, "срок поставки", "срок выполнения"),
         delivery_term=_term_value(_line_after_marker(text, "срок поставки", "срок выполнения")),
+        stages_text=stages_text,
+        has_stages=True if stages else _bool_from_text(stages_text),
+        stages=stages,
         attachments=_request_attachments(ir, text, tables),
     )
 
@@ -561,6 +1095,23 @@ def _line_after_marker(text: str, *markers: str) -> str | None:
     return None
 
 
+def _date_after_marker(text: str, *markers: str) -> date | None:
+    value = _line_after_marker(text, *markers)
+    if value is None:
+        return None
+    match = re.search(r"\b(\d{1,2})[.](\d{1,2})[.](\d{2,4})\b", value)
+    if not match:
+        return None
+    day, month, year = match.groups()
+    year_int = int(year)
+    if year_int < 100:
+        year_int += 2000
+    try:
+        return date(year_int, int(month), int(day))
+    except ValueError:
+        return None
+
+
 def _line_value_after_marker(text: str, *markers: str) -> str | None:
     lowered_markers = [marker.casefold() for marker in markers]
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
@@ -571,6 +1122,121 @@ def _line_value_after_marker(text: str, *markers: str) -> str | None:
             if tail:
                 return tail
     return _line_after_marker(text, *markers)
+
+
+def _explicit_line_value_after_marker(text: str, *markers: str) -> str | None:
+    lowered_markers = [marker.casefold() for marker in markers]
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for line in lines:
+        lowered = line.casefold()
+        if not any(marker in lowered for marker in lowered_markers):
+            continue
+        if ":" not in line:
+            continue
+        tail = clean_text(line.split(":", 1)[1])
+        if tail and not _is_structured_placeholder(tail):
+            return tail
+    return None
+
+
+def _section_after_heading(text: str, heading_pattern: str, *, max_chars: int = 1600) -> str | None:
+    match = re.search(heading_pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    chunk = text[match.end() : match.end() + max_chars]
+    stop = re.search(r"\n\s*\d{1,2}\.\s+[А-ЯЁA-Z]", chunk)
+    if stop:
+        chunk = chunk[: stop.start()]
+    return clean_text(chunk) or None
+
+
+def _is_structured_placeholder(text: str | None) -> bool:
+    lowered = clean_text(text).casefold()
+    return bool(lowered and "указывается в структурированном виде" in lowered)
+
+
+def _contract_funding_source(text: str) -> str | None:
+    value = _explicit_line_value_after_marker(text, "источник финансирования")
+    if value:
+        return value
+    return None
+
+
+def _contract_security_text(text: str) -> str | None:
+    section = _section_after_heading(
+        text,
+        r"(?:^|\n)\s*\d+(?:\.\d+)?\.\s*обеспечение исполнения контракта\b",
+    )
+    if section:
+        sentence = _first_sentence_with(section, "обеспечение исполнения", "не предусмотр")
+        if sentence:
+            return sentence
+        if not _is_structured_placeholder(section):
+            return section[:700]
+    return _explicit_line_value_after_marker(text, "обеспечение исполнения контракта")
+
+
+def _contract_warranty_text(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        if any(marker in lowered for marker in ("обеспечение гарантий", "устранение недостатков")):
+            continue
+        if "гарантийн" not in lowered and "гарантия" not in lowered:
+            continue
+        if any(marker in lowered for marker in ("неустой", "штраф", "пен", "претензи")):
+            continue
+        window = " ".join(lines[index : index + 3])
+        window_lowered = window.casefold()
+        if not any(
+            marker in window_lowered
+            for marker in (
+                "гарантийный срок составляет",
+                "гарантийный срок на",
+                "гарантия составляет",
+                "месяц",
+                "лет",
+                "год",
+            )
+        ):
+            continue
+        line_lowered = line.casefold()
+        if any(marker in line_lowered for marker in ("гарантийный срок", "гарантия составляет")):
+            return line[:1200]
+        return window[:1200]
+    return None
+
+
+def _contract_responsibility_section(text: str) -> str | None:
+    section = _section_after_heading(
+        text,
+        r"(?:^|\n)\s*\d+(?:\.\d+)?\.\s*ответственн\w*\s+сторон\b",
+        max_chars=12000,
+    )
+    if section:
+        return section
+    lines = [clean_text(line) for line in text.splitlines()]
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        if "ответственн" not in lowered or "сторон" not in lowered:
+            continue
+        chunk_lines: list[str] = []
+        for next_line in lines[index : index + 80]:
+            if chunk_lines and re.match(r"^\d{1,2}\.\s+[А-ЯЁA-Z]", next_line):
+                break
+            if clean_text(next_line):
+                chunk_lines.append(next_line)
+        return clean_text("\n".join(chunk_lines)) or None
+    return None
+
+
+def _first_sentence_with(text: str, *markers: str) -> str | None:
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        cleaned = clean_text(sentence)
+        lowered = cleaned.casefold()
+        if cleaned and all(marker in lowered for marker in markers):
+            return cleaned
+    return None
 
 
 def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]:
@@ -649,8 +1315,9 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
     text = _document_text(ir)
     sources: list[PriceSource] = []
     items: list[NmckItem] = []
+    stages = _stages_from_tables(tables)
     for table in tables:
-        if table.table_type != "nmck_calculation_table":
+        if table.table_type not in {"nmck_calculation_table", "nmck_staged_calculation_table"}:
             continue
         for source in table.compact_json.get("price_sources", []):
             raw_header = source.get("raw_header") or source["source_id"]
@@ -692,10 +1359,14 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
         document_title=_title(ir),
         nmck_method=_line_after_marker(text, "метод"),
         purchase_subject=_line_after_marker(text, "предмет закупки", "объект закупки"),
+        okpd2_codes=unique_codes(OKPD2_RE, text),
+        ktru_codes=unique_codes(KTRU_RE, text),
+        subject_codes=_subject_codes_from_document_text(text, evidence="nmck_text:codes"),
         total_amount=_money_value(text),
         total_amount_text=(_money_value(text).raw if _money_value(text) else None),
         price_sources=sources,
         items=items,
+        stages=stages,
         variation_coefficient_raw=_line_after_marker(text, "коэффициент вариации"),
         variation_coefficient=parse_decimal(_line_after_marker(text, "коэффициент вариации")),
     )
@@ -726,28 +1397,55 @@ def _calculate_nmck_item(item: NmckItem) -> None:
 def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseDescriptionSchema:
     text = _document_text(ir)
     delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
+    stages = _stages_from_tables(tables)
+    subject_codes = _subject_codes_from_document_text(text, evidence="ooz_text:codes")
+    items = _purchase_items_from_tables(tables)
+    _link_codes_to_items_from_text(items, subject_codes)
     return PurchaseDescriptionSchema(
         document_title=_title(ir),
         purchase_subject=_line_after_marker(text, "предмет закупки", "объект закупки"),
+        okpd2_codes=unique_codes(OKPD2_RE, text),
+        ktru_codes=unique_codes(KTRU_RE, text),
+        subject_codes=subject_codes,
         delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
-        items=_purchase_items_from_tables(tables),
+        stages=stages,
+        items=items,
         warranty_requirements_text=_line_after_marker(text, "гаранти"),
+        additional_characteristics_justification_text=_additional_characteristics_justification(text),
     )
+
+
+def _additional_characteristics_justification(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        if "обоснован" not in lowered:
+            continue
+        if any(marker in lowered for marker in ("дополнитель", "характерист")):
+            return " ".join(lines[index : index + 4])[:1600]
+    return None
 
 
 def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftSchema:
     text = _document_text(ir)
     delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
     contract_execution_text = _line_value_after_marker(text, "срок исполнения контракта")
-    contract_security_text = _line_after_marker(text, "обеспечение исполнения контракта")
+    contract_security_text = _contract_security_text(text)
     warranty_security_text = _line_after_marker(text, "обеспечение гарантий")
+    funding_source = _contract_funding_source(text)
+    smp_subcontract_text = _contract_smp_sonko_clause(text)
+    responsibility_section = _contract_responsibility_section(text)
     description_items = _purchase_items_from_tables(tables)
+    subject_codes = _subject_codes_from_document_text(text, evidence="contract_text:codes")
+    _link_codes_to_items_from_text(description_items, subject_codes)
     specification_items = _contract_specification_items_from_tables(tables)
+    stages = _stages_from_tables(tables)
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
     embedded = PurchaseDescriptionSchema(
+        stages=stages,
         items=description_items,
         parser_warnings=["Embedded purchase description inferred from contract tables."],
     )
@@ -755,14 +1453,23 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         document_title=_title(ir),
         contract_number=_line_after_marker(text, "контракт №", "контракт n"),
         subject=_line_after_marker(text, "предмет контракта", "предмет закупки"),
+        okpd2_codes=unique_codes(OKPD2_RE, text),
+        ktru_codes=unique_codes(KTRU_RE, text),
+        subject_codes=subject_codes,
         price=_contract_price_value(text, specification_items),
-        funding_source=_line_after_marker(text, "источник финансирования"),
+        funding_source=funding_source,
         delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
         contract_execution_term_text=contract_execution_text,
         contract_execution_term=_term_value(contract_execution_text),
-        warranty_text=_line_after_marker(text, "гаранти"),
+        stages=stages,
+        warranty_text=_contract_warranty_text(text),
+        responsibility_section_text=responsibility_section,
+        subcontract_smp_sonko_required_raw=smp_subcontract_text,
+        subcontract_smp_sonko_required=_contract_smp_sonko_required(smp_subcontract_text),
+        subcontract_smp_sonko_percent_raw=smp_subcontract_text,
+        subcontract_smp_sonko_percent=_percent_from_text(smp_subcontract_text),
         contract_security_raw=contract_security_text,
         contract_security=_security_value(contract_security_text),
         warranty_security_raw=warranty_security_text,
@@ -799,6 +1506,32 @@ def _commercial_offer(ir: DocumentIR, tables: list[ParsedTable]) -> CommercialOf
         supplier_name=_line_after_marker(text, "поставщик", "организация"),
         inn=next(iter(re.findall(r"\b\d{10}(?:\d{2})?\b", text)), None),
         outgoing_number=_line_after_marker(text, "исх", "исходящий"),
-        items=_purchase_items_from_tables(tables),
+        outgoing_date=_date_after_marker(text, "исх", "исходящий"),
+        offer_date=_date_after_marker(text, "дата", "от"),
+        purchase_subject=_line_after_marker(text, "предмет", "объект закупки"),
+        delivery_term_text=_line_after_marker(text, "срок поставки", "срок оказания", "срок выполнения"),
+        delivery_place=_line_after_marker(text, "место поставки", "место оказания", "адрес поставки"),
+        advance_payment_text=_line_after_marker(text, "аванс", "авансовый"),
+        vat_text=_line_after_marker(text, "ндс"),
+        items=_commercial_offer_items_from_tables(tables),
         total_amount=_money_value(text),
     )
+
+
+def _commercial_offer_items_from_tables(tables: list[ParsedTable]) -> list[CommercialOfferItem]:
+    items = []
+    for item in _purchase_items_from_tables(tables):
+        items.append(
+            CommercialOfferItem(
+                row_number=item.row_number,
+                name=item.name,
+                okpd2_code=item.okpd2_code,
+                ktru_code=item.ktru_code,
+                unit=item.unit,
+                quantity=item.quantity,
+                quantity_raw=item.quantity_raw,
+                notes=item.notes,
+                evidence_text=item.evidence,
+            )
+        )
+    return items
