@@ -336,6 +336,37 @@ def _render_ktru_registry_section(by_id: dict[str, CheckResult]) -> list[str]:
     return lines
 
 
+def _render_ktru_cards(result: CheckResult) -> list[str]:
+    cards = result.details.get("ktru_cards") if result.details else None
+    if not isinstance(cards, list) or not cards:
+        return []
+    lines: list[str] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        code = card.get("code") or "?"
+        if card.get("unavailable"):
+            lines.append(f"- <warn>КТРУ {code} не удалось получить через zakupki.gov.ru.</warn>")
+            lines.append("")
+            continue
+        lines.append(f"- <ok>КТРУ {code} найден.</ok>")
+        if card.get("url"):
+            lines.append(f"  Ссылка на товар: {card['url']}")
+        reference_name = card.get("reference_name") or "не найдено"
+        item_names = card.get("item_names") or []
+        if card.get("name_matches"):
+            lines.append("  <ok>Наименование совпадает с эталонной записью КТРУ.</ok>")
+        else:
+            lines.append("  <warn>Наименование отличается от эталонной записи КТРУ или требует проверки.</warn>")
+        lines.append(f"  Наименование КТРУ: {reference_name}")
+        for item_name in item_names:
+            lines.append(f"  Наименование в документах: {item_name}")
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
     result = by_id.get("manual.national_regime_1875")
     lines = ["2) Проверка ОКПД на вхождение в постановление 1875:"]
@@ -402,8 +433,15 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
     if additional is not None:
         lines.append("")
         rendered = _render_ktru_additional_rows(additional)
-        lines.extend(rendered if rendered else _render_result(additional))
     return lines
+
+
+def _render_supplier_prices_section(by_id: dict[str, CheckResult]) -> list[str]:
+    lines = ["7) Сравнение цен услуг поставщиков в ОНМЦК:"]
+    result = by_id.get("strict.onmck.supplier_prices")
+    if result is None:
+        lines.append("- не выполнялось")
+        return lines
     summary_lines = result.details.get("summary_lines") if result.details else None
     if isinstance(summary_lines, list) and summary_lines:
         for item in summary_lines:
@@ -431,21 +469,50 @@ def _render_pp1875_matches(result: CheckResult) -> list[str]:
         lines.append("")
     while lines and lines[-1] == "":
         lines.pop()
-    return lines
-
-
 def _render_semantic_result(result: CheckResult) -> list[str]:
     return _render_titled_result(result)
 
 
+def _render_stage_table(result: CheckResult) -> list[str]:
+    label = STATUS_LABELS[result.status]
+    lines = [f"- <b>{_human_text(result.title)}</b> - {label}. {_human_text(result.report_text)}"]
+    summary_lines = result.details.get("summary_lines") if result.details else None
+    clean_lines = []
+    if isinstance(summary_lines, list):
+        for item in summary_lines:
+            s_item = str(item).strip()
+            if s_item.startswith("[{") or s_item.startswith("{"):
+                continue
+            clean_lines.append(s_item)
+
+    if clean_lines:
+        lines.append("")
+        lines.append("| Документ | Согласованность и сроки этапов |")
+        lines.append("|---|---|")
+        for line in clean_lines:
+            if ":" in line:
+                doc, rest = line.split(":", 1)
+                lines.append(f"| <doc>{doc.strip()}</doc> | {rest.strip()} |")
+            else:
+                lines.append(f"| <doc>Сверка</doc> | {line} |")
+        lines.append("")
+    return lines
+
+
 def _render_titled_result(result: CheckResult) -> list[str]:
+    if result.check_id in ("strict.plan.stages", "semantic.stages"):
+        return _render_stage_table(result)
     label = STATUS_LABELS[result.status]
     lines = [f"- <b>{_human_text(result.title)}</b> - {label}. {_human_text(result.report_text)}"]
     summary_lines = result.details.get("summary_lines") if result.details else None
     if isinstance(summary_lines, list):
         for item in summary_lines:
             if item:
-                lines.append(f"  - {_human_text(str(item))}")
+                text = _human_text(str(item))
+                for doc_key, doc_label in DOCUMENT_LABELS.items():
+                    if text.startswith(f"{doc_label}:"):
+                        text = text.replace(f"{doc_label}:", f"<doc>{doc_label}</doc>:", 1)
+                lines.append(f"  - {text}")
     if result.check_id == "strict.funding_source" and result.details:
         lines.extend(_field_lines(result.details, ["schedule_application", "contract_draft"]))
     if result.check_id == "strict.securities" and result.details:

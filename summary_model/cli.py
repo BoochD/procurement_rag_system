@@ -39,6 +39,8 @@ def _load_manifest(path: Path | None) -> dict[str, dict]:
 def _inputs(input_dir: Path, manifest: dict[str, dict]) -> list[InputDocument]:
     result = []
     for path in sorted(input_dir.glob("*.docx")):
+        if path.name.startswith("~$"):
+            continue
         entry = manifest.get(path.name, {})
         raw_hint = entry.get("type_hint")
         result.append(

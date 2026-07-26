@@ -606,3 +606,99 @@ def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(tmp_path, m
     assert by_id["manual.national_regime_1875"]["status"] == "manual_review"
     assert "manual.penalties" not in by_id
     assert run_payload["with_ktru"] is True
+
+
+def test_commercial_offer_money_value_coercion():
+    from summary_model.extraction_models import CommercialOfferSchema, MoneyValue
+    from decimal import Decimal
+
+    # Test float input from VLM
+    offer_float = CommercialOfferSchema.model_validate({"supplier_name": "ООО ТЕСТ", "total_amount": 107648484.0})
+    assert isinstance(offer_float.total_amount, MoneyValue)
+    assert offer_float.total_amount.amount == Decimal("107648484.0")
+    assert offer_float.supplier_name == "ООО ТЕСТ"
+
+    # Test int input
+    offer_int = CommercialOfferSchema.model_validate({"total_amount": 50000})
+    assert offer_int.total_amount.amount == Decimal("50000")
+
+    # Test dict input
+    offer_dict = CommercialOfferSchema.model_validate({"total_amount": {"raw": "50 000 руб.", "amount": "50000"}})
+    assert offer_dict.total_amount.amount == Decimal("50000")
+    assert offer_dict.total_amount.raw == "50 000 руб."
+
+
+def test_procurement_method_translation_and_auction_guard():
+    from summary_model.checks.semantic_llm import _apply_procurement_method_guard, SemanticCheckFinding
+    from summary_model.extraction_models import ProcurementPackageExtraction, ScheduleApplicationSchema
+
+    pkg = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(procurement_method_raw="Электронный аукцион")
+    )
+    finding = SemanticCheckFinding(
+        check_id="semantic.procurement_method",
+        status="warning",
+        message="Способ закупки: auction",
+        compared_values=["Заявка в план-график: auction"],
+    )
+
+    guarded = _apply_procurement_method_guard(pkg, finding)
+    assert guarded.status == "passed"
+    assert "Электронный аукцион" in guarded.message
+    assert "обоснование ЕП не требуется" in guarded.message
+    assert "auction" not in guarded.compared_values[0]
+    assert "Электронный аукцион" in guarded.compared_values[0]
+
+
+def test_stage_table_markdown_rendering():
+    from summary_model.checks.models import CheckResult
+    from summary_model.checks.report import _render_titled_result
+
+    result = CheckResult(
+        check_id="semantic.stages",
+        title="Этапы исполнения",
+        severity="info",
+        status="passed",
+        mode="semantic",
+        message="Этапы согласованы.",
+        report_text="Порядок и сроки этапов согласованы.",
+        details={
+            "summary_lines": [
+                "Заявка в план-график: 1 этап с даты заключения по 13.07.2026",
+                "Описание объекта закупки: 1 этап с даты заключения по 13.07.2026",
+            ]
+        },
+    )
+
+    lines = _render_titled_result(result)
+    text = "\n".join(lines)
+    assert "| Документ | Согласованность и сроки этапов |" in text
+    assert "| <doc>Заявка в план-график</doc> | 1 этап с даты заключения по 13.07.2026 |" in text
+    assert "[{" not in text
+
+
+def test_mocked_vlm_commercial_offer_extraction(tmp_path, monkeypatch):
+    from summary_model.commercial_offer_vlm import extract_commercial_offer_with_vlm, CommercialOfferVlmOptions
+
+    fake_pdf = tmp_path / "offer.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake pdf content")
+
+    def mock_completion(*_args, **_kwargs):
+        class Choice:
+            message = type("Msg", (), {"content": '{"supplier_name": "ООО Ромашка", "total_amount": 123456.0, "items": []}'})()
+        class Response:
+            choices = [Choice()]
+        return Response()
+
+    import shared_modules.llm_models as llm_mod
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = type("Chat", (), {"completions": type("Comp", (), {"create": mock_completion})()})()
+
+    monkeypatch.setattr(llm_mod, "get_chatGPT_client", lambda: FakeOpenAI())
+    monkeypatch.setattr("summary_model.commercial_offer_vlm._pdf_images", lambda p: [])
+
+    result = extract_commercial_offer_with_vlm(fake_pdf, options=CommercialOfferVlmOptions(enabled=True))
+    assert result.offer.supplier_name == "ООО Ромашка"
+    assert result.offer.total_amount.amount == Decimal("123456.0")
+
