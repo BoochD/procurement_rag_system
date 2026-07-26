@@ -95,10 +95,18 @@ def run_ktru_characteristic_checks(
         legal_lookup, required_names = _build_legal_lookup(legal_characteristics)
         present_required_names: set[str] = set()
         common_info = common_cache.get(ktru_code)
+        plan_okpd2_code, plan_okpd2_source = _plan_okpd2_for_item(package, item)
+        rule_okpd2_code = item.okpd2_code or plan_okpd2_code
+        rule_okpd2_source = (
+            "позиция ООЗ"
+            if item.okpd2_code
+            else plan_okpd2_source
+        )
         extra_allowed = _can_add_extra_characteristics(
             registry=registry,
             common_info=common_info,
-            item_okpd2_code=item.okpd2_code,
+            item_okpd2_code=rule_okpd2_code,
+            item_okpd2_source=rule_okpd2_source,
             ktru_code=ktru_code,
             method_kind=method_kind,
             method_label=method_label,
@@ -117,6 +125,9 @@ def run_ktru_characteristic_checks(
                     {
                         "ktru_code": ktru_code,
                         "okpd2_code": item.okpd2_code,
+                        "plan_okpd2_code": plan_okpd2_code,
+                        "rule_okpd2_code": extra_allowed.get("okpd2_code"),
+                        "rule_okpd2_source": extra_allowed.get("okpd2_source"),
                         "item_name": item.name,
                         "characteristic_name": characteristic.name,
                         "value": characteristic.value,
@@ -559,11 +570,75 @@ def _safe_common_info(registry: Any, ktru_code: str | None) -> dict[str, Any] | 
         return None
 
 
+def _plan_okpd2_for_item(
+    package: ProcurementPackageExtraction,
+    item: PurchaseItem,
+) -> tuple[str | None, str | None]:
+    """Find one unambiguous plan item that describes the OOZ position.
+
+    The plan is the comparison baseline. Some OOZ tables only carry a KTRU
+    code, while the corresponding supplied good in the plan carries an OKPD2
+    code. This deliberately refuses to choose when several plan rows fit.
+    """
+    schedule = package.schedule_application
+    if schedule is None:
+        return None, None
+
+    candidates = list(getattr(schedule, "included_goods", []) or [])
+    exact_ktru = [
+        candidate
+        for candidate in candidates
+        if item.ktru_code
+        and normalize_code(getattr(candidate, "ktru_code", None)) == normalize_code(item.ktru_code)
+        and normalize_code(getattr(candidate, "okpd2_code", None))
+    ]
+    if len(exact_ktru) == 1:
+        return normalize_code(exact_ktru[0].okpd2_code), "позиция ПГ по КТРУ"
+
+    name_matches = [
+        candidate
+        for candidate in candidates
+        if normalize_code(getattr(candidate, "okpd2_code", None))
+        and _purchase_names_match(item.name, getattr(candidate, "name", None))
+    ]
+    unique_codes = {normalize_code(candidate.okpd2_code) for candidate in name_matches}
+    if len(unique_codes) == 1:
+        return unique_codes.pop(), "позиция ПГ по наименованию"
+    return None, None
+
+
+def _purchase_names_match(left: str | None, right: str | None) -> bool:
+    left_tokens = _purchase_name_tokens(left)
+    right_tokens = _purchase_name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    for left_token in left_tokens:
+        if any(
+            left_token == right_token
+            or (len(left_token) >= 5 and len(right_token) >= 5 and left_token[:5] == right_token[:5])
+            for right_token in right_tokens
+        ):
+            return True
+    return False
+
+
+def _purchase_name_tokens(value: str | None) -> set[str]:
+    ignored = {"товар", "услуга", "услуги", "система", "системы", "данных", "для", "и"}
+    return {
+        token
+        for token in normalize_text(value).split()
+        if len(token) >= 4 and token not in ignored
+    }
+
+
 def _can_add_extra_characteristics(
     *,
     registry: Any,
     common_info: dict[str, Any] | None,
     item_okpd2_code: str | None,
+    item_okpd2_source: str | None,
     ktru_code: str,
     method_kind: str,
     method_label: str,
@@ -573,16 +648,22 @@ def _can_add_extra_characteristics(
         return {
             "can_add_extra_characteristics": False,
             "reason": "Для закупки по ч. 12 ст. 93 дополнительные характеристики не допускаются.",
+            "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
+            "okpd2_source": item_okpd2_source or "префикс КТРУ",
         }
     if method_kind == "single_supplier":
         return {
             "can_add_extra_characteristics": True,
             "reason": "Для закупки у единственного поставщика дополнительные характеристики допустимы.",
+            "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
+            "okpd2_source": item_okpd2_source or "префикс КТРУ",
         }
     if not has_ktru_characteristics:
         return {
             "can_add_extra_characteristics": True,
             "reason": "В карточке КТРУ отсутствуют характеристики; дополнительные характеристики допустимы.",
+            "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
+            "okpd2_source": item_okpd2_source or "префикс КТРУ",
         }
 
     okpd_candidates = _okpd_candidates(common_info, item_okpd2_code, ktru_code)
@@ -594,10 +675,13 @@ def _can_add_extra_characteristics(
                 f"Не удалось однозначно определить ОКПД2 для правила дополнительных характеристик "
                 f"по КТРУ {ktru_code}."
             ),
+            "okpd2_code": None,
+            "okpd2_source": None,
         }
     
     code_diff_note = ""
     ktru_okpd = _okpd2_from_ktru(ktru_code)
+    okpd2_source = item_okpd2_source or "префикс КТРУ"
     if item_okpd2_code and ktru_okpd and item_okpd2_code != ktru_okpd:
         code_diff_note = f" (ОКПД2 в ПГ: {item_okpd2_code}, в КТРУ: {ktru_okpd}; проверка выполнена по коду из ПГ)."
 
@@ -610,6 +694,8 @@ def _can_add_extra_characteristics(
                 f"Не удалось проверить ОКПД2 {primary_okpd} по ПП №1875 "
                 f"для правила дополнительных характеристик.{code_diff_note}"
             ),
+            "okpd2_code": primary_okpd,
+            "okpd2_source": okpd2_source,
         }
     if not getattr(okpd_result, "found", False):
         return {
@@ -618,6 +704,8 @@ def _can_add_extra_characteristics(
                 f"ОКПД2 {primary_okpd} не найден в приложениях 1 и 2 ПП №1875; "
                 f"дополнительные характеристики допустимы.{code_diff_note}"
             ),
+            "okpd2_code": primary_okpd,
+            "okpd2_source": okpd2_source,
         }
     if _is_special_pp1875_position(okpd_result):
         return {
@@ -625,6 +713,8 @@ def _can_add_extra_characteristics(
             "reason": (
                 f"По коду ОКПД2 {primary_okpd} Постановление Правительства № 1875 полностью запрещает установление любых дополнительных характеристик.{code_diff_note}"
             ),
+            "okpd2_code": primary_okpd,
+            "okpd2_source": okpd2_source,
         }
     return {
         "can_add_extra_characteristics": True,
@@ -632,6 +722,8 @@ def _can_add_extra_characteristics(
             f"ОКПД2 {primary_okpd} не попадает в специальные позиции ПП №1875; "
             f"дополнительные характеристики допустимы.{code_diff_note}"
         ),
+        "okpd2_code": primary_okpd,
+        "okpd2_source": okpd2_source,
     }
 
 
@@ -660,9 +752,62 @@ def _okpd_candidates(
     return candidates
 
 
+def _clean_char_value(val: str) -> str:
+    s = normalize_text(str(val or ""))
+    s = re.sub(r"^[\(\[\{\d\.\:\s]+", "", s)
+    s = re.sub(r"[\)\]\}\s]+$", "", s)
+    return s.strip().casefold()
+
+
+def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
+    normalized_value = _name_key(value)
+    visual_value = _visual_key(value)
+    clean_val = _clean_char_value(value)
+    value_number = _number(value)
+    doc_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(value)))
+
+    for allowed in allowed_values:
+        normalized_allowed = _name_key(allowed)
+        if not normalized_allowed:
+            continue
+        if normalized_value == normalized_allowed:
+            return True
+        if visual_value == _visual_key(allowed):
+            return True
+        if clean_val and clean_val in _clean_char_value(allowed):
+            return True
+        if doc_codes:
+            allowed_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(allowed)))
+            if doc_codes.intersection(allowed_codes):
+                return True
+        if _range_match(value, allowed):
+            return True
+        allowed_number = _number(allowed)
+        if value_number is not None and allowed_number is not None and value_number == allowed_number:
+            return True
+    return False
+
+
 def _okpd2_from_ktru(ktru_code: str | None) -> str | None:
     match = re.match(r"(\d{2}\.\d{2}\.\d{2}\.\d{3})-", str(ktru_code or ""))
     return match.group(1) if match else None
+
+
+def _clean_text(value: Any) -> str:
+    return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
+
+
+def _name_key(value: Any) -> str:
+    return normalize_text(_clean_text(value))
+
+
+def _visual_key(value: Any) -> str:
+    return _clean_text(value).translate(LOOKALIKE_LATIN_TO_CYRILLIC).casefold()
+
+
+def _split_value(value: Any) -> list[str]:
+    text = _clean_text(value)
+    return [part.strip() for part in re.split(r"\s*[;\n\r]+\s*", text) if part.strip()]
 
 
 def _is_special_pp1875_position(okpd_result: Any) -> bool:
@@ -681,23 +826,6 @@ def _is_special_pp1875_position(okpd_result: Any) -> bool:
     return False
 
 
-def _split_value(value: Any) -> list[str]:
-    text = _clean_text(value)
-    return [part.strip() for part in re.split(r"\s*[;\n\r]+\s*", text) if part.strip()]
-
-
-def _clean_text(value: Any) -> str:
-    return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
-
-
-def _name_key(value: Any) -> str:
-    return normalize_text(_clean_text(value))
-
-
-def _visual_key(value: Any) -> str:
-    return _clean_text(value).translate(LOOKALIKE_LATIN_TO_CYRILLIC).casefold()
-
-
 def _number(value: Any) -> float | None:
     text = normalize_text(str(value)).replace(",", ".")
     text = re.sub(r"[^\d.\-]+", "", text)
@@ -709,10 +837,20 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _clean_char_value(val: str) -> str:
+    s = normalize_text(str(val or ""))
+    s = re.sub(r"^[\(\[\{\d\.\:\s]+", "", s)
+    s = re.sub(r"[\)\]\}\s]+$", "", s)
+    return s.strip().casefold()
+
+
 def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
     normalized_value = _name_key(value)
     visual_value = _visual_key(value)
+    clean_val = _clean_char_value(value)
     value_number = _number(value)
+    doc_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(value)))
+
     for allowed in allowed_values:
         normalized_allowed = _name_key(allowed)
         if not normalized_allowed:
@@ -721,6 +859,12 @@ def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
             return True
         if visual_value == _visual_key(allowed):
             return True
+        if clean_val and clean_val in _clean_char_value(allowed):
+            return True
+        if doc_codes:
+            allowed_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(allowed)))
+            if doc_codes.intersection(allowed_codes):
+                return True
         if _range_match(value, allowed):
             return True
         allowed_number = _number(allowed)

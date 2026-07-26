@@ -78,7 +78,35 @@ SEMANTIC_CHECKS_PROMPT = """
 В compared_values кратко перечисляй найденные значения с конкретным названием
 источника, например "Заявка в план-график: ...", "ООЗ: ...",
 "Проект контракта: ...". Не используй общий префикс "Документ:".
+
+ДЛЯ semantic.warranty: Будь предельно лаконичен! Запрещено цитировать длинные многостраничные технические описания. Выделяй только ключевые цифры и обязательно сохраняй точные ссылки на пункты/разделы/таблицы документа (например: 'ООЗ (п. 1.5, Таб. 1): 12 мес. на ПНР, 36 мес. на серверы'). Не пиши стены текста!
 """
+
+
+def _apply_warranty_guard(
+    finding: SemanticCheckFinding,
+) -> SemanticCheckFinding:
+    if finding.check_id != "semantic.warranty":
+        return finding
+
+    cleaned_values = []
+    for val in finding.compared_values:
+        s_val = str(val).strip()
+        if len(s_val) > 200:
+            if ":" in s_val[:60]:
+                prefix, rest = s_val.split(":", 1)
+                s_val = f"{prefix.strip()}: {rest.strip()[:180]}..."
+            else:
+                s_val = f"{s_val[:200]}..."
+        cleaned_values.append(s_val)
+
+    return SemanticCheckFinding(
+        check_id=finding.check_id,
+        status=finding.status,
+        message=finding.message,
+        compared_values=cleaned_values,
+        evidence=finding.evidence,
+    )
 
 
 def run_semantic_llm_checks(
@@ -106,6 +134,7 @@ def run_semantic_llm_checks(
             continue
         finding = _apply_delivery_term_guard(package, finding)
         finding = _apply_procurement_method_guard(package, finding)
+        finding = _apply_warranty_guard(finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
 
@@ -304,7 +333,10 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
 
 def _stage_text(has_stages, stages) -> str | None:
     if stages:
-        return json.dumps(_dump(stages), ensure_ascii=False, default=str)
+        numbers = [str(getattr(stage, "stage_number", "")).strip() for stage in stages]
+        numbers = [number for number in numbers if number]
+        suffix = f": {', '.join(numbers)}" if numbers else ""
+        return f"структурированно извлечено этапов: {len(stages)}{suffix}"
     if has_stages is False:
         return "этапы не предусмотрены"
     if has_stages is True:

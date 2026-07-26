@@ -327,6 +327,15 @@ def _date_from_text(text: str | None) -> date | None:
         return None
 
 
+def _explicit_stage_start_date(text: str | None) -> date | None:
+    """A stage can start on contract signing, which is not a calendar date."""
+    source = clean_text(text)
+    if not source:
+        return None
+    match = re.search(r"\bс\s+(\d{2}\.\d{2}\.\d{4})\b", source, flags=re.IGNORECASE)
+    return _date_from_text(match.group(1)) if match else None
+
+
 def _stage_from_payload(table: ParsedTable, payload: dict) -> ProcurementStage:
     price = _money_value_from_raw(payload.get("price_raw"))
     service_term_text = clean_text(payload.get("service_term_text")) or None
@@ -481,7 +490,7 @@ def _stages_from_schedule_fields(fields: list[RawField]) -> list[ProcurementStag
                 stage_number=number,
                 stage_name=f"{number} этап",
                 service_term_text=service_term_text,
-                service_start_date=_date_from_text(service_term_text),
+                service_start_date=_explicit_stage_start_date(service_term_text),
                 service_end_date=_last_date_from_text(service_term_text),
                 quantity_text=quantity,
                 evidence="schedule_application:raw_fields",
@@ -491,6 +500,44 @@ def _stages_from_schedule_fields(fields: list[RawField]) -> list[ProcurementStag
             )
         )
     return stages
+
+
+def _merge_schedule_stages(
+    table_stages: list[ProcurementStage],
+    field_stages: list[ProcurementStage],
+) -> list[ProcurementStage]:
+    """Keep table evidence but fill sparse plan stages from named plan fields."""
+    by_number = {
+        clean_text(stage.stage_number): stage.model_copy(deep=True)
+        for stage in table_stages
+        if clean_text(stage.stage_number)
+    }
+    for field_stage in field_stages:
+        number = clean_text(field_stage.stage_number)
+        if not number:
+            continue
+        existing = by_number.get(number)
+        if existing is None:
+            by_number[number] = field_stage
+            continue
+        for field_name in (
+            "stage_name",
+            "service_term_text",
+            "service_start_date",
+            "service_end_date",
+            "execution_end_date",
+            "quantity_text",
+        ):
+            if getattr(existing, field_name) in (None, ""):
+                setattr(existing, field_name, getattr(field_stage, field_name))
+        existing.parser_warnings = list(dict.fromkeys([
+            *existing.parser_warnings,
+            *field_stage.parser_warnings,
+        ]))
+    return sorted(
+        by_number.values(),
+        key=lambda stage: int(stage.stage_number) if str(stage.stage_number or "").isdigit() else 9999,
+    )
 
 
 def _bool_from_text(text: str | None) -> bool | None:
@@ -807,7 +854,10 @@ def _dedupe_code_references(values: list[CodeReference]) -> list[CodeReference]:
 
 def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> ScheduleApplicationSchema:
     fields = _raw_fields(tables)
-    raw_stages = _stages_from_tables(tables) or _stages_from_schedule_fields(fields)
+    raw_stages = _merge_schedule_stages(
+        _stages_from_tables(tables),
+        _stages_from_schedule_fields(fields),
+    )
     stages = [stage for stage in raw_stages if _is_valid_stage(stage)]
     raw_dict = {field.key: field.value for field in fields}
     full_text = _document_text(ir) + "\n" + "\n".join(

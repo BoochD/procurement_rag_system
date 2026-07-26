@@ -1,9 +1,14 @@
 import json
+from contextlib import contextmanager
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from summary_model.checks import run_checks
 from summary_model.checks_cli import main as checks_cli_main
 from summary_model.extraction_models import (
+    CommercialOfferItem,
+    CommercialOfferSchema,
     ContractDraftSchema,
     ContractSpecificationItem,
     DocumentEnvelope,
@@ -14,6 +19,7 @@ from summary_model.extraction_models import (
     NmckJustificationSchema,
     PriceSource,
     ProcurementPackageExtraction,
+    ProcurementStage,
     PurchaseItemCharacteristic,
     PurchaseDescriptionSchema,
     PurchaseItem,
@@ -24,6 +30,13 @@ from summary_model.extraction_models import (
     SecurityValue,
     SupplierPrice,
 )
+from summary_model.vlm_lab.models import VlmNmckItem, VlmPurchaseItem, VlmStage
+
+
+@contextmanager
+def _runtime_temp_dir(prefix: str):
+    with TemporaryDirectory(prefix=f"summary_model_{prefix}") as path:
+        yield Path(path)
 
 
 def _base_package() -> ProcurementPackageExtraction:
@@ -222,6 +235,53 @@ def test_checks_pass_core_strict_rules_and_create_manual_reviews():
     assert checks["manual.ktru.characteristics"].status == "manual_review"
 
 
+def test_stage_check_keeps_report_ready_tables_without_json_dump():
+    package = _base_package()
+    package.schedule_application.stages = [
+        ProcurementStage(stage_number="1", stage_name="Поставка", service_term_text="по 13.07.2026", quantity_text="1 усл. ед.")
+    ]
+    package.purchase_description.stages = [
+        ProcurementStage(stage_number="1", stage_name="Поставка", service_term_text="по 13.07.2026", quantity_text="1 усл. ед.")
+    ]
+    package.contract_draft.stages = [
+        ProcurementStage(stage_number="1", stage_name="Поставка", service_term_text="по 13.07.2026", quantity_text="1 усл. ед.")
+    ]
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", stage_name="Поставка", price=MoneyValue(amount=Decimal("200")))
+    ]
+
+    check = _by_id(run_checks(package))["strict.plan.stages"]
+
+    assert len(check.details["stage_tables"]) == 4
+    assert check.details["stage_tables"][0]["rows"][0]["name"] == "Поставка"
+    assert "stage_number" not in str(check.details["stage_tables"])
+
+
+def test_schedule_stage_merge_fills_sparse_table_rows_from_plan_fields():
+    from summary_model.extraction_pipeline import _merge_schedule_stages
+
+    merged = _merge_schedule_stages(
+        [ProcurementStage(stage_number="1", evidence="table")],
+        [ProcurementStage(
+            stage_number="1",
+            stage_name="1 этап",
+            service_term_text="с даты заключения по 13.07.2026",
+            quantity_text="1 усл. ед.",
+            evidence="raw_fields",
+        )],
+    )
+
+    assert len(merged) == 1
+    assert merged[0].service_term_text == "с даты заключения по 13.07.2026"
+    assert merged[0].quantity_text == "1 усл. ед."
+
+
+def test_vlm_notes_accept_string_dict_and_list_values():
+    assert VlmPurchaseItem(notes="Пояснение").notes == ["Пояснение"]
+    assert VlmStage(notes={"reason": "пустая строка"}).notes == ["пустая строка"]
+    assert VlmNmckItem(notes=["первая", "вторая"]).notes == ["первая", "вторая"]
+
+
 def test_missing_required_document_fails():
     package = _base_package()
     package.contract_draft = None
@@ -292,6 +352,103 @@ def test_smp_sonko_subcontract_fails_when_plan_requires_percent_missing_in_contr
     assert "процент" in checks["strict.smp_sonko_subcontract"].message.casefold()
 
 
+def test_plan_ground_truth_text_fields_warn_on_mismatch_and_pass_on_match():
+    package = _base_package()
+    package.schedule_application.purchase_subject = "Поставка картриджей"
+    package.purchase_description.purchase_subject = "Поставка картриджей"
+    package.contract_draft.subject = "Поставка картриджей"
+    package.schedule_application.delivery_term_text = "15 рабочих дней"
+    package.purchase_description.delivery_term_text = "15 рабочих дней"
+    package.contract_draft.delivery_term_text = "30 календарных дней"
+    package.schedule_application.delivery_place = "г. Новосибирск, ул. Крамского 40"
+    package.purchase_description.delivery_place = "г. Новосибирск, ул. Крамского 40"
+    package.contract_draft.delivery_place = "г. Новосибирск, ул. Крамского 40"
+    package.schedule_application.contract_execution_term_text = "до 31.12.2026"
+    package.contract_draft.contract_execution_term_text = "до 31.12.2026"
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.plan.subject"].status == "passed"
+    assert checks["strict.plan.delivery_term"].status == "warning"
+    assert checks["strict.plan.delivery_place"].status == "passed"
+    assert checks["strict.plan.contract_execution_term"].status == "passed"
+
+
+def test_plan_ground_truth_missing_plan_value_requires_manual_review():
+    package = _base_package()
+    package.schedule_application.delivery_place = None
+    package.purchase_description.delivery_place = "г. Новосибирск"
+    package.contract_draft.delivery_place = "г. Новосибирск"
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.plan.delivery_place"].status == "manual_review"
+    assert "не найдено поле" in checks["strict.plan.delivery_place"].message
+
+
+def test_stages_against_plan_handle_absence_missing_structure_and_mismatch():
+    package = _base_package()
+    checks = _by_id(run_checks(package))
+    assert checks["strict.plan.stages"].status == "passed"
+
+    package.schedule_application.has_stages = True
+    package.schedule_application.stages = []
+    checks = _by_id(run_checks(package))
+    assert checks["strict.plan.stages"].status == "manual_review"
+
+    package.schedule_application.stages = [
+        ProcurementStage(stage_number="1", stage_name="1 этап", service_term_text="10 дней"),
+        ProcurementStage(stage_number="2", stage_name="2 этап", service_term_text="20 дней"),
+    ]
+    package.purchase_description.stages = [
+        ProcurementStage(stage_number="1", stage_name="1 этап", service_term_text="10 дней")
+    ]
+    checks = _by_id(run_checks(package))
+    assert checks["strict.plan.stages"].status == "failed"
+    assert any("ООЗ" in line for line in checks["strict.plan.stages"].details["summary_lines"])
+
+
+def test_stage_results_argument_replaces_deterministic_stage_check():
+    from summary_model.checks.models import CheckResult
+
+    package = _base_package()
+    injected = CheckResult(
+        check_id="strict.plan.stages",
+        title="Этапы исполнения",
+        severity="info",
+        status="manual_review",
+        mode="semantic",
+        message="LLM fallback требует проверки.",
+        report_text="LLM fallback требует проверки.",
+        details={"summary_lines": ["Заявка в план-график: этапы требуют проверки"]},
+    )
+
+    checks = _by_id(run_checks(package, stage_results=[injected]))
+
+    assert checks["strict.plan.stages"].status == "manual_review"
+    assert checks["strict.plan.stages"].message == "LLM fallback требует проверки."
+
+
+def test_smp_sonko_subcontract_passes_absent_and_fails_percent_mismatch():
+    package = _base_package()
+    package.schedule_application.subcontract_smp_sonko_required = False
+    package.schedule_application.subcontract_smp_sonko_required_raw = "Отсутствует"
+    package.contract_draft.subcontract_smp_sonko_required = None
+    package.contract_draft.subcontract_smp_sonko_required_raw = None
+    checks = _by_id(run_checks(package))
+    assert checks["strict.smp_sonko_subcontract"].status == "passed"
+
+    package.schedule_application.subcontract_smp_sonko_required = True
+    package.schedule_application.subcontract_smp_sonko_required_raw = "Требуется привлечь СМП/СОНКО"
+    package.schedule_application.subcontract_smp_sonko_percent = Decimal("90")
+    package.contract_draft.subcontract_smp_sonko_required = True
+    package.contract_draft.subcontract_smp_sonko_required_raw = "Привлечь СМП/СОНКО"
+    package.contract_draft.subcontract_smp_sonko_percent = Decimal("25")
+    checks = _by_id(run_checks(package))
+    assert checks["strict.smp_sonko_subcontract"].status == "failed"
+    assert "Процент" in checks["strict.smp_sonko_subcontract"].message
+
+
 def test_contract_penalties_check_pp1042_thresholds():
     package = _base_package()
 
@@ -341,6 +498,72 @@ def test_onmck_supplier_price_report_contains_variation_and_supplier_labels():
     assert any("выбранная минимальная цена 100" in line for line in min_check.details["summary_lines"])
 
 
+def _commercial_offer(
+    *,
+    supplier_name: str,
+    unit_price: Decimal,
+    quantity: Decimal = Decimal("2"),
+    unit: str = "шт",
+) -> CommercialOfferSchema:
+    return CommercialOfferSchema(
+        supplier_name=supplier_name,
+        inn="5400000000",
+        outgoing_number=f"{supplier_name}-1",
+        offer_date="2026-01-01",
+        delivery_term_text="15 рабочих дней",
+        delivery_place="г. Новосибирск",
+        vat_text="НДС не облагается",
+        total_amount=MoneyValue(amount=quantity * unit_price),
+        items=[
+            CommercialOfferItem(
+                row_number="1",
+                name="Картридж",
+                okpd2_code="20.59.12.120",
+                ktru_code="20.59.12.120-00000002",
+                unit=unit,
+                quantity=quantity,
+                unit_price=unit_price,
+                total_price=quantity * unit_price,
+            )
+        ],
+    )
+
+
+def test_commercial_offers_count_and_onmck_match_pass_with_three_offers():
+    package = _base_package()
+    package.commercial_offers_found_count = 3
+    package.commercial_offers = [
+        _commercial_offer(supplier_name="Поставщик 1", unit_price=Decimal("100")),
+        _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
+        _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110")),
+    ]
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["manual.commercial_offers.count"].status == "passed"
+    assert checks["manual.commercial_offers.content"].status == "passed"
+    assert checks["manual.commercial_offers.onmck"].status == "passed"
+    assert any("коэффициент вариации" in line for line in checks["manual.commercial_offers.onmck"].details["summary_lines"])
+
+
+def test_commercial_offers_onmck_match_fails_on_price_quantity_or_unit_mismatch():
+    package = _base_package()
+    package.commercial_offers_found_count = 3
+    package.commercial_offers = [
+        _commercial_offer(supplier_name="Поставщик 1", unit_price=Decimal("101")),
+        _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120"), quantity=Decimal("3")),
+        _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110"), unit="компл"),
+    ]
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["manual.commercial_offers.onmck"]
+    assert result.status == "failed"
+    assert any("цена за единицу" in line for line in result.details["failures"])
+    assert any("количество" in line for line in result.details["failures"])
+    assert any("единица" in line for line in result.details["failures"])
+
+
 def test_code_mismatch_fails_and_missing_codes_manual_review():
     package = _base_package()
     package.contract_draft.items[0].okpd2_code = "99.99.99.999"
@@ -383,34 +606,50 @@ def test_contract_attachment_missing_tables_fails():
     assert checks["strict.contract.attachments"].status == "failed"
 
 
-def test_checks_cli_writes_artifacts(tmp_path):
+def test_securities_pass_when_not_required_and_manual_when_contract_missing_value():
     package = _base_package()
-    input_path = tmp_path / "package.json"
-    output_dir = tmp_path / "checks"
-    input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
+    checks = _by_id(run_checks(package))
+    assert checks["strict.securities"].status == "passed"
 
-    exit_code = checks_cli_main(
-        [
-            "--input",
-            str(input_path),
-            "--output-dir",
-            str(output_dir),
-        ]
+    package.schedule_application.contract_security = SecurityValue(
+        raw="Обеспечение исполнения контракта 5%",
+        value_percent=Decimal("5"),
     )
+    package.contract_draft.contract_security = None
+    package.contract_draft.contract_security_raw = None
 
-    assert exit_code == 0
-    assert (output_dir / "checks.json").exists()
-    assert (output_dir / "report.txt").exists()
-    assert (output_dir / "run.json").exists()
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.securities"].status == "manual_review"
+    assert "в проекте контракта" in checks["strict.securities"].message
 
 
-def test_checks_cli_with_mocked_semantic_llm_replaces_manual_stubs(tmp_path, monkeypatch):
+def test_checks_cli_writes_artifacts():
+    package = _base_package()
+    with _runtime_temp_dir("checks_cli_") as tmp_path:
+        input_path = tmp_path / "package.json"
+        output_dir = tmp_path / "checks"
+        input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
+
+        exit_code = checks_cli_main(
+            [
+                "--input",
+                str(input_path),
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+
+        assert exit_code == 0
+        assert (output_dir / "checks.json").exists()
+        assert (output_dir / "report.txt").exists()
+        assert (output_dir / "run.json").exists()
+
+
+def test_checks_cli_with_mocked_semantic_llm_replaces_manual_stubs(monkeypatch):
     from summary_model import checks_cli
 
     package = _base_package()
-    input_path = tmp_path / "package.json"
-    output_dir = tmp_path / "checks"
-    input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
 
     def fake_semantic(package):
         from summary_model.checks.models import CheckResult
@@ -430,26 +669,31 @@ def test_checks_cli_with_mocked_semantic_llm_replaces_manual_stubs(tmp_path, mon
 
     monkeypatch.setattr(checks_cli, "run_semantic_llm_checks", fake_semantic)
 
-    exit_code = checks_cli.main(
-        [
-            "--input",
-            str(input_path),
-            "--output-dir",
-            str(output_dir),
-            "--with-llm",
-        ]
-    )
+    with _runtime_temp_dir("checks_semantic_") as tmp_path:
+        input_path = tmp_path / "package.json"
+        output_dir = tmp_path / "checks"
+        input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
 
-    payload = json.loads((output_dir / "checks.json").read_text(encoding="utf-8"))
-    semantic_subject = [
-        item for item in payload["results"] if item["check_id"] == "semantic.subject"
-    ][0]
-    run_payload = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+        exit_code = checks_cli.main(
+            [
+                "--input",
+                str(input_path),
+                "--output-dir",
+                str(output_dir),
+                "--with-llm",
+            ]
+        )
 
-    assert exit_code == 0
-    assert semantic_subject["status"] == "passed"
-    assert run_payload["with_llm"] is True
-    assert run_payload["llm_metrics"]["calls"] == 1
+        payload = json.loads((output_dir / "checks.json").read_text(encoding="utf-8"))
+        semantic_subject = [
+            item for item in payload["results"] if item["check_id"] == "semantic.subject"
+        ][0]
+        run_payload = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+
+        assert exit_code == 0
+        assert semantic_subject["status"] == "passed"
+        assert run_payload["with_llm"] is True
+        assert run_payload["llm_metrics"]["calls"] == 1
 
 
 def test_semantic_llm_result_uses_deterministic_document_labels():
@@ -553,14 +797,39 @@ def test_ktru_adapter_uses_common_info_fallback_and_visual_aliases():
     assert not results["manual.ktru.characteristics"].details["invalid_values"]
 
 
-def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(tmp_path, monkeypatch):
+def test_ktru_adapter_uses_unambiguous_plan_code_for_extra_characteristics():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.name = "Сервер"
+    item.okpd2_code = None
+    item.ktru_code = "26.20.14.000-00000189"
+    item.characteristics = [PurchaseItemCharacteristic(name="Доп. параметр", value="Да")]
+    package.schedule_application.included_goods = [
+        PurchaseItem(
+            name="Серверы (однопроцессорные, двухпроцессорные)",
+            okpd2_code="26.20.14.120",
+        )
+    ]
+
+    results = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=FakeKtruRegistry())
+    }
+
+    row = results["manual.ktru.additional"].details["additional_rows"][0]
+    assert row["okpd2_code"] is None
+    assert row["plan_okpd2_code"] == "26.20.14.120"
+    assert row["rule_okpd2_code"] == "26.20.14.120"
+    assert row["rule_okpd2_source"] == "позиция ПГ по наименованию"
+
+
+def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(monkeypatch):
     from summary_model import checks_cli
     from summary_model.checks.models import CheckResult
 
     package = _base_package()
-    input_path = tmp_path / "package.json"
-    output_dir = tmp_path / "checks"
-    input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
 
     def fake_ktru(package, **_kwargs):
         return [
@@ -586,26 +855,31 @@ def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(tmp_path, m
 
     monkeypatch.setattr(checks_cli, "run_ktru_characteristic_checks", fake_ktru)
 
-    exit_code = checks_cli.main(
-        [
-            "--input",
-            str(input_path),
-            "--output-dir",
-            str(output_dir),
-            "--with-ktru",
-        ]
-    )
+    with _runtime_temp_dir("checks_ktru_") as tmp_path:
+        input_path = tmp_path / "package.json"
+        output_dir = tmp_path / "checks"
+        input_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
 
-    payload = json.loads((output_dir / "checks.json").read_text(encoding="utf-8"))
-    by_id = {item["check_id"]: item for item in payload["results"]}
-    run_payload = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+        exit_code = checks_cli.main(
+            [
+                "--input",
+                str(input_path),
+                "--output-dir",
+                str(output_dir),
+                "--with-ktru",
+            ]
+        )
 
-    assert exit_code == 0
-    assert by_id["manual.ktru.characteristics"]["status"] == "passed"
-    assert by_id["manual.ktru.additional"]["status"] == "passed"
-    assert by_id["manual.national_regime_1875"]["status"] == "manual_review"
-    assert "manual.penalties" not in by_id
-    assert run_payload["with_ktru"] is True
+        payload = json.loads((output_dir / "checks.json").read_text(encoding="utf-8"))
+        by_id = {item["check_id"]: item for item in payload["results"]}
+        run_payload = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+
+        assert exit_code == 0
+        assert by_id["manual.ktru.characteristics"]["status"] == "passed"
+        assert by_id["manual.ktru.additional"]["status"] == "passed"
+        assert by_id["manual.national_regime_1875"]["status"] == "warning"
+        assert "manual.penalties" not in by_id
+        assert run_payload["with_ktru"] is True
 
 
 def test_commercial_offer_money_value_coercion():
@@ -655,7 +929,7 @@ def test_stage_table_markdown_rendering():
     from summary_model.checks.report import _render_titled_result
 
     result = CheckResult(
-        check_id="semantic.stages",
+            check_id="strict.plan.stages",
         title="Этапы исполнения",
         severity="info",
         status="passed",
@@ -663,31 +937,37 @@ def test_stage_table_markdown_rendering():
         message="Этапы согласованы.",
         report_text="Порядок и сроки этапов согласованы.",
         details={
-            "summary_lines": [
-                "Заявка в план-график: 1 этап с даты заключения по 13.07.2026",
-                "Описание объекта закупки: 1 этап с даты заключения по 13.07.2026",
-            ]
+                "stage_tables": [{
+                    "title": "Заявка в план-график (ПГ)",
+                    "kind": "standard",
+                    "rows": [{
+                        "number": "1",
+                        "name": "Поставка",
+                        "term": "по 13.07.2026",
+                        "quantity": "1 усл. ед.",
+                        "price": "Не выделена",
+                    }],
+                }]
         },
     )
 
     lines = _render_titled_result(result)
     text = "\n".join(lines)
-    assert "| Документ | Согласованность и сроки этапов |" in text
-    assert "| <doc>Заявка в план-график</doc> | 1 этап с даты заключения по 13.07.2026 |" in text
+    assert "#### 📌 Таблица 1: Заявка в план-график (ПГ)" in text
+    assert "| 1 | Поставка | по 13.07.2026 | 1 усл. ед. | Не выделена |" in text
     assert "[{" not in text
 
 
-def test_mocked_vlm_commercial_offer_extraction(tmp_path, monkeypatch):
+def test_mocked_vlm_commercial_offer_extraction(monkeypatch):
     from summary_model.commercial_offer_vlm import extract_commercial_offer_with_vlm, CommercialOfferVlmOptions
-
-    fake_pdf = tmp_path / "offer.pdf"
-    fake_pdf.write_bytes(b"%PDF-1.4 fake pdf content")
 
     def mock_completion(*_args, **_kwargs):
         class Choice:
             message = type("Msg", (), {"content": '{"supplier_name": "ООО Ромашка", "total_amount": 123456.0, "items": []}'})()
         class Response:
             choices = [Choice()]
+            def model_dump(self, mode="json"):
+                return {"choices": [{"message": {"content": self.choices[0].message.content}}]}
         return Response()
 
     import shared_modules.llm_models as llm_mod
@@ -696,9 +976,62 @@ def test_mocked_vlm_commercial_offer_extraction(tmp_path, monkeypatch):
             self.chat = type("Chat", (), {"completions": type("Comp", (), {"create": mock_completion})()})()
 
     monkeypatch.setattr(llm_mod, "get_chatGPT_client", lambda: FakeOpenAI())
-    monkeypatch.setattr("summary_model.commercial_offer_vlm._pdf_images", lambda p: [])
+    monkeypatch.setattr("summary_model.commercial_offer_vlm.get_chatGPT_client", lambda: FakeOpenAI())
+    monkeypatch.setattr(
+        "summary_model.commercial_offer_vlm._pdf_images",
+        lambda p, **_kwargs: [{"page": 1, "mime": "image/png", "data": b"fake-image"}],
+    )
 
-    result = extract_commercial_offer_with_vlm(fake_pdf, options=CommercialOfferVlmOptions(enabled=True))
-    assert result.offer.supplier_name == "ООО Ромашка"
-    assert result.offer.total_amount.amount == Decimal("123456.0")
+    with _runtime_temp_dir("vlm_offer_") as tmp_path:
+        fake_pdf = tmp_path / "offer.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 fake pdf content")
 
+        result = extract_commercial_offer_with_vlm(fake_pdf, options=CommercialOfferVlmOptions(enabled=True))
+        assert result.offer.supplier_name == "ООО Ромашка"
+        assert result.offer.total_amount.amount == Decimal("123456.0")
+
+
+def test_commercial_offer_text_layer_restores_requisites_and_leaf_items():
+    from summary_model.commercial_offer_vlm import _offer_from_embedded_text
+
+    text = """
+27.04.2026 № К-033
+ООО «Дибиэй» предлагает рассмотреть возможность поставки.
+1
+Общая стоимость услуг
+усл. ед.
+1
+107 648 484,00
+22
+107 648 484,00
+1.1
+Подготовка технической документации
+усл. ед.
+1
+43 000,00
+22
+43 000,00
+1.2
+Сервер DEPO Storm
+шт.
+4
+10 300 000,00
+22
+41 200 000,00
+Сумма коммерческого предложения составляет: 107 648 484 рублей 00 копеек.
+Срок поставки оборудования и оказания услуг: с даты заключения контракта по 21.08.2026 г.
+"""
+
+    offer = _offer_from_embedded_text(
+        "КП_1.pdf",
+        [{"page": 1, "text": text}],
+    )
+
+    assert offer.supplier_name == "ООО «Дибиэй»"
+    assert offer.outgoing_number == "К-033"
+    assert str(offer.outgoing_date) == "2026-04-27"
+    assert offer.total_amount.amount == Decimal("107648484")
+    assert offer.delivery_term_text == "с даты заключения контракта по 21.08.2026 г."
+    assert [item.row_number for item in offer.items] == ["1.1", "1.2"]
+    assert offer.items[1].quantity == Decimal("4")
+    assert offer.items[1].unit_price == Decimal("10300000.00")

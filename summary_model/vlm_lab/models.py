@@ -60,6 +60,11 @@ class VlmPurchaseItem(BaseModel):
     characteristics: list[VlmCharacteristic] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
+    @field_validator("notes", mode="before")
+    @classmethod
+    def _normalize_notes(cls, value: Any) -> list[str]:
+        return _stringify_loose_values(value)
+
 
 class VlmStage(BaseModel):
     row_index: int | None = None
@@ -71,6 +76,11 @@ class VlmStage(BaseModel):
     price_raw: str | None = None
     quantity_text: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+    @field_validator("notes", mode="before")
+    @classmethod
+    def _normalize_notes(cls, value: Any) -> list[str]:
+        return _stringify_loose_values(value)
 
 
 class VlmSupplierPrice(BaseModel):
@@ -91,6 +101,11 @@ class VlmNmckItem(BaseModel):
     row_total_declared_raw: str | None = None
     notes: list[str] = Field(default_factory=list)
 
+    @field_validator("notes", mode="before")
+    @classmethod
+    def _normalize_notes(cls, value: Any) -> list[str]:
+        return _stringify_loose_values(value)
+
 
 class VlmTableExtraction(BaseModel):
     schema_version: str = "vlm-table-extraction-0.1.0"
@@ -108,25 +123,29 @@ class VlmTableExtraction(BaseModel):
     @field_validator("attachments", "unparsed_rows", mode="before")
     @classmethod
     def _stringify_loose_rows(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            value = [value]
-        result: list[str] = []
-        for item in value:
-            if item is None:
-                continue
-            if isinstance(item, str):
-                text = item.strip()
-            elif isinstance(item, dict):
-                text = _dict_row_text(item)
-            elif isinstance(item, list):
-                text = " | ".join(str(part).strip() for part in item if str(part).strip())
-            else:
-                text = str(item).strip()
-            if text:
-                result.append(text)
-        return result
+        return _stringify_loose_values(value)
+
+
+def _stringify_loose_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        value = [value]
+    result: list[str] = []
+    for item in value:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = _dict_row_text(item)
+        elif isinstance(item, list):
+            text = " | ".join(str(part).strip() for part in item if str(part).strip())
+        else:
+            text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _dict_row_text(item: dict[str, Any]) -> str:

@@ -172,8 +172,25 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
     summary_lines: list[str] = []
     missing: list[str] = []
     warnings: list[str] = []
+    offer_summaries: list[dict[str, Any]] = []
     for index, offer in enumerate(offers, 1):
         label = _commercial_offer_label(index, offer)
+        offer_summaries.append(
+            {
+                "label": label,
+                "supplier_name": offer.supplier_name,
+                "inn": offer.inn,
+                "outgoing_number": offer.outgoing_number,
+                "outgoing_date": _format_date(getattr(offer, "outgoing_date", None) or offer.offer_date),
+                "total_amount": _format_money(_money_amount(offer.total_amount)),
+                "items_count": len(offer.items),
+                "has_delivery_term": bool(offer.delivery_term_text),
+                "has_delivery_place": bool(offer.delivery_place),
+                "has_vat": bool(offer.vat_text or offer.vat_rate is not None or offer.vat_amount is not None),
+                "has_advance_payment": bool(offer.advance_payment_text),
+                "trademarks": sorted({item.trademark for item in offer.items if item.trademark}),
+            }
+        )
         summary_lines.append(
             (
                 f"{label}: поставщик {offer.supplier_name or 'не найден'}; "
@@ -241,6 +258,7 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
             ],
             details={
                 "summary_lines": summary_lines + warnings + missing,
+                "offer_summaries": offer_summaries,
                 "missing": missing,
                 "warnings": warnings,
             },
@@ -282,10 +300,13 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
     summary_lines = list(source_warnings)
     failures: list[str] = []
     manual: list[str] = []
+    comparison_rows: list[dict[str, Any]] = []
 
     for nmck_item in onmck.items:
         item_label = _item_label(nmck_item)
         offer_prices: list[tuple[str, Decimal]] = []
+        row_manual_start = len(manual)
+        row_failures_start = len(failures)
         for supplier_price in nmck_item.supplier_prices:
             offer = offer_by_source.get(supplier_price.source_id)
             source_label = _supplier_label(supplier_price.source_id)
@@ -316,8 +337,8 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
             _check_offer_row_total(item_label, offer, offer_item, failures, manual)
 
         selected = _money(nmck_item.selected_min_unit_price)
+        minimum = min((price for _, price in offer_prices), default=None)
         if offer_prices and selected is not None:
-            minimum = min(price for _, price in offer_prices)
             price_text = ", ".join(
                 f"{_supplier_label(source_id)} = {_format_money(price)}"
                 for source_id, price in offer_prices
@@ -334,6 +355,28 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
             manual.append(f"{item_label}: коэффициент вариации по КП не рассчитан, недостаточно цен")
         else:
             summary_lines.append(f"{item_label}: коэффициент вариации по КП {coefficient:.2f}%")
+
+        row_failures = failures[row_failures_start:]
+        row_manual = manual[row_manual_start:]
+        row_status = "failed" if row_failures else "manual_review" if row_manual else "passed"
+        prices_by_column: dict[str, str] = {}
+        for source_id, price in offer_prices:
+            source_index = _source_index(source_id)
+            if source_index is not None:
+                prices_by_column[f"offer_{source_index}"] = _format_money(price)
+        comparison_rows.append(
+            {
+                "item": _short_report_text(item_label, limit=90),
+                "offer_1": prices_by_column.get("offer_1"),
+                "offer_2": prices_by_column.get("offer_2"),
+                "offer_3": prices_by_column.get("offer_3"),
+                "selected_min": _format_money(selected) if selected is not None else None,
+                "actual_min": _format_money(minimum) if minimum is not None else None,
+                "coefficient": f"{coefficient:.2f}%" if coefficient is not None else None,
+                "status": row_status,
+                "issues": row_failures + row_manual,
+            }
+        )
 
     if failures:
         status = "failed"
@@ -360,6 +403,8 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
             ],
             details={
                 "summary_lines": summary_lines + manual + failures,
+                "source_warnings": source_warnings,
+                "comparison_rows": comparison_rows,
                 "failures": failures,
                 "manual_review": manual,
             },
@@ -512,42 +557,6 @@ def _check_nmck_amounts(package: ProcurementPackageExtraction) -> list[CheckResu
         f"{DOCUMENT_LABELS.get(key, key)}: {_format_money(value)}"
         for key, value in present.items()
     ]
-    return [
-        _result(
-            "strict.nmck.amounts",
-            "НМЦК / цена между документами",
-            "passed" if passed else "failed",
-            "strict",
-            "НМЦК/цена совпадает между документами." if passed else "Найдены расхождения НМЦК/цены между документами.",
-            documents=list(present),
-            fields=[
-                "schedule_application.nmck.amount",
-                "purchase_request.nmck.amount",
-                "nmck_justification.total_amount.amount",
-                "contract_draft.price.amount",
-                "explanatory_note.nmck.amount",
-            ],
-            details={
-                "amounts": {key: str(value) for key, value in present.items()},
-                "summary_lines": summary_lines,
-            },
-        )
-    ]
-
-
-def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[CheckResult]:
-    onmck = package.nmck_justification
-    if onmck is None or not onmck.items:
-        return [
-            _result(
-                "strict.onmck.arithmetic",
-                "Арифметика ОНМЦК",
-                "manual_review",
-                "strict",
-                "ОНМЦК или строки расчёта не извлечены.",
-                fields=["nmck_justification.items"],
-            )
-        ]
     return [
         _result(
             "strict.nmck.amounts",
@@ -904,121 +913,6 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
     ]
 
 
-def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> list[CheckResult]:
-    offers = package.commercial_offers
-    if not offers:
-        return [
-            _result(
-                "strict.commercial_offers.content",
-                "Коммерческие предложения",
-                "manual_review",
-                "strict",
-                "Коммерческие предложения не приложены. Требуется не менее 3 КП.",
-                fields=["commercial_offers"],
-                details={
-                    "count": 0,
-                    "required": 3,
-                    "summary_lines": ["Коммерческие предложения не приложены."],
-                },
-            )
-        ]
-
-    summary_lines = []
-    for index, offer in enumerate(offers, 1):
-        supplier = offer.supplier_name or f"Поставщик #{index}"
-        number_date = f"№ {offer.outgoing_number or 'б/н'} от {offer.outgoing_date or 'б/д'}"
-        total = _money_amount(offer.total_amount)
-        total_str = f"{_format_money(total)}" if total is not None else "сумма не определена"
-        summary_lines.append(
-            f"КП №{index}: {supplier} ({number_date}) | Сумма: {total_str} | Позиций: {len(offer.items)}"
-        )
-
-    if len(offers) < 3:
-        status = "failed"
-        message = f"Приложено {len(offers)} КП из 3 необходимых."
-    else:
-        status = "passed"
-        message = f"Приложено {len(offers)} Коммерческих Предложений (требование >= 3 выполнено)."
-
-    return [
-        _result(
-            "strict.commercial_offers.content",
-            "Коммерческие предложения",
-            status,
-            "strict",
-            message,
-            fields=["commercial_offers"],
-            details={
-                "count": len(offers),
-                "required": 3,
-                "summary_lines": summary_lines,
-            },
-        )
-    ]
-
-
-def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction) -> list[CheckResult]:
-    offers = package.commercial_offers
-    onmck = package.nmck_justification
-    if not offers or not onmck:
-        return [
-            _result(
-                "strict.commercial_offers.onmck_match",
-                "Сверка КП с ОНМЦК",
-                "manual_review",
-                "strict",
-                "Сверка КП с ОНМЦК невозможна (отсутствуют КП или ОНМЦК).",
-                fields=["commercial_offers", "nmck_justification"],
-            )
-        ]
-
-    summary_lines = []
-    sources = onmck.price_sources or []
-    source_labels = {
-        s.source_id: s.supplier_name_raw or s.raw_header or s.source_id
-        for s in sources
-    }
-
-    matched_count = 0
-    for offer in offers:
-        off_num = offer.outgoing_number
-        off_date = offer.outgoing_date
-        supplier = offer.supplier_name or "Неизвестный поставщик"
-        matched_source = None
-        for s in sources:
-            if off_num and s.outgoing_letter_number and off_num in s.outgoing_letter_number:
-                matched_source = s
-                break
-        if matched_source:
-            matched_count += 1
-            summary_lines.append(
-                f"КП от {supplier} (№ {off_num or 'б/н'}): совпадает с источником цены ОНМЦК '{matched_source.source_id}'."
-            )
-        else:
-            summary_lines.append(
-                f"КП от {supplier} (№ {off_num or 'б/н'}): точный источник в таблице ОНМЦК не привязан автоматически (требуется визуальная сверка)."
-            )
-
-    status = "passed" if matched_count == len(offers) else "manual_review"
-    message = "Сверка реквизитов и цен КП с ОНМЦК выполнена."
-
-    return [
-        _result(
-            "strict.commercial_offers.onmck_match",
-            "Сверка КП с ОНМЦК",
-            status,
-            "strict",
-            message,
-            fields=["commercial_offers", "nmck_justification"],
-            details={
-                "matched_sources": matched_count,
-                "total_offers": len(offers),
-                "summary_lines": summary_lines,
-            },
-        )
-    ]
-
-
 def _stage_prefix(value: Any) -> str | None:
     text = str(value or "").strip()
     match = re.match(r"(\d+)\.", text)
@@ -1084,11 +978,16 @@ def _supplier_label(value: str | None) -> str:
 
 
 def _commercial_offer_label(index: int, offer: Any) -> str:
-    return f"КП №{index} ({_commercial_offer_name(offer)})"
+    supplier_name = getattr(offer, "supplier_name", None)
+    return f"КП №{index} ({supplier_name})" if supplier_name else f"КП №{index}"
 
 
 def _commercial_offer_name(offer: Any) -> str:
-    return str(getattr(offer, "supplier_name", None) or getattr(offer, "document_title", None) or "поставщик не определён")
+    supplier_name = getattr(offer, "supplier_name", None)
+    if supplier_name:
+        return str(supplier_name)
+    title = str(getattr(offer, "document_title", None) or "КП")
+    return re.sub(r"^\d+_commercial_offer_", "", title)
 
 
 def _format_date(value: Any) -> str:
@@ -1682,8 +1581,64 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
             "contract_draft.stages",
             "nmck_justification.stages",
         ],
-        details={"summary_lines": summary_lines},
+        details={
+            "summary_lines": summary_lines,
+            "stage_tables": _stage_tables(package),
+        },
     )
+
+
+def _stage_tables(package: ProcurementPackageExtraction) -> list[dict[str, Any]]:
+    """Build report-ready stage rows without serializing model objects into text."""
+    documents = [
+        ("schedule_application", "Заявка в план-график (ПГ)", package.schedule_application, "standard"),
+        ("purchase_description", "Описание объекта закупки (ООЗ)", package.purchase_description, "standard"),
+        ("contract_draft", "Проект контракта", package.contract_draft, "standard"),
+        ("nmck_justification", "Обоснование НМЦК (ОНМЦК)", package.nmck_justification, "nmck"),
+    ]
+    total_nmck = _money_amount(package.nmck_justification.total_amount) if package.nmck_justification else None
+    tables: list[dict[str, Any]] = []
+    for document_key, title, document, table_kind in documents:
+        stages = list(getattr(document, "stages", []) or []) if document else []
+        if not stages:
+            continue
+        rows = []
+        for stage in stages:
+            amount = _money_amount(getattr(stage, "price", None))
+            term = (
+                getattr(stage, "service_term_text", None)
+                or _stage_dates_text(stage)
+                or getattr(stage, "execution_end_date", None)
+            )
+            row = {
+                "number": clean_stage_number(getattr(stage, "stage_number", None)) or "?",
+                "name": _short_report_text(
+                    getattr(stage, "stage_name", None) or getattr(stage, "result_text", None) or "этап",
+                    limit=90,
+                ),
+                "term": str(term) if term else "не выделен",
+                "quantity": getattr(stage, "quantity_text", None) or "не выделен",
+                "price": _format_money(amount) if amount is not None else "Не выделена",
+            }
+            if table_kind == "nmck":
+                row["share"] = (
+                    f"{(amount / total_nmck * Decimal('100')):.2f}%"
+                    if amount is not None and total_nmck not in (None, Decimal("0"))
+                    else "не рассчитана"
+                )
+            rows.append(row)
+        tables.append({"document": document_key, "title": title, "kind": table_kind, "rows": rows})
+    return tables
+
+
+def _stage_dates_text(stage: Any) -> str | None:
+    start = getattr(stage, "service_start_date", None)
+    end = getattr(stage, "service_end_date", None)
+    if start and end:
+        return f"с {start:%d.%m.%Y} по {end:%d.%m.%Y}"
+    if end:
+        return f"по {end:%d.%m.%Y}"
+    return None
 
 
 def _compare_stage_sets(

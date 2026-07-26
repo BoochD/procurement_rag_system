@@ -24,13 +24,14 @@ MANDATORY_DOCUMENT_KEYS = {"plan"}
 
 
 def _add_formatted_runs(paragraph, text: str) -> None:
-    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big)>", re.IGNORECASE)
+    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big|doc)>", re.IGNORECASE)
     bold_active = False
     underline_active = False
     ok_active = False
     warn_active = False
     error_active = False
     big_active = False
+    doc_active = False
     cursor = 0
 
     for match in tag_pattern.finditer(text):
@@ -46,6 +47,8 @@ def _add_formatted_runs(paragraph, text: str) -> None:
                 run.font.color.rgb = RGBColor(0xFD, 0x7E, 0x14)
             elif error_active:
                 run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
+            elif doc_active:
+                run.font.color.rgb = RGBColor(0x6C, 0x75, 0x7D)
 
         tag = match.group(0).lower()
         if tag == "<b>":
@@ -72,6 +75,10 @@ def _add_formatted_runs(paragraph, text: str) -> None:
             big_active = True
         elif tag == "</big>":
             big_active = False
+        elif tag == "<doc>":
+            doc_active = True
+        elif tag == "</doc>":
+            doc_active = False
 
         cursor = match.end()
 
@@ -87,6 +94,8 @@ def _add_formatted_runs(paragraph, text: str) -> None:
             run.font.color.rgb = RGBColor(0xFD, 0x7E, 0x14)
         elif error_active:
             run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
+        elif doc_active:
+            run.font.color.rgb = RGBColor(0x6C, 0x75, 0x7D)
 
 
 def build_result_docx_bytes(ai_response: str) -> bytes:
@@ -130,7 +139,9 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
                             _add_formatted_runs(p, cell_value)
             continue
 
-        if line.startswith('### '):
+        if line.startswith('#### '):
+            document.add_heading(line[5:].strip(), level=3)
+        elif line.startswith('### '):
             document.add_heading(line[4:].strip(), level=3)
         elif line.startswith('## '):
             document.add_heading(line[3:].strip(), level=2)
@@ -219,7 +230,10 @@ def process_document_query(self, documents):
             )
             ai_response = mark_report_text(pipeline_result.report_text)
             if pipeline_result.warnings:
-                warnings_text = "\n".join(f"- {warning}" for warning in pipeline_result.warnings)
+                warnings_text = "\n".join(
+                    f"- {_public_pipeline_warning(warning)}"
+                    for warning in pipeline_result.warnings
+                )
                 ai_response = f"{ai_response}\n\n<b>Технические предупреждения</b>\n{warnings_text}"
             result_file_bytes = build_result_docx_bytes(ai_response)
 
@@ -244,3 +258,16 @@ def process_document_query(self, documents):
         error_msg = str(e)
         print(f"Error processing documents: {error_msg}")
         raise Exception(error_msg)
+
+
+def _public_pipeline_warning(warning: str) -> str:
+    """Keep report warnings useful without exposing JSON/Pydantic internals."""
+    text = " ".join(str(warning or "").split())
+    prefix = text.split(":", 1)[0]
+    if "спецификация распознана как пустая или шаблонная" in text:
+        return f"{prefix}: спецификация не содержит заполненных товарных позиций."
+    if "VLM fallback failed" in text:
+        return f"{prefix}: сложная таблица не прошла VLM-разбор; использован исходный fallback."
+    if "Structured extraction failed" in text or "structured output (None)" in text:
+        return f"{prefix}: LLM не вернула структурированный ответ; использован детерминированный разбор."
+    return text[:500] + ("..." if len(text) > 500 else "")

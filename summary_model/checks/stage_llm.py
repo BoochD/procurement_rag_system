@@ -85,6 +85,7 @@ def run_stage_llm_checks(
                 "deterministic_status": deterministic.status,
                 "deterministic_message": deterministic.message,
                 "deterministic_summary_lines": (deterministic.details or {}).get("summary_lines", []),
+                "stage_tables": (deterministic.details or {}).get("stage_tables", []),
             },
         )
     ], metrics
