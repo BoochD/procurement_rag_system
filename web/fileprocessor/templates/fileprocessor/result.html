@@ -4,149 +4,319 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ответ на запрос</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>Ответ на запрос — Проверка закупки</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        .response-box {
-            background-color: #f8f9fa;
-            border-left: 4px solid #0d6efd;
-            padding: 1.5rem;
-            border-radius: 0.25rem;
-            white-space: pre-wrap;
-            font-family: 'Courier New', monospace;
-            max-height: 600px;
-            overflow-y: auto;
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: #f4f6f9;
+            color: #212529;
         }
 
+        .report-card {
+            border: none;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        .report-body {
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 2rem;
+            line-height: 1.65;
+            font-size: 0.98rem;
+        }
+
+        /* Tags styling */
         ok {
-            color: #198754;
+            display: inline-block;
+            background-color: #d1e7dd;
+            color: #0f5132;
+            border: 1px solid #badbcc;
+            font-weight: 600;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.88rem;
         }
 
         warn {
-            color: #fd7e14;
+            display: inline-block;
+            background-color: #fff3cd;
+            color: #664d03;
+            border: 1px solid #ffecb5;
+            font-weight: 600;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.88rem;
         }
 
         error {
-            color: #dc3545;
+            display: inline-block;
+            background-color: #f8d7da;
+            color: #842029;
+            border: 1px solid #f5c2c7;
+            font-weight: 600;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.88rem;
         }
 
         big {
-            display: inline-block;
-            font-size: 1.2rem;
-            margin-top: 0.35rem;
+            display: block;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #0d6efd;
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        ins {
+            background-color: #e7f1ff;
+            color: #0c4128;
+            text-decoration: none;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        /* Table styling */
+        .report-body table {
+            width: 100%;
+            margin-top: 1rem;
+            margin-bottom: 1.5rem;
+            border-collapse: collapse;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #dee2e6;
+        }
+
+        .report-body th {
+            background-color: #f1f5f9;
+            color: #334155;
+            font-weight: 600;
+            text-align: left;
+            padding: 0.75rem 1rem;
+            border: 1px solid #cbd5e1;
+        }
+
+        .report-body td {
+            padding: 0.75rem 1rem;
+            border: 1px solid #e2e8f0;
+            background-color: #ffffff;
+        }
+
+        .report-body tr:nth-child(even) td {
+            background-color: #f8fafc;
+        }
+
+        .report-body h1, .report-body h2, .report-body h3 {
+            color: #1e293b;
+            font-weight: 700;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .report-body h2 {
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 0.5rem;
+            font-size: 1.4rem;
+        }
+
+        .report-body h3 {
+            font-size: 1.15rem;
+            color: #334155;
+        }
+
+        .report-body ul {
+            padding-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .report-body li {
+            margin-bottom: 0.35rem;
         }
     </style>
 </head>
 
 <body>
-    <div class="container mt-5">
+    <div class="container py-5">
         <div class="row justify-content-center">
-            <div class="col-md-10">
-                <div class="card shadow">
-                    <div class="card-body">
-                        <h1 class="card-title text-center mb-4">Ответ на запрос</h1>
+            <div class="col-lg-11">
+                <div class="card report-card">
+                    <div class="card-body p-4 p-md-5">
+                        <div class="d-flex justify-content-between align-items-center mb-4">
+                            <h2 class="mb-0 text-primary font-weight-bold">Результат проверки документов</h2>
+                            {% if status == 'completed' and download_available %}
+                            <a href="{% url 'fileprocessor:download_result' %}" class="btn btn-success btn-lg shadow-sm">
+                                📥 Скачать отчёт (.docx)
+                            </a>
+                            {% endif %}
+                        </div>
 
                         {% if status == 'processing' %}
-                        <div class="alert alert-info text-center" role="alert">
-                            <h4>Обрабатываем документы...</h4>
-                            <p>ИИ анализирует загруженный комплект и ищет релевантную информацию.</p>
-                            <div class="spinner-border text-primary" role="status">
+                        <div class="alert alert-info text-center p-5 rounded-3 shadow-sm mb-4" role="alert">
+                            <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
                                 <span class="visually-hidden">Загрузка...</span>
                             </div>
-                            <p class="mt-3">
-                                <a href="{% url 'fileprocessor:result' %}" class="btn btn-sm btn-outline-primary">
-                                    Обновить статус
+                            <h4 class="alert-heading font-weight-bold">Анализируем документы...</h4>
+                            <p class="mb-0 text-muted">Система извлекает структуру, сверяет кодовые реестры (КТРУ/ОКПД2) и выполняет юридические проверки.</p>
+                            <div class="mt-4">
+                                <a href="{% url 'fileprocessor:result' %}" class="btn btn-outline-primary">
+                                    🔄 Обновить статус
                                 </a>
-                            </p>
+                            </div>
                         </div>
                         {% elif status == 'completed' %}
-                        <div class="alert alert-success text-center" role="alert">
-                            <h4>Ответ готов</h4>
-                            <p>Обработка завершена, результат можно посмотреть ниже.</p>
+                        <div class="alert alert-success d-flex align-items-center rounded-3 p-3 mb-4" role="alert">
+                            <span class="fs-4 me-3">✅</span>
+                            <div>
+                                <strong>Проверка завершена.</strong> Результаты анализа представлены ниже.
+                            </div>
                         </div>
                         {% elif status == 'failed' %}
-                        <div class="alert alert-danger text-center" role="alert">
-                            <h4>Обработка документов не удалась</h4>
-                            {% if error %}
-                            <p><strong>Ошибка:</strong> {{ error }}</p>
-                            {% else %}
-                            <p>Произошла ошибка при обработке ваших документов.</p>
-                            {% endif %}
+                        <div class="alert alert-danger rounded-3 p-4 mb-4" role="alert">
+                            <h4 class="alert-heading">Ошибка обработки</h4>
+                            <p class="mb-0">{% if error %}{{ error }}{% else %}Произошла ошибка при анализе загруженных документов.{% endif %}</p>
                         </div>
                         {% endif %}
 
-                        <div class="mb-4">
-                            <h5>Документы</h5>
-                            {% if documents %}
-                            <ul class="list-group">
-                                {% for document in documents %}
-                                <li class="list-group-item">
-                                    <strong>{{ document.label }}:</strong> {{ document.name }}
-                                </li>
-                                {% endfor %}
-                            </ul>
-                            {% else %}
-                            <p class="text-muted">Список документов пока недоступен.</p>
-                            {% endif %}
+                        <div class="card bg-light border-0 rounded-3 mb-4">
+                            <div class="card-body p-3">
+                                <h6 class="text-uppercase text-muted fw-bold fs-7 mb-2">Загруженные файлы пакета</h6>
+                                {% if documents %}
+                                <div class="row g-2">
+                                    {% for document in documents %}
+                                    <div class="col-md-6 col-lg-4">
+                                        <div class="p-2 bg-white rounded border d-flex align-items-center">
+                                            <span class="me-2">📄</span>
+                                            <div class="text-truncate">
+                                                <small class="fw-semibold text-dark d-block">{{ document.label }}</small>
+                                                <small class="text-muted text-truncate d-block">{{ document.name }}</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p class="text-muted mb-0 small">Список файлов не указан.</p>
+                                {% endif %}
+                            </div>
                         </div>
 
                         {% if status == 'completed' %}
                         <div class="mb-4">
-                            <h5>Ответ ИИ</h5>
+                            <h5 class="fw-bold mb-3 text-secondary">Итоговый отчёт:</h5>
                             {% if ai_response %}
-                            <div class="response-box">{{ ai_response|safe|linebreaksbr }}</div>
-                            {% if download_available %}
-                            <div class="mt-3">
-                                <a href="{% url 'fileprocessor:download_result' %}" class="btn btn-success">
-                                    Скачать документ
-                                </a>
+                            <div id="formatted-report" class="report-body border rounded shadow-sm">
+                                <!-- Rendered Markdown/HTML report content -->
                             </div>
-                            {% endif %}
-
+                            <textarea id="raw-response" class="d-none">{{ ai_response|safe }}</textarea>
                             {% else %}
-                            <div class="alert alert-warning">Нет ответа.</div>
+                            <div class="alert alert-warning">Ответ не был сформирован.</div>
                             {% endif %}
                         </div>
                         {% endif %}
 
                         <hr class="my-4">
 
-                        <div class="text-center">
-                            <a href="{% url 'fileprocessor:index' %}" class="btn btn-primary btn-lg">
-                                На главную
+                        <div class="d-flex justify-content-between align-items-center">
+                            <a href="{% url 'fileprocessor:index' %}" class="btn btn-outline-secondary">
+                                ← Загрузить другой пакет
                             </a>
+                            {% if task_id %}
+                            <small class="text-muted">ID задачи: <code>{{ task_id }}</code></small>
+                            {% endif %}
                         </div>
-
-                        {% if task_id %}
-                        <div class="mt-4">
-                            <h6>Детали</h6>
-                            <ul class="list-group">
-                                <li class="list-group-item">
-                                    <strong>Статус:</strong>
-                                    <span
-                                        class="badge {% if status == 'completed' %}bg-success{% elif status == 'failed' %}bg-danger{% else %}bg-secondary{% endif %}">
-                                        {% if status == 'processing' %}Обработка{% elif status == 'completed' %}Завершено{% else %}Ошибка{% endif %}
-                                    </span>
-                                </li>
-                                <li class="list-group-item">
-                                    <strong>ID задачи:</strong> <code>{{ task_id }}</code>
-                                </li>
-                            </ul>
-                        </div>
-                        {% endif %}
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
     {% if status == 'processing' %}
     <script>
         setTimeout(function () {
             location.reload();
-        }, 2000);
+        }, 2500);
+    </script>
+    {% endif %}
+
+    {% if status == 'completed' %}
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const rawText = document.getElementById('raw-response').value;
+            const container = document.getElementById('formatted-report');
+
+            if (!rawText || !container) return;
+
+            const lines = rawText.replace(/\r\n/g, '\n').split('\n');
+            let htmlOut = '';
+            let inTable = false;
+            let tableRows = [];
+
+            function flushTable() {
+                if (!tableRows.length) return;
+                htmlOut += '<table class="table table-bordered align-middle">';
+                let isHeader = true;
+                tableRows.forEach(rowStr => {
+                    if (/^\|(?:\s*:?-+:?\s*\|)+$/.test(rowStr)) {
+                        isHeader = false;
+                        return;
+                    }
+                    const cells = rowStr.split('|').slice(1, -1).map(c => c.trim());
+                    if (isHeader) {
+                        htmlOut += '<thead><tr>' + cells.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+                        isHeader = false;
+                    } else {
+                        htmlOut += '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+                    }
+                });
+                htmlOut += '</tbody></table>';
+                tableRows = [];
+                inTable = false;
+            }
+
+            for (let line of lines) {
+                const trimmed = line.trim();
+
+                // Markdown Table detection
+                if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+                    inTable = true;
+                    tableRows.push(trimmed);
+                    continue;
+                } else if (inTable) {
+                    flushTable();
+                }
+
+                // Headings
+                if (trimmed.startsWith('# ')) {
+                    htmlOut += `<h1>${trimmed.substring(2)}</h1>`;
+                } else if (trimmed.startsWith('## ')) {
+                    htmlOut += `<h2>${trimmed.substring(3)}</h2>`;
+                } else if (trimmed.startsWith('### ')) {
+                    htmlOut += `<h3>${trimmed.substring(4)}</h3>`;
+                } else if (trimmed.startsWith('#### ')) {
+                    htmlOut += `<h4 class="h5 mt-3 fw-bold text-dark">${trimmed.substring(5)}</h4>`;
+                } else if (trimmed === '---') {
+                    htmlOut += '<hr class="my-3 text-muted">';
+                } else if (trimmed.startsWith('- ')) {
+                    htmlOut += `<div class="ms-3 mb-1">• ${trimmed.substring(2)}</div>`;
+                } else if (trimmed.startsWith('* ')) {
+                    htmlOut += `<div class="ms-4 mb-1 text-muted">▪ ${trimmed.substring(2)}</div>`;
+                } else if (trimmed) {
+                    htmlOut += `<p class="mb-2">${trimmed}</p>`;
+                }
+            }
+
+            if (inTable) {
+                flushTable();
+            }
+
+            container.innerHTML = htmlOut;
+        });
     </script>
     {% endif %}
 </body>

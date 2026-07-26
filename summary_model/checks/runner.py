@@ -548,18 +548,64 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 fields=["nmck_justification.items"],
             )
         ]
+    return [
+        _result(
+            "strict.nmck.amounts",
+            "НМЦК / цена между документами",
+            "passed" if passed else "failed",
+            "strict",
+            "НМЦК/цена совпадает между документами." if passed else "Найдены расхождения НМЦК/цены между документами.",
+            documents=list(present),
+            fields=[
+                "schedule_application.nmck.amount",
+                "purchase_request.nmck.amount",
+                "nmck_justification.total_amount.amount",
+                "contract_draft.price.amount",
+                "explanatory_note.nmck.amount",
+            ],
+            details={
+                "amounts": {key: str(value) for key, value in present.items()},
+                "summary_lines": summary_lines,
+            },
+        )
+    ]
+
+
+def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[CheckResult]:
+    onmck = package.nmck_justification
+    if onmck is None or not onmck.items:
+        return [
+            _result(
+                "strict.onmck.arithmetic",
+                "Арифметика ОНМЦК",
+                "manual_review",
+                "strict",
+                "ОНМЦК или строки расчёта не извлечены.",
+                fields=["nmck_justification.items"],
+            )
+        ]
     failed = []
     incomplete = []
+    item_calc_lines: list[str] = []
     for item in onmck.items:
         quantity = normalize_decimal(item.quantity)
-        unit_price = normalize_decimal(item.selected_min_unit_price)
-        declared = normalize_decimal(item.row_total_declared)
-        if quantity is None or unit_price is None or declared is None:
-            incomplete.append(_item_label(item))
-            continue
-        calculated = quantity * unit_price
-        if _money(calculated) != _money(declared):
-            failed.append({"item": _item_label(item), "expected": _format_money(calculated), "actual": _format_money(declared)})
+        unit_price = normalize_decimal(item.selected_min_unit_price) or normalize_decimal(item.unit_price)
+        declared = normalize_decimal(item.row_total_declared) or normalize_decimal(item.total_price)
+        name = _item_label(item)
+        unit_str = f" {item.unit}" if item.unit else ""
+        if quantity is not None and unit_price is not None:
+            calculated = quantity * unit_price
+            calc_str = f"{name}: {quantity}{unit_str} × {_format_money(unit_price)} руб. = {_format_money(calculated)} руб."
+            if declared is not None and _money(calculated) != _money(declared):
+                calc_str += f" (в таблице указано: {_format_money(declared)} руб. — ОШИБКА)"
+                failed.append({"item": name, "expected": _format_money(calculated), "actual": _format_money(declared)})
+            item_calc_lines.append(calc_str)
+        elif declared is not None:
+            item_calc_lines.append(f"{name}: итог строки {_format_money(declared)} руб. (цена за ед. не указана)")
+            incomplete.append(name)
+        else:
+            item_calc_lines.append(f"{name}: данные для расчёта не извлечены")
+            incomplete.append(name)
     row_sum = sum((_money(item.row_total_declared) or Decimal("0.00")) for item in onmck.items)
     total = _money_amount(onmck.total_amount)
     plan_total = _money_amount(package.schedule_application.nmck if package.schedule_application else None)
@@ -1961,20 +2007,20 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
             findings.append(
                 f"Штраф поставщика за стоимостное обязательство: {expected_supplier_percent}% - найден"
             )
-        elif _section_contains_percent(responsibility_section, expected_supplier_percent):
-            findings.append(
-                f"Штраф поставщика за стоимостное обязательство: {expected_supplier_percent}% - найден в разделе ответственности"
-            )
-        elif not _find_penalty_clauses(all_clauses, party="supplier", kind="value_obligation"):
-            failures.append("не найден штраф поставщика за неисполнение стоимостного обязательства")
         else:
-            actual_values = _clause_percent_values(
-                _find_penalty_clauses(all_clauses, party="supplier", kind="value_obligation")
-            )
-            manual.append(
-                "штраф поставщика за стоимостное обязательство найден, но нужный порог "
-                f"{expected_supplier_percent}% не выделен однозначно; найденные проценты: {_values_text(actual_values)}"
-            )
+            supplier_clauses = _find_penalty_clauses(all_clauses, party="supplier", kind="value_obligation")
+            if supplier_clauses:
+                actual_values = _clause_percent_values(supplier_clauses)
+                failures.append(
+                    f"штраф поставщика за стоимостное обязательство {_values_text(actual_values)} "
+                    f"не совпадает с ожидаемым по ПП № 1042 (ожидалось {expected_supplier_percent}%)"
+                )
+            elif _section_contains_percent(responsibility_section, expected_supplier_percent):
+                findings.append(
+                    f"Штраф поставщика за стоимостное обязательство: {expected_supplier_percent}% - найден в разделе ответственности"
+                )
+            else:
+                failures.append("не найден штраф поставщика за неисполнение стоимостного обязательства")
 
     if expected_fixed_fine is not None:
         customer_fine = _find_penalty_clause_with_amount(
@@ -2276,20 +2322,18 @@ def _clause_amount_values(clauses: list[Any]) -> list[str]:
 
 
 def _clause_percent_values_raw(clause: Any) -> list[Decimal]:
-    values = []
     explicit = normalize_decimal(getattr(clause, "percent", None))
     if explicit is not None:
-        values.append(explicit)
-    values.extend(_percent_values_in_text(str(getattr(clause, "raw_text", "") or "")))
+        return [explicit]
+    values = _percent_values_in_text(str(getattr(clause, "raw_text", "") or ""))
     return _unique_decimals(values)
 
 
 def _clause_amount_values_raw(clause: Any) -> list[Decimal]:
-    values = []
     explicit = normalize_money(getattr(clause, "amount", None))
     if explicit is not None:
-        values.append(explicit)
-    values.extend(_money_values_in_text(str(getattr(clause, "raw_text", "") or "")))
+        return [explicit]
+    values = _money_values_in_text(str(getattr(clause, "raw_text", "") or ""))
     return _unique_decimals(values)
 
 

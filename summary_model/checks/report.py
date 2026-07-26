@@ -266,6 +266,114 @@ def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
     return lines
 
 
+
+
+def build_checks_report_text(report: ProcurementChecksReport) -> str:
+    by_id = {result.check_id: result for result in report.results}
+    lines = [
+        "Результат проверки документов",
+        "",
+        (
+            f"Ошибок: {report.errors_count}. "
+            f"Предупреждений: {report.warnings_count}. "
+            f"Требуют проверки: {report.manual_review_count}. "
+            f"Успешных: {report.passed_count}. "
+            f"Пропущено: {report.skipped_count}."
+        ),
+        "",
+        "0) Комплектность пакета",
+        "Наличие документов:",
+    ]
+
+    lines.extend(_render_document_presence(by_id))
+    lines.append("")
+    lines.extend(_render_ktru_registry_section(by_id))
+    lines.append("")
+    lines.extend(_render_pp1875_section(by_id))
+    lines.append("")
+    lines.extend(_render_internal_section(by_id))
+    lines.append("")
+    lines.extend(_render_semantic_section(by_id))
+    lines.append("")
+    lines.extend(_render_commercial_offer_section(by_id))
+    lines.append("")
+    lines.extend(_render_ktru_characteristics_section(by_id))
+    lines.append("")
+    lines.extend(_render_supplier_prices_section(by_id))
+
+    leftovers = [result for result in report.results if result.check_id not in SPECIAL_CHECKS]
+    if leftovers:
+        lines.append("")
+        lines.append("Дополнительные проверки")
+        for result in leftovers:
+            lines.extend(_render_result(result))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_document_presence(by_id: dict[str, CheckResult]) -> list[str]:
+    lines: list[str] = []
+    for check_id in DOCUMENT_CHECK_ORDER:
+        result = by_id.get(check_id)
+        if result is None:
+            continue
+        title = result.title.replace("Наличие документа:", "").strip()
+        label = "НАЙДЕН" if result.status == "passed" else STATUS_LABELS[result.status]
+        lines.append(f"- {title} — {label}")
+    return lines or ["- не найдено данных о составе пакета"]
+
+
+def _render_ktru_registry_section(by_id: dict[str, CheckResult]) -> list[str]:
+    result = by_id.get("manual.ktru.characteristics")
+    lines = ["1) Проверка КТРУ через сервис zakupki.gov.ru:"]
+    if result is None:
+        lines.append("- не выполнялась")
+        return lines
+    rendered = _render_ktru_cards(result)
+    if rendered:
+        lines.extend(rendered)
+        return lines
+    lines.extend(_render_result(result))
+    return lines
+
+
+def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
+    result = by_id.get("manual.national_regime_1875")
+    lines = ["2) Проверка ОКПД на вхождение в постановление 1875:"]
+    if result is None:
+        lines.append("- не выполнялась")
+        return lines
+    rendered = _render_pp1875_matches(result)
+    if rendered:
+        lines.extend(rendered)
+    else:
+        lines.extend(_render_result(result))
+    return lines
+
+
+def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
+    lines = ["3) Внутренний анализ перечня документов:"]
+    for check_id in INTERNAL_CHECK_ORDER:
+        result = by_id.get(check_id)
+        if result is not None:
+            lines.extend(_render_titled_result(result))
+            lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
+    lines = ["4) Semantic/manual review"]
+    for check_id in SEMANTIC_CHECK_ORDER:
+        result = by_id.get(check_id)
+        if result is not None:
+            lines.extend(_render_semantic_result(result))
+            lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]:
     lines = ["5) Коммерческие предложения:"]
     count = by_id.get("manual.commercial_offers.count")
@@ -296,14 +404,6 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
         rendered = _render_ktru_additional_rows(additional)
         lines.extend(rendered if rendered else _render_result(additional))
     return lines
-
-
-def _render_supplier_prices_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["7) Сравнение цен услуг поставщиков в ОНМЦК:"]
-    result = by_id.get("strict.onmck.supplier_prices")
-    if result is None:
-        lines.append("- не выполнялось")
-        return lines
     summary_lines = result.details.get("summary_lines") if result.details else None
     if isinstance(summary_lines, list) and summary_lines:
         for item in summary_lines:
@@ -325,7 +425,7 @@ def _render_pp1875_matches(result: CheckResult) -> list[str]:
             continue
         message = item.get("message")
         if message:
-            lines.extend(str(message).replace(".<ins>", ".\n<ins>").splitlines())
+            lines.extend(str(message).replace(".<ins>", ".\\n<ins>").splitlines())
         else:
             lines.append(str(item.get("code") or item))
         lines.append("")
@@ -333,37 +433,6 @@ def _render_pp1875_matches(result: CheckResult) -> list[str]:
         lines.pop()
     return lines
 
-
-
-def _render_ktru_cards(result: CheckResult) -> list[str]:
-    cards = result.details.get("ktru_cards") if result.details else None
-    if not isinstance(cards, list) or not cards:
-        return []
-    lines: list[str] = []
-    for card in cards:
-        if not isinstance(card, dict):
-            continue
-        code = card.get("code") or "?"
-        if card.get("unavailable"):
-            lines.append(f"- <warn>КТРУ {code} не удалось получить через zakupki.gov.ru.</warn>")
-            lines.append("")
-            continue
-        lines.append(f"- <ok>КТРУ {code} найден.</ok>")
-        if card.get("url"):
-            lines.append(f"  Ссылка на товар: {card['url']}")
-        reference_name = card.get("reference_name") or "не найдено"
-        item_names = card.get("item_names") or []
-        if card.get("name_matches"):
-            lines.append("  <ok>Наименование совпадает с эталонной записью КТРУ.</ok>")
-        else:
-            lines.append("  <warn>Наименование отличается от эталонной записи КТРУ или требует проверки.</warn>")
-        lines.append(f"  Наименование КТРУ: {reference_name}")
-        for item_name in item_names:
-            lines.append(f"  Наименование в документах: {item_name}")
-        lines.append("")
-    while lines and lines[-1] == "":
-        lines.pop()
-    return lines
 
 def _render_semantic_result(result: CheckResult) -> list[str]:
     return _render_titled_result(result)
@@ -416,6 +485,10 @@ def _render_result(result: CheckResult) -> list[str]:
         for item in summary_lines:
             if item:
                 lines.append(f"  - {_human_text(str(item))}")
+    if result.check_id == "strict.funding_source" and result.details:
+        lines.extend(_field_lines(result.details, ["schedule_application", "contract_draft"]))
+    if result.check_id == "strict.securities" and result.details:
+        lines.extend(_security_lines(result.details))
     if result.check_id == "strict.funding_source" and result.details:
         lines.extend(_field_lines(result.details, ["schedule_application", "contract_draft"]))
     if result.check_id == "strict.securities" and result.details:

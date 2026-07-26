@@ -1,4 +1,4 @@
-﻿import os
+import os
 import base64
 import tempfile
 import shutil
@@ -23,88 +23,127 @@ REQUIRED_DOCUMENTS = (
 MANDATORY_DOCUMENT_KEYS = {"plan"}
 
 
-def build_result_docx_bytes(ai_response: str) -> bytes:
-    """
-    Собирает docx-файл из текстового ответа модели.
-
-    Поддерживает базовое форматирование:
-    `<b>...</b>` -> жирный, `<u>...</u>` и `<ins>...</ins>` -> подчёркивание,
-    `<big>...</big>` -> увеличенный шрифт,
-    `<ok>...</ok>` -> зелёный текст, `<warn>...</warn>` -> оранжевый текст,
-    `<error>...</error>` -> красный текст.
-    Абзацы создаются по пустым строкам.
-    """
-    document = Document()
-    document.add_heading('Результат проверки документов', level=1)
-
-    clean_response = (ai_response or '').replace('\r\n', '\n')
-    blocks = [block.strip() for block in clean_response.split('\n\n') if block.strip()]
+def _add_formatted_runs(paragraph, text: str) -> None:
     tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big)>", re.IGNORECASE)
+    bold_active = False
+    underline_active = False
+    ok_active = False
+    warn_active = False
+    error_active = False
+    big_active = False
+    cursor = 0
 
-    for block in blocks:
-        paragraph = document.add_paragraph()
-        bold_active = False
-        underline_active = False
-        ok_active = False
-        warn_active = False
-        error_active = False
-        big_active = False
-        cursor = 0
-
-        for match in tag_pattern.finditer(block):
-            if match.start() > cursor:
-                run = paragraph.add_run(html.unescape(block[cursor:match.start()]))
-                run.bold = bold_active
-                run.underline = underline_active
-                if big_active:
-                    run.font.size = Pt(14)
-                if ok_active:
-                    run.font.color.rgb = RGBColor(0x19, 0x87, 0x54)
-                elif warn_active:
-                    run.font.color.rgb = RGBColor(0xFD, 0x7E, 0x14)
-                elif error_active:
-                    run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
-
-            tag = match.group(0).lower()
-            if tag == "<b>":
-                bold_active = True
-            elif tag == "</b>":
-                bold_active = False
-            elif tag in ("<u>", "<ins>"):
-                underline_active = True
-            elif tag in ("</u>", "</ins>"):
-                underline_active = False
-            elif tag == "<ok>":
-                ok_active = True
-            elif tag == "</ok>":
-                ok_active = False
-            elif tag == "<warn>":
-                warn_active = True
-            elif tag == "</warn>":
-                warn_active = False
-            elif tag == "<error>":
-                error_active = True
-            elif tag == "</error>":
-                error_active = False
-            elif tag == "<big>":
-                big_active = True
-            elif tag == "</big>":
-                big_active = False
-
-            cursor = match.end()
-
-        if cursor < len(block):
-            run = paragraph.add_run(html.unescape(block[cursor:]))
+    for match in tag_pattern.finditer(text):
+        if match.start() > cursor:
+            run = paragraph.add_run(html.unescape(text[cursor:match.start()]))
             run.bold = bold_active
             run.underline = underline_active
             if big_active:
-                run.font.size = Pt(14)
+                run.font.size = Pt(13)
             if ok_active:
                 run.font.color.rgb = RGBColor(0x19, 0x87, 0x54)
             elif warn_active:
                 run.font.color.rgb = RGBColor(0xFD, 0x7E, 0x14)
             elif error_active:
                 run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
+
+        tag = match.group(0).lower()
+        if tag == "<b>":
+            bold_active = True
+        elif tag == "</b>":
+            bold_active = False
+        elif tag in ("<u>", "<ins>"):
+            underline_active = True
+        elif tag in ("</u>", "</ins>"):
+            underline_active = False
+        elif tag == "<ok>":
+            ok_active = True
+        elif tag == "</ok>":
+            ok_active = False
+        elif tag == "<warn>":
+            warn_active = True
+        elif tag == "</warn>":
+            warn_active = False
+        elif tag == "<error>":
+            error_active = True
+        elif tag == "</error>":
+            error_active = False
+        elif tag == "<big>":
+            big_active = True
+        elif tag == "</big>":
+            big_active = False
+
+        cursor = match.end()
+
+    if cursor < len(text):
+        run = paragraph.add_run(html.unescape(text[cursor:]))
+        run.bold = bold_active
+        run.underline = underline_active
+        if big_active:
+            run.font.size = Pt(13)
+        if ok_active:
+            run.font.color.rgb = RGBColor(0x19, 0x87, 0x54)
+        elif warn_active:
+            run.font.color.rgb = RGBColor(0xFD, 0x7E, 0x14)
+        elif error_active:
+            run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)
+
+
+def build_result_docx_bytes(ai_response: str) -> bytes:
+    """
+    Собирает docx-файл из текстового ответа модели с поддержкой таблиц, заголовков и переносов строк.
+    """
+    document = Document()
+    document.add_heading('Результат проверки документов', level=1)
+
+    clean_response = (ai_response or '').replace('\r\n', '\n')
+    lines = clean_response.split('\n')
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        if line.startswith('|') and line.endswith('|'):
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith('|') and lines[i].strip().endswith('|'):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            rows_data = []
+            for tline in table_lines:
+                if re.match(r"^\|(?:\s*:?-+:?\s*\|)+$", tline):
+                    continue
+                cells = [c.strip() for c in tline.strip('|').split('|')]
+                rows_data.append(cells)
+
+            if rows_data:
+                col_count = max(len(r) for r in rows_data)
+                table = document.add_table(rows=len(rows_data), cols=col_count)
+                table.style = 'Table Grid'
+                for r_idx, row_cells in enumerate(rows_data):
+                    for c_idx, cell_value in enumerate(row_cells):
+                        if c_idx < col_count:
+                            p = table.cell(r_idx, c_idx).paragraphs[0]
+                            _add_formatted_runs(p, cell_value)
+            continue
+
+        if line.startswith('### '):
+            document.add_heading(line[4:].strip(), level=3)
+        elif line.startswith('## '):
+            document.add_heading(line[3:].strip(), level=2)
+        elif line.startswith('# '):
+            document.add_heading(line[2:].strip(), level=1)
+        elif line == "---":
+            p = document.add_paragraph()
+            _add_formatted_runs(p, "----------------------------------------")
+        else:
+            p = document.add_paragraph()
+            _add_formatted_runs(p, line)
+
+        i += 1
 
     buffer = BytesIO()
     document.save(buffer)
@@ -205,4 +244,3 @@ def process_document_query(self, documents):
         error_msg = str(e)
         print(f"Error processing documents: {error_msg}")
         raise Exception(error_msg)
-

@@ -26,6 +26,7 @@ Always reread this `AGENTS.md` at the start of a new coding task or after contex
 - Make parsers boring and explicit: small functions, readable names, deterministic transformations, and visible warnings when confidence is low.
 - Prefer structured intermediate artifacts over clever prompt logic. If a table can be parsed deterministically, parse it before involving an LLM.
 - Do not hide messy input behind broad catch-all logic. Preserve debug evidence so bad parsing can be inspected quickly.
+- After completing significant code changes or feature milestones, proactively suggest making a git commit and provide a descriptive proposed commit message.
 
 ## Risk Levels
 

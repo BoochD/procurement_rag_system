@@ -14,6 +14,15 @@ OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 def _get_api_key() -> str:
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
+        try:
+            from dotenv import load_dotenv
+            from pathlib import Path
+            load_dotenv(Path("web/.env"))
+            load_dotenv(Path(".env"))
+        except Exception:
+            pass
+        api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set in environment variables.")
     return api_key
 

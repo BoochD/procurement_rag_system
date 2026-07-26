@@ -586,45 +586,51 @@ def _can_add_extra_characteristics(
         }
 
     okpd_candidates = _okpd_candidates(common_info, item_okpd2_code, ktru_code)
-    if len(okpd_candidates) != 1:
+    primary_okpd = item_okpd2_code or (okpd_candidates[0] if okpd_candidates else None)
+    if not primary_okpd:
         return {
             "can_add_extra_characteristics": None,
             "reason": (
                 f"Не удалось однозначно определить ОКПД2 для правила дополнительных характеристик "
-                f"по КТРУ {ktru_code}: кандидаты {okpd_candidates or 'не найдены'}."
+                f"по КТРУ {ktru_code}."
             ),
         }
+    
+    code_diff_note = ""
+    ktru_okpd = _okpd2_from_ktru(ktru_code)
+    if item_okpd2_code and ktru_okpd and item_okpd2_code != ktru_okpd:
+        code_diff_note = f" (ОКПД2 в ПГ: {item_okpd2_code}, в КТРУ: {ktru_okpd}; проверка выполнена по коду из ПГ)."
+
     try:
-        okpd_result = registry.check_okpd2(okpd_candidates[0])
+        okpd_result = registry.check_okpd2(primary_okpd)
     except Exception:
         return {
             "can_add_extra_characteristics": None,
             "reason": (
-                f"Не удалось проверить ОКПД2 {okpd_candidates[0]} по ПП №1875 "
-                f"для правила дополнительных характеристик."
+                f"Не удалось проверить ОКПД2 {primary_okpd} по ПП №1875 "
+                f"для правила дополнительных характеристик.{code_diff_note}"
             ),
         }
     if not getattr(okpd_result, "found", False):
         return {
             "can_add_extra_characteristics": True,
             "reason": (
-                f"ОКПД2 {okpd_candidates[0]} не найден в приложениях 1 и 2 ПП №1875; "
-                f"дополнительные характеристики допустимы."
+                f"ОКПД2 {primary_okpd} не найден в приложениях 1 и 2 ПП №1875; "
+                f"дополнительные характеристики допустимы.{code_diff_note}"
             ),
         }
     if _is_special_pp1875_position(okpd_result):
         return {
             "can_add_extra_characteristics": False,
             "reason": (
-                f"ОКПД2 {okpd_candidates[0]} попадает в специальную позицию ПП №1875; "
-                f"дополнительные характеристики не допускаются."
+                f"По коду ОКПД2 {primary_okpd} Постановление Правительства № 1875 полностью запрещает установление любых дополнительных характеристик.{code_diff_note}"
             ),
         }
     return {
         "can_add_extra_characteristics": True,
         "reason": (
-            f"ОКПД2 {okpd_candidates[0]} не попадает в специальные позиции ПП №1875; "
-            f"дополнительные характеристики допустимы."
+            f"ОКПД2 {primary_okpd} не попадает в специальные позиции ПП №1875; "
+            f"дополнительные характеристики допустимы.{code_diff_note}"
         ),
     }
 

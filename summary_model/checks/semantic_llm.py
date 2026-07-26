@@ -105,8 +105,46 @@ def run_semantic_llm_checks(
             checks.append(_manual_result(check_id, title, "LLM не вернула результат по этому пункту."))
             continue
         finding = _apply_delivery_term_guard(package, finding)
+        finding = _apply_procurement_method_guard(package, finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
+
+
+def _apply_procurement_method_guard(
+    package: ProcurementPackageExtraction,
+    finding: SemanticCheckFinding,
+) -> SemanticCheckFinding:
+    if finding.check_id != "semantic.procurement_method":
+        return finding
+
+    cleaned_values = []
+    for val in finding.compared_values:
+        v = str(val)
+        v = v.replace("auction", "Электронный аукцион").replace("tender", "Конкурс").replace("request_for_quotations", "Запрос котировок")
+        cleaned_values.append(v)
+
+    method_raw = ""
+    if package.schedule_application and package.schedule_application.procurement_method_raw:
+        method_raw = package.schedule_application.procurement_method_raw.casefold()
+
+    is_auction = "аукцион" in method_raw or "auction" in method_raw or any("аукцион" in v.casefold() for v in cleaned_values)
+
+    if is_auction:
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="passed",
+            message="Способ закупки: Электронный аукцион (конкурентная закупка, обоснование ЕП не требуется).",
+            compared_values=cleaned_values,
+            evidence=finding.evidence,
+        )
+
+    return SemanticCheckFinding(
+        check_id=finding.check_id,
+        status=finding.status,
+        message=finding.message.replace("auction", "Электронный аукцион"),
+        compared_values=cleaned_values,
+        evidence=finding.evidence,
+    )
 
 
 def _apply_delivery_term_guard(

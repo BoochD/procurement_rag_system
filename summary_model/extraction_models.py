@@ -24,6 +24,26 @@ class MoneyValue(BaseModel):
     amount: Decimal | None = None
     currency: str | None = "RUB"
 
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _coerce_amount(cls, v: Any) -> Any:
+        if v is None or isinstance(v, Decimal):
+            return v
+        from summary_model.checks.normalization import normalize_decimal
+        return normalize_decimal(v)
+
+    @classmethod
+    def from_value(cls, v: Any) -> MoneyValue | None:
+        if v is None:
+            return None
+        if isinstance(v, MoneyValue):
+            return v
+        if isinstance(v, dict):
+            return cls.model_validate(v)
+        from summary_model.checks.normalization import normalize_decimal
+        dec = normalize_decimal(v)
+        return cls(raw=str(v), amount=dec)
+
 
 class PercentValue(BaseModel):
     raw: str | None = None
@@ -448,6 +468,17 @@ class CommercialOfferSchema(BaseModel):
     total_amount: MoneyValue | None = None
     source_pages: list[int] = Field(default_factory=list)
     parser_warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("total_amount", mode="before")
+    @classmethod
+    def _coerce_total_amount(cls, v: Any) -> Any:
+        if v is None or isinstance(v, MoneyValue):
+            return v
+        if isinstance(v, dict):
+            return MoneyValue.model_validate(v)
+        from summary_model.checks.normalization import normalize_decimal
+        dec = normalize_decimal(v)
+        return MoneyValue(raw=str(v), amount=dec)
 
 
 class ProcurementPackageExtraction(BaseModel):
