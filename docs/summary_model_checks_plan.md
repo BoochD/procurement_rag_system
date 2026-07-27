@@ -135,6 +135,33 @@ Use extracted schedule and contract fields:
 If contract-side security data is absent but schedule data exists, return
 manual review rather than inventing a mismatch.
 
+### Normative Plan Checks: Securities And PP No. 1875
+
+The report renders these checks immediately after package completeness. They
+use the plan application as the source of truth and show the NMCK, actual
+percentage, applicable range, and conclusion.
+
+- Bid security (part 2 of article 44): from 0.5% to 1% when NMCK is at most
+  20 million rubles; from 0.5% to 5% above 20 million rubles. A single-supplier
+  purchase is not applicable for this basic check.
+- Contract-performance security (article 96): from 0.5% to 30% when NMCK is
+  at most 50 million rubles; from 10% to 30% above 50 million rubles.
+- Warranty-obligation security (part 2.2 of article 96): no more than 10%.
+- Cases requiring rules that are not yet extracted reliably, including advance
+  payments and treasury support, remain manual review rather than a false pass.
+
+The later internal checks compare the plan values with the contract. When the
+contract says that a numeric size exists only in the structured EIS form, the
+report states the short source reference (for example, `п. 8.2`) and returns
+manual review; it does not reproduce the full clause.
+
+For PP No. 1875, only OKPD2 codes from the plan are considered, including the
+main subject and included goods. The local registry maps appendix 1 to plan row
+17.1 (prohibition) and appendix 2 to row 17.2 (restriction). The check confirms
+that the corresponding code or matched parent code is present in the required
+row. Row 17.3 (advantages) is checked independently for presence and is not
+inferred from appendices 1 or 2.
+
 ### Contract Attachments
 
 Use:
@@ -166,7 +193,8 @@ Checks:
 - stages;
 - warranty term;
 - procurement method and single-supplier basis;
-- SMP/SONKO preferences and subcontracting conditions.
+- SMP/SONKO participant preferences. The subcontracting duty and percentage
+  are checked separately by a deterministic rule.
 
 If `--with-llm` is not used, these checks remain `manual_review`. If the LLM
 call fails, each semantic check returns `manual_review` with the LLM error.
@@ -191,6 +219,25 @@ lookups. It does not parse DOCX again.
 Checks intentionally not shown in the current report scope:
 
 - standard contract / standard terms;
-- penalties;
-- security sizes under 44-FZ;
 - OKPD2 actuality outside the PP No. 1875/national-regime task.
+
+## Implemented Stability Notes (2026-07-27)
+
+- `Преференции СМП/СОНКО` and the duty to attract SMP/SONKO subcontractors are
+  separate checks. An absent participant preference does not conflict with a
+  subcontracting requirement; the latter is compared independently, including
+  its percentage.
+- Securities are reported separately: bid security, contract-performance
+  security, and warranty-obligation security. A contract clause saying that a
+  size exists only in the structured EIS form is `manual_review` when the
+  uploaded file contains no numeric value.
+- Plan rows `17.1 Запреты`, `17.2 Ограничения`, and `17.3 Преимущества` are
+  checked explicitly for presence and shown in the report.
+- For additional KTRU characteristics, the legal-rule OKPD2 source order is:
+  official OKPD2 from the live KTRU card, explicit OOZ item code, then an
+  unambiguous plan-matched code as fallback. The plan remains ground truth for
+  cross-document discrepancy reporting, but it does not override official KTRU
+  registry metadata for the registry rule itself.
+- Scan-only commercial offers are extracted page by page and merged into one
+  `CommercialOfferSchema`. Technical appendix rows without a unit or row price
+  are not treated as commercial-offer price items.

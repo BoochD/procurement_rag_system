@@ -40,9 +40,17 @@ INTERNAL_CHECK_ORDER = [
     "strict.plan.warranty",
     "strict.funding_source",
     "strict.securities",
+    "strict.warranty_security",
     "strict.contract.penalties",
     "strict.smp_sonko_subcontract",
     "strict.contract.attachments",
+]
+
+PLAN_REGULATORY_CHECK_ORDER = [
+    "strict.application_security",
+    "strict.plan.contract_security_limits",
+    "strict.plan.warranty_security_limits",
+    "strict.plan.national_regime_fields",
 ]
 
 SEMANTIC_CHECK_ORDER = [
@@ -61,7 +69,7 @@ COMMERCIAL_OFFER_CHECKS = {
     "manual.commercial_offers.onmck",
 }
 
-SPECIAL_CHECKS = set(DOCUMENT_CHECK_ORDER + INTERNAL_CHECK_ORDER + SEMANTIC_CHECK_ORDER) | {
+SPECIAL_CHECKS = set(DOCUMENT_CHECK_ORDER + PLAN_REGULATORY_CHECK_ORDER + INTERNAL_CHECK_ORDER + SEMANTIC_CHECK_ORDER) | {
     "manual.commercial_offers.count",
     "manual.commercial_offers.content",
     "manual.commercial_offers.onmck",
@@ -190,6 +198,8 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
 
     lines.extend(_render_document_presence(by_id))
     lines.append("")
+    lines.extend(_render_plan_regulatory_section(by_id))
+    lines.append("")
     lines.extend(_render_ktru_registry_section(by_id))
     lines.append("")
     lines.extend(_render_pp1875_section(by_id))
@@ -225,9 +235,21 @@ def _render_document_presence(by_id: dict[str, CheckResult]) -> list[str]:
     return lines or ["- не найдено данных о составе пакета"]
 
 
+def _render_plan_regulatory_section(by_id: dict[str, CheckResult]) -> list[str]:
+    lines = ["1) Нормативные проверки заявки в план-график:"]
+    for check_id in PLAN_REGULATORY_CHECK_ORDER:
+        result = by_id.get(check_id)
+        if result is not None:
+            lines.extend(_render_titled_result(result))
+            lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _render_ktru_registry_section(by_id: dict[str, CheckResult]) -> list[str]:
     result = by_id.get("manual.ktru.characteristics")
-    lines = ["1) Проверка КТРУ через сервис zakupki.gov.ru:"]
+    lines = ["2) Проверка КТРУ через сервис zakupki.gov.ru:"]
     if result is None:
         lines.append("- не выполнялась")
         return lines
@@ -272,7 +294,7 @@ def _render_ktru_cards(result: CheckResult) -> list[str]:
 
 def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
     result = by_id.get("manual.national_regime_1875")
-    lines = ["2) Проверка ОКПД на вхождение в постановление 1875:"]
+    lines = ["3) Проверка ОКПД на вхождение в постановление 1875:"]
     if result is None:
         lines.append("- не выполнялась")
         return lines
@@ -285,7 +307,7 @@ def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 
 def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["3) Внутренний анализ перечня документов:"]
+    lines = ["4) Внутренний анализ перечня документов:"]
     for check_id in INTERNAL_CHECK_ORDER:
         result = by_id.get(check_id)
         if result is not None:
@@ -297,7 +319,7 @@ def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 
 def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["4) Semantic/manual review"]
+    lines = ["5) Semantic/manual review"]
     for check_id in SEMANTIC_CHECK_ORDER:
         result = by_id.get(check_id)
         if result is not None:
@@ -309,7 +331,7 @@ def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 
 def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["5) Коммерческие предложения:"]
+    lines = ["6) Коммерческие предложения:"]
     count = by_id.get("manual.commercial_offers.count")
     if count is not None:
         found = count.details.get("found") if count.details else None
@@ -329,7 +351,7 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
 
 
 def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["6) Сравнение характеристик из ООЗ с КТРУ на сайте:"]
+    lines = ["7) Сравнение характеристик из ООЗ с КТРУ на сайте:"]
     characteristics = by_id.get("manual.ktru.characteristics")
     if characteristics is not None:
         if characteristics.status == "passed":
@@ -347,7 +369,7 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
 
 
 def _render_supplier_prices_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["7) Сравнение цен услуг поставщиков в ОНМЦК:"]
+    lines = ["8) Сравнение цен услуг поставщиков в ОНМЦК:"]
     result = by_id.get("strict.onmck.supplier_prices")
     if result is None:
         lines.append("- не выполнялось")
@@ -716,6 +738,7 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         f"{justification if justification else 'не найдено'}"
     )
     grouped: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
+    rule_reasons: dict[tuple[str, str, str, str], str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -729,6 +752,9 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         current = grouped.setdefault(key, {"values": [], "reason": row.get("rule_reason"), "source": row.get("rule_okpd2_source")})
         if row.get("value") and row["value"] not in current["values"]:
             current["values"].append(row["value"])
+        reason_key = (key[0], key[1], key[2], key[4])
+        if row.get("rule_reason"):
+            rule_reasons.setdefault(reason_key, str(row["rule_reason"]))
     lines.extend([
         "", "| Позиция / КТРУ | ОКПД2 для правила | Дополнительная характеристика | Значение ООЗ | Статус |",
         "| :--- | :--- | :--- | :--- | :---: |",
@@ -741,8 +767,12 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
             f"{_table_cell(char_name)} | {_table_cell('; '.join(str(value) for value in item['values']))} | "
             f"{STATUS_LABELS.get(status_key, status_key)} |"
         )
-        if item.get("reason"):
-            lines.append(f"  Основание: {_human_text(str(item['reason']))}")
+    if rule_reasons:
+        lines.extend(["", "<b>Основания применённых правил:</b>"])
+        for (item_name, ktru_code, okpd2_code, _status), reason in rule_reasons.items():
+            lines.append(
+                f"- {item_name}; КТРУ {ktru_code}; ОКПД2 {okpd2_code}: {_human_text(reason)}"
+            )
     return lines
 
 

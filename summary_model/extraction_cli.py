@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -202,10 +203,16 @@ def main(argv: list[str] | None = None) -> int:
             llm_payload,
         )
         if llm_client is not None:
-            with llm_client.call_context(
-                file_name=ir.file_name,
-                document_type=decision.document_type.value,
-            ):
+            context_factory = getattr(llm_client, "call_context", None)
+            call_context = (
+                context_factory(
+                    file_name=ir.file_name,
+                    document_type=decision.document_type.value,
+                )
+                if context_factory is not None
+                else nullcontext()
+            )
+            with call_context:
                 llm_schema, error = extract_document_schema_with_llm(
                     payload=llm_payload,
                     document_type=decision.document_type,

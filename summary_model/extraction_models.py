@@ -52,6 +52,7 @@ class PercentValue(BaseModel):
 
 class SecurityValue(BaseModel):
     raw: str | None = None
+    source_reference: str | None = None
     value_percent: Decimal | None = None
     value_amount: Decimal | None = None
     is_not_required: bool | None = None

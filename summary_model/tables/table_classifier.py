@@ -77,6 +77,23 @@ def _looks_like_staged_nmck(text: str) -> bool:
     return has_stage_rows and has_child_rows and has_nmck_prices
 
 
+def _looks_like_stage_table(text: str) -> bool:
+    """Require stage columns, not just a plan field mentioning stages."""
+    has_stage_number = bool(
+        re.search(r"(?:№|номер)\s*этап", text)
+        or re.search(r"(?:^|\|)\s*этап\s*(?:\||$)", text)
+    )
+    detail_groups = (
+        ("дата начала", "начало исполнения", "начало этапа"),
+        ("срок оказания", "срок выполнения", "срок поставки", "период исполнения"),
+        ("дата окончания", "окончание исполнения", "окончание этапа"),
+        ("цена этапа", "стоимость этапа", "сумма этапа"),
+        ("наименование этапа", "результат выполнения", "результат этапа"),
+    )
+    detail_count = sum(1 for markers in detail_groups if _has_any(text, markers))
+    return has_stage_number and detail_count >= 2
+
+
 def classify_parsed_table(
     table: TableIR,
     document_type: DocumentType | None,
@@ -84,6 +101,8 @@ def classify_parsed_table(
     text = _joined(table)
     if _looks_like_signature_table(text):
         return "signature_table"
+    if _looks_like_stage_table(text):
+        return "contract_stages_table"
     if document_type == DocumentType.PLAN and _has_any(
         text,
         (

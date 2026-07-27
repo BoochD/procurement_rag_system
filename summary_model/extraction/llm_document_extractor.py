@@ -266,6 +266,8 @@ def _merge_with_deterministic_guard(
         _preserve_scalar(merged, deterministic_schema, "contract_security", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "warranty_security_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "warranty_security", warnings, warn=False)
+        _prefer_deterministic_security(merged, deterministic_schema, "contract_security_raw", "contract_security")
+        _prefer_deterministic_security(merged, deterministic_schema, "warranty_security_raw", "warranty_security")
         _preserve_list(merged, deterministic_schema, "penalty_clauses", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "peni_clauses", warnings, warn=False)
         _preserve_embedded_description(merged, deterministic_schema, warnings, warn=False)
@@ -289,6 +291,21 @@ def _merge_with_deterministic_guard(
     for warning in warnings:
         _append_warning(merged, warning)
     return merged
+
+
+def _prefer_deterministic_security(
+    merged: dict[str, Any],
+    deterministic_schema: BaseModel,
+    raw_field: str,
+    value_field: str,
+) -> None:
+    """Security clauses selected by explicit headings beat broad LLM excerpts."""
+    raw_value = getattr(deterministic_schema, raw_field, None)
+    structured_value = getattr(deterministic_schema, value_field, None)
+    if raw_value:
+        merged[raw_field] = raw_value
+    if structured_value is not None:
+        merged[value_field] = structured_value.model_dump(mode="python")
 
 
 def _copy_model(value: BaseModel | None) -> BaseModel | None:

@@ -208,7 +208,14 @@ def run_ktru_characteristic_checks(
     )
     if forbidden_extra:
         additional_status = "failed"
-        additional_message = "Найдены дополнительные характеристики, которые нельзя добавлять по текущему правилу."
+        additional_message = (
+            "Найдены дополнительные характеристики, запрещённые текущим правилом. "
+            + (
+                "Обоснование в ООЗ найдено, но само по себе не снимает установленный запрет."
+                if justification_text
+                else "Обоснование включения в ООЗ не найдено."
+            )
+        )
     elif unavailable:
         additional_status = "manual_review"
         additional_message = "Карточки КТРУ недоступны, проверка дополнительных характеристик неполная."
@@ -666,8 +673,11 @@ def _can_add_extra_characteristics(
             "okpd2_source": item_okpd2_source or "префикс КТРУ",
         }
 
+    official_candidates = _official_okpd_candidates(common_info)
     okpd_candidates = _okpd_candidates(common_info, item_okpd2_code, ktru_code)
-    primary_okpd = item_okpd2_code or (okpd_candidates[0] if okpd_candidates else None)
+    primary_okpd = official_candidates[0] if len(official_candidates) == 1 else (
+        item_okpd2_code or (okpd_candidates[0] if okpd_candidates else None)
+    )
     if not primary_okpd:
         return {
             "can_add_extra_characteristics": None,
@@ -681,9 +691,17 @@ def _can_add_extra_characteristics(
     
     code_diff_note = ""
     ktru_okpd = _okpd2_from_ktru(ktru_code)
-    okpd2_source = item_okpd2_source or "префикс КТРУ"
-    if item_okpd2_code and ktru_okpd and item_okpd2_code != ktru_okpd:
-        code_diff_note = f" (ОКПД2 в ПГ: {item_okpd2_code}, в КТРУ: {ktru_okpd}; проверка выполнена по коду из ПГ)."
+    okpd2_source = "карточка КТРУ" if primary_okpd in official_candidates else (item_okpd2_source or "префикс КТРУ")
+    if item_okpd2_code and primary_okpd and item_okpd2_code != primary_okpd:
+        code_diff_note = (
+            f" Код позиции в ПГ/ООЗ: {item_okpd2_code}; официальный ОКПД2 карточки КТРУ: "
+            f"{primary_okpd}; правило проверено по официальному коду карточки."
+        )
+    elif item_okpd2_code and ktru_okpd and item_okpd2_code != ktru_okpd and not official_candidates:
+        code_diff_note = (
+            f" Код позиции в ПГ/ООЗ: {item_okpd2_code}; префикс КТРУ: {ktru_okpd}; "
+            "официальный ОКПД2 карточки не извлечён, использован код позиции."
+        )
 
     try:
         okpd_result = registry.check_okpd2(primary_okpd)
@@ -708,19 +726,22 @@ def _can_add_extra_characteristics(
             "okpd2_source": okpd2_source,
         }
     if _is_special_pp1875_position(okpd_result):
+        registry_note = _pp1875_match_note(okpd_result)
         return {
             "can_add_extra_characteristics": False,
             "reason": (
-                f"По коду ОКПД2 {primary_okpd} Постановление Правительства № 1875 полностью запрещает установление любых дополнительных характеристик.{code_diff_note}"
+                f"По коду ОКПД2 {primary_okpd} действует запрет на дополнительные характеристики. "
+                f"{registry_note}{code_diff_note}"
             ),
             "okpd2_code": primary_okpd,
             "okpd2_source": okpd2_source,
         }
+    registry_note = _pp1875_match_note(okpd_result)
     return {
         "can_add_extra_characteristics": True,
         "reason": (
-            f"ОКПД2 {primary_okpd} не попадает в специальные позиции ПП №1875; "
-            f"дополнительные характеристики допустимы.{code_diff_note}"
+            f"ОКПД2 {primary_okpd} не попадает в специальные позиции запрета; "
+            f"дополнительные характеристики допустимы. {registry_note}{code_diff_note}"
         ),
         "okpd2_code": primary_okpd,
         "okpd2_source": okpd2_source,
@@ -733,11 +754,14 @@ def _okpd_candidates(
     ktru_code: str | None,
 ) -> list[str]:
     candidates = []
-    for raw_value in (item_okpd2_code, _okpd2_from_ktru(ktru_code)):
+    for raw_value in (*_official_okpd_candidates(common_info), item_okpd2_code, _okpd2_from_ktru(ktru_code)):
         if raw_value:
             _append_unique(candidates, raw_value)
-    if candidates:
-        return candidates
+    return candidates
+
+
+def _official_okpd_candidates(common_info: dict[str, Any] | None) -> list[str]:
+    candidates: list[str] = []
     if not common_info:
         return candidates
     section_pairs = common_info.get("section_pairs") or {}
@@ -750,6 +774,18 @@ def _okpd_candidates(
         for match in re.findall(r"\d{2}(?:\.\d{1,3}){1,4}", str(raw_value)):
             _append_unique(candidates, match)
     return candidates
+
+
+def _pp1875_match_note(okpd_result: Any) -> str:
+    table_id = getattr(okpd_result, "table_id", None)
+    appendix = "Приложение №1" if table_id == "table_01" else "Приложение №2" if table_id == "table_02" else "приложение не определено"
+    position = getattr(okpd_result, "position", None) or "не определена"
+    matched_code = getattr(okpd_result, "matched_okpd2", None) or "не определён"
+    reference_name = getattr(okpd_result, "reference_name", None) or "наименование не найдено"
+    return (
+        f"Основание: {appendix} к ПП №1875, позиция {position}, код перечня {matched_code}, "
+        f"«{reference_name}»."
+    )
 
 
 def _clean_char_value(val: str) -> str:

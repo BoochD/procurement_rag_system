@@ -544,7 +544,7 @@ def _bool_from_text(text: str | None) -> bool | None:
     text = clean_text(text).casefold()
     if not text:
         return None
-    if is_negative_value(text):
+    if is_negative_value(text) or text.startswith("отсутств"):
         return False
     if any(marker in text for marker in ("да", "установлено", "предусмотрен", "требуется")):
         return True
@@ -567,9 +567,14 @@ def _security_value(text: str | None) -> SecurityValue | None:
         )
     )
     percent = re.search(r"(\d+(?:[,.]\d+)?)\s*%", text)
-    money = None if is_not_required else _money_value(text)
+    # Section numbers such as ``8.1`` must not become security amounts.
+    money = None
+    if not is_not_required and re.search(r"(?:руб(?:л|\.|\b)|₽)", text, flags=re.IGNORECASE):
+        money = _money_value(text)
+    source_match = re.search(r"(?:п(?:ункт)?\.?\s*)?(\d+(?:\.\d+){1,2})\b", text, flags=re.IGNORECASE)
     return SecurityValue(
         raw=text,
+        source_reference=(f"п. {source_match.group(1)}" if source_match else None),
         value_percent=parse_decimal(percent.group(1)) if percent else None,
         value_amount=money.amount if money else None,
         is_not_required=is_not_required,
@@ -877,6 +882,23 @@ def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> Schedule
     method_raw = _field_value(fields, "способ закупки", "способ определения", "способ выбора")
     subject_text = _field_value(fields, "наименование объекта закупки", "предмет закупки")
     subject_codes, included_goods = _schedule_code_roles(fields, subject_text=subject_text)
+    application_security_raw = _field_value(fields, "размер обеспечения заявки", "обеспечение заявки")
+    contract_security_raw = _field_value(
+        fields,
+        "размер обеспечения исполнения контракта",
+        "обеспечение исполнения контракта",
+    )
+    warranty_security_raw = _field_value(
+        fields,
+        "размер обеспечения гарантийных обязательств",
+        "обеспечение гарантийных обязательств",
+    )
+    national_regime_fields = [
+        field
+        for field in fields
+        if re.match(r"\s*17[._]?\d", field.key or "")
+        or any(marker in (field.key or "").casefold() for marker in ("запрет", "ограничен", "преимуществ"))
+    ]
     return ScheduleApplicationSchema(
         document_title=_title(ir),
         raw_fields=fields,
@@ -906,14 +928,15 @@ def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> Schedule
         subcontract_smp_sonko_required=_bool_from_text(subcontract_raw),
         subcontract_smp_sonko_percent_raw=subcontract_percent_raw,
         subcontract_smp_sonko_percent=_percent_from_text(subcontract_percent_raw),
-        application_security_raw=_field_value(fields, "обеспечение заявки"),
-        application_security=_security_value(_field_value(fields, "обеспечение заявки")),
-        contract_security_raw=_field_value(fields, "обеспечение исполнения контракта"),
-        contract_security=_security_value(_field_value(fields, "обеспечение исполнения контракта")),
-        warranty_security_raw=_field_value(fields, "обеспечение гарантий"),
-        warranty_security=_security_value(_field_value(fields, "обеспечение гарантий")),
+        application_security_raw=application_security_raw,
+        application_security=_security_value(application_security_raw),
+        contract_security_raw=contract_security_raw,
+        contract_security=_security_value(contract_security_raw),
+        warranty_security_raw=warranty_security_raw,
+        warranty_security=_security_value(warranty_security_raw),
         additional_requirements_raw=_field_value(fields, "дополнительные требования"),
         national_regime_raw=_field_value(fields, "национальный режим"),
+        national_regime_fields=national_regime_fields,
     )
 
 
@@ -1213,6 +1236,14 @@ def _contract_funding_source(text: str) -> str | None:
 
 
 def _contract_security_text(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for line in lines:
+        lowered = line.casefold()
+        if (
+            "размер обеспечения исполнения" in lowered
+            and "структурированном виде" in lowered
+        ):
+            return line
     section = _section_after_heading(
         text,
         r"(?:^|\n)\s*\d+(?:\.\d+)?\.\s*обеспечение исполнения контракта\b",
@@ -1221,9 +1252,28 @@ def _contract_security_text(text: str) -> str | None:
         sentence = _first_sentence_with(section, "обеспечение исполнения", "не предусмотр")
         if sentence:
             return sentence
+        size_sentence = _first_sentence_with(section, "размер обеспечения исполнения")
+        if size_sentence:
+            return size_sentence
         if not _is_structured_placeholder(section):
             return section[:700]
     return _explicit_line_value_after_marker(text, "обеспечение исполнения контракта")
+
+
+def _contract_warranty_security_text(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        if "обеспечен" not in lowered or "гарантийн" not in lowered:
+            continue
+        if "структурированном виде" in lowered and (
+            "размер" in lowered or "в размере" in lowered
+        ):
+            return line
+        window = " ".join(lines[index : index + 3])
+        if any(marker in window.casefold() for marker in ("размер", "не предусмотр", "не установлен")):
+            return window[:900]
+    return None
 
 
 def _contract_warranty_text(text: str) -> str | None:
@@ -1483,7 +1533,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
     contract_execution_text = _line_value_after_marker(text, "срок исполнения контракта")
     contract_security_text = _contract_security_text(text)
-    warranty_security_text = _line_after_marker(text, "обеспечение гарантий")
+    warranty_security_text = _contract_warranty_security_text(text)
     funding_source = _contract_funding_source(text)
     smp_subcontract_text = _contract_smp_sonko_clause(text)
     responsibility_section = _contract_responsibility_section(text)

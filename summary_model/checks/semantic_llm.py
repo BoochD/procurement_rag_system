@@ -18,7 +18,7 @@ SEMANTIC_CHECK_IDS = {
     "semantic.stages": "Этапы исполнения",
     "semantic.warranty": "Гарантии",
     "semantic.procurement_method": "Способ закупки и основание ЕП",
-    "semantic.smp_preferences": "СМП/СОНКО",
+    "semantic.smp_preferences": "Преференции СМП/СОНКО",
 }
 
 
@@ -134,6 +134,7 @@ def run_semantic_llm_checks(
             continue
         finding = _apply_delivery_term_guard(package, finding)
         finding = _apply_procurement_method_guard(package, finding)
+        finding = _apply_smp_preference_guard(package, finding)
         finding = _apply_warranty_guard(finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
@@ -172,6 +173,50 @@ def _apply_procurement_method_guard(
         status=finding.status,
         message=finding.message.replace("auction", "Электронный аукцион"),
         compared_values=cleaned_values,
+        evidence=finding.evidence,
+    )
+
+
+def _apply_smp_preference_guard(
+    package: ProcurementPackageExtraction,
+    finding: SemanticCheckFinding,
+) -> SemanticCheckFinding:
+    """Do not confuse participant preferences with subcontracting duties."""
+    if finding.check_id != "semantic.smp_preferences":
+        return finding
+
+    schedule = package.schedule_application
+    raw = getattr(schedule, "smp_preference_raw", None) if schedule else None
+    value = getattr(schedule, "smp_preference", None) if schedule else None
+    subcontract_required = (
+        getattr(schedule, "subcontract_smp_sonko_required", None) if schedule else None
+    )
+    subcontract_percent = (
+        getattr(schedule, "subcontract_smp_sonko_percent", None) if schedule else None
+    )
+    compared_values = [f"Заявка в план-график: {raw}"] if raw else []
+    if value is False and subcontract_required is True:
+        status = "warning"
+        message = (
+            "Преференции СМП/СОНКО в заявке не установлены, при этом отдельно установлена "
+            "обязанность привлечения соисполнителей СМП/СОНКО"
+            f"{f' в объёме {subcontract_percent}%' if subcontract_percent is not None else ''}. "
+            "Это разные условия; процент и наличие обязанности сверяются отдельной проверкой."
+        )
+    elif value is False:
+        status = "passed"
+        message = "Преференции СМП/СОНКО в заявке не установлены."
+    elif value is True:
+        status = "passed"
+        message = "Преференции СМП/СОНКО в заявке установлены."
+    else:
+        status = "warning"
+        message = "Значение преференций СМП/СОНКО в заявке не удалось определить однозначно."
+    return SemanticCheckFinding(
+        check_id=finding.check_id,
+        status=status,
+        message=message,
+        compared_values=compared_values,
         evidence=finding.evidence,
     )
 
@@ -319,9 +364,7 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
             ("Пояснительная записка, обоснование", getattr(note, "justification_text", None)),
         ],
         "semantic.smp_preferences": [
-            ("Заявка в план-график, преференции СМП", getattr(schedule, "smp_preference_raw", None)),
-            ("Заявка в план-график, субподряд СМП/СОНКО", getattr(schedule, "subcontract_smp_sonko_required_raw", None)),
-            ("Проект контракта, субподряд СМП/СОНКО", getattr(contract, "subcontract_smp_sonko_required_raw", None)),
+            ("Заявка в план-график", getattr(schedule, "smp_preference_raw", None)),
         ],
     }
     return [

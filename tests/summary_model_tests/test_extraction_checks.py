@@ -1,10 +1,13 @@
 import json
+import shutil
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from uuid import uuid4
 
 from summary_model.checks import run_checks
+from summary_model.checks.report import build_checks_report_text
 from summary_model.checks_cli import main as checks_cli_main
 from summary_model.extraction_models import (
     CommercialOfferItem,
@@ -35,8 +38,14 @@ from summary_model.vlm_lab.models import VlmNmckItem, VlmPurchaseItem, VlmStage
 
 @contextmanager
 def _runtime_temp_dir(prefix: str):
-    with TemporaryDirectory(prefix=f"summary_model_{prefix}") as path:
-        yield Path(path)
+    runtime_dir = Path("runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    path = runtime_dir / f"summary_model_{prefix}{uuid4().hex}"
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _base_package() -> ProcurementPackageExtraction:
@@ -116,6 +125,11 @@ def _base_package() -> ProcurementPackageExtraction:
             ktru_codes=["20.59.12.120-00000002"],
             nmck=MoneyValue(amount=Decimal("200")),
             funding_source_text="средства областного бюджета",
+            contract_security_raw="Обеспечение исполнения контракта не предусмотрено.",
+            contract_security=SecurityValue(
+                raw="Обеспечение исполнения контракта не предусмотрено.",
+                is_not_required=True,
+            ),
             subcontract_smp_sonko_required_raw="Отсутствует",
             subcontract_smp_sonko_required=False,
         ),
@@ -624,6 +638,176 @@ def test_securities_pass_when_not_required_and_manual_when_contract_missing_valu
     assert "в проекте контракта" in checks["strict.securities"].message
 
 
+def test_security_sizes_are_reported_separately_and_structured_eis_value_is_manual():
+    package = _base_package()
+    schedule = package.schedule_application
+    contract = package.contract_draft
+    schedule.nmck = MoneyValue(amount=Decimal("106312006"))
+    schedule.procurement_method = "auction"
+    schedule.application_security = SecurityValue(raw="5%", value_percent=Decimal("5"))
+    schedule.contract_security = SecurityValue(raw="30%", value_percent=Decimal("30"))
+    schedule.warranty_security = SecurityValue(raw="1%", value_percent=Decimal("1"))
+    contract.contract_security = SecurityValue(
+        raw="8.2. Размер обеспечения исполнения контракта указывается в структурированном виде ЕИС."
+    )
+    contract.warranty_security = SecurityValue(
+        raw="8.11. Размер обеспечения гарантийных обязательств указывается в структурированном виде ЕИС."
+    )
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.application_security"].status == "passed"
+    assert checks["strict.plan.contract_security_limits"].status == "passed"
+    assert checks["strict.plan.warranty_security_limits"].status == "passed"
+    assert checks["strict.securities"].status == "manual_review"
+    assert checks["strict.warranty_security"].status == "manual_review"
+    assert "30%" in checks["strict.securities"].details["summary_lines"][0]
+    assert "1%" in checks["strict.warranty_security"].details["summary_lines"][0]
+    assert "см. п. 8.2" in checks["strict.securities"].details["summary_lines"][1]
+    assert "см. п. 8.11" in checks["strict.warranty_security"].details["summary_lines"][1]
+
+    report_text = build_checks_report_text(run_checks(package))
+    assert "числовой размер указан в структурированной форме ЕИС (см. п. 8.2)" in report_text
+    assert "Размер обеспечения исполнения контракта указывается" not in report_text
+
+
+def test_contract_security_extraction_prefers_structured_eis_clause_and_reference():
+    from summary_model.extraction_pipeline import (
+        _contract_security_text,
+        _contract_warranty_security_text,
+        _security_value,
+    )
+
+    text = """8.1. Обеспечение исполнения Контракта предусмотрено.
+8.2. Размер обеспечения исполнения Контракта указывается в структурированном виде ЕИС.
+8.11. Обеспечение гарантийных обязательств устанавливается в размере, указанном в структурированном виде ЕИС."""
+
+    contract_security = _security_value(_contract_security_text(text))
+    warranty_security = _security_value(_contract_warranty_security_text(text))
+
+    assert contract_security.source_reference == "п. 8.2"
+    assert warranty_security.source_reference == "п. 8.11"
+
+
+def test_report_renders_plan_regulatory_section_before_registry_sections():
+    package = _base_package()
+    report_text = build_checks_report_text(run_checks(package))
+
+    assert report_text.index("1) Нормативные проверки заявки в план-график:") < report_text.index(
+        "2) Проверка КТРУ через сервис zakupki.gov.ru:"
+    )
+
+
+def test_application_security_uses_twenty_million_boundary():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.procurement_method = "auction"
+    schedule.application_security = SecurityValue(raw="1%", value_percent=Decimal("1"))
+    schedule.nmck = MoneyValue(amount=Decimal("20000000"))
+    assert _by_id(run_checks(package))["strict.application_security"].status == "passed"
+
+    schedule.application_security = SecurityValue(raw="1.01%", value_percent=Decimal("1.01"))
+    assert _by_id(run_checks(package))["strict.application_security"].status == "failed"
+
+    schedule.nmck = MoneyValue(amount=Decimal("20000000.01"))
+    schedule.application_security = SecurityValue(raw="5%", value_percent=Decimal("5"))
+    assert _by_id(run_checks(package))["strict.application_security"].status == "passed"
+
+
+def test_contract_security_uses_fifty_million_boundary():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.nmck = MoneyValue(amount=Decimal("50000000"))
+    schedule.contract_security = SecurityValue(raw="0.5%", value_percent=Decimal("0.5"))
+    assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "passed"
+
+    schedule.contract_security = SecurityValue(raw="0.49%", value_percent=Decimal("0.49"))
+    assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "failed"
+
+    schedule.nmck = MoneyValue(amount=Decimal("50000000.01"))
+    schedule.contract_security = SecurityValue(raw="9.99%", value_percent=Decimal("9.99"))
+    assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "failed"
+
+    schedule.contract_security = SecurityValue(raw="10%", value_percent=Decimal("10"))
+    assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "passed"
+
+
+def test_security_special_case_is_manual_review_not_false_failure():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.procurement_method = "auction"
+    schedule.nmck = MoneyValue(amount=Decimal("2000000"))
+    schedule.contract_security = SecurityValue(raw="40%", value_percent=Decimal("40"))
+    schedule.raw_fields.append(RawField(key="Авансовый платеж", value="40%", is_empty=False))
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.plan.contract_security_limits"].status == "manual_review"
+
+
+def test_warranty_security_limit_is_ten_percent():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.warranty_security = SecurityValue(raw="10%", value_percent=Decimal("10"))
+    assert _by_id(run_checks(package))["strict.plan.warranty_security_limits"].status == "passed"
+
+    schedule.warranty_security = SecurityValue(raw="10.01%", value_percent=Decimal("10.01"))
+    assert _by_id(run_checks(package))["strict.plan.warranty_security_limits"].status == "failed"
+
+
+def test_plan_national_regime_rows_are_checked_for_presence():
+    package = _base_package()
+    package.schedule_application.okpd2_codes = []
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.1.", value="Не применяются", is_empty=False),
+        RawField(key="17.2.", value="Не применяются", is_empty=False),
+        RawField(key="17.3.", value="Преимущества: Нет", is_empty=False),
+    ]
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.plan.national_regime_fields"].status == "passed"
+    assert len(checks["strict.plan.national_regime_fields"].details["summary_lines"]) == 3
+
+
+def test_plan_national_regime_requires_matching_rows_for_plan_codes():
+    class FakeRegistry:
+        def check_okpd2(self, code):
+            if code == "58.29.31.000":
+                return SimpleNamespace(found=True, table_id="table_01", matched_okpd2="58.29.31")
+            if code == "26.20.14.120":
+                return SimpleNamespace(found=True, table_id="table_02", matched_okpd2="26.20.14")
+            return SimpleNamespace(found=False)
+
+    package = _base_package()
+    package.schedule_application.okpd2_codes = ["58.29.31.000", "26.20.14.120"]
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.1.", value="Запрет: 58.29.31", is_empty=False),
+        RawField(key="17.2.", value="Ограничение: 26.20.14", is_empty=False),
+        RawField(key="17.3.", value="Нет", is_empty=False),
+    ]
+    checks = _by_id(run_checks(package, pp1875_registry=FakeRegistry()))
+    assert checks["strict.plan.national_regime_fields"].status == "passed"
+    assert "ОКПД2 58.29.31.000" in checks["strict.plan.national_regime_fields"].details["summary_lines"][3]
+
+    package.schedule_application.national_regime_fields[1] = RawField(
+        key="17.2.", value="Не применяется", is_empty=False
+    )
+    checks = _by_id(run_checks(package, pp1875_registry=FakeRegistry()))
+    assert checks["strict.plan.national_regime_fields"].status == "failed"
+
+
+def test_plan_national_regime_missing_advantages_row_is_warning():
+    package = _base_package()
+    package.schedule_application.okpd2_codes = []
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.1.", value="Нет", is_empty=False),
+        RawField(key="17.2.", value="Нет", is_empty=False),
+    ]
+    checks = _by_id(run_checks(package))
+    assert checks["strict.plan.national_regime_fields"].status == "warning"
+
+
 def test_checks_cli_writes_artifacts():
     package = _base_package()
     with _runtime_temp_dir("checks_cli_") as tmp_path:
@@ -800,6 +984,10 @@ def test_ktru_adapter_uses_common_info_fallback_and_visual_aliases():
 def test_ktru_adapter_uses_unambiguous_plan_code_for_extra_characteristics():
     from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
 
+    class PlanFallbackRegistry(FakeKtruRegistry):
+        def get_ktru_common_info(self, ktru_code):
+            return {}
+
     package = _base_package()
     item = package.purchase_description.items[0]
     item.name = "Сервер"
@@ -815,7 +1003,7 @@ def test_ktru_adapter_uses_unambiguous_plan_code_for_extra_characteristics():
 
     results = {
         result.check_id: result
-        for result in run_ktru_characteristic_checks(package, registry=FakeKtruRegistry())
+        for result in run_ktru_characteristic_checks(package, registry=PlanFallbackRegistry())
     }
 
     row = results["manual.ktru.additional"].details["additional_rows"][0]
@@ -823,6 +1011,34 @@ def test_ktru_adapter_uses_unambiguous_plan_code_for_extra_characteristics():
     assert row["plan_okpd2_code"] == "26.20.14.120"
     assert row["rule_okpd2_code"] == "26.20.14.120"
     assert row["rule_okpd2_source"] == "позиция ПГ по наименованию"
+
+
+def test_ktru_adapter_prefers_official_okpd2_from_card_for_rule():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    class OfficialCodeRegistry(FakeKtruRegistry):
+        def get_ktru_common_info(self, ktru_code):
+            return {"okpd2_code": "26.20.14.000"}
+
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.name = "Сервер"
+    item.okpd2_code = None
+    item.ktru_code = "26.20.14.000-00000189"
+    item.characteristics = [PurchaseItemCharacteristic(name="Доп. параметр", value="Да")]
+    package.schedule_application.included_goods = [
+        PurchaseItem(name="Серверы", okpd2_code="26.20.14.120")
+    ]
+
+    results = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=OfficialCodeRegistry())
+    }
+    row = results["manual.ktru.additional"].details["additional_rows"][0]
+
+    assert row["plan_okpd2_code"] == "26.20.14.120"
+    assert row["rule_okpd2_code"] == "26.20.14.000"
+    assert row["rule_okpd2_source"] == "карточка КТРУ"
 
 
 def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(monkeypatch):
@@ -924,6 +1140,38 @@ def test_procurement_method_translation_and_auction_guard():
     assert "Электронный аукцион" in guarded.compared_values[0]
 
 
+def test_smp_preference_guard_does_not_mix_subcontracting_requirement():
+    from summary_model.checks.semantic_llm import _apply_smp_preference_guard, SemanticCheckFinding
+
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(
+            smp_preference_raw="Отсутствуют",
+            smp_preference=False,
+            subcontract_smp_sonko_required_raw="Предусмотрена в объеме 90%",
+            subcontract_smp_sonko_required=True,
+            subcontract_smp_sonko_percent=Decimal("90"),
+        )
+    )
+    finding = SemanticCheckFinding(
+        check_id="semantic.smp_preferences",
+        status="failed",
+        message="Найдены противоречия.",
+        compared_values=["Заявка: Отсутствуют", "Проект контракта: 90%"],
+    )
+
+    guarded = _apply_smp_preference_guard(package, finding)
+
+    assert guarded.status == "warning"
+    assert guarded.compared_values == ["Заявка в план-график: Отсутствуют"]
+    assert "разные условия" in guarded.message
+
+
+def test_bool_parser_accepts_absent_plural_as_false():
+    from summary_model.extraction_pipeline import _bool_from_text
+
+    assert _bool_from_text("Отсутствуют") is False
+
+
 def test_stage_table_markdown_rendering():
     from summary_model.checks.models import CheckResult
     from summary_model.checks.report import _render_titled_result
@@ -989,6 +1237,53 @@ def test_mocked_vlm_commercial_offer_extraction(monkeypatch):
         result = extract_commercial_offer_with_vlm(fake_pdf, options=CommercialOfferVlmOptions(enabled=True))
         assert result.offer.supplier_name == "ООО Ромашка"
         assert result.offer.total_amount.amount == Decimal("123456.0")
+
+
+def test_scanned_commercial_offer_merges_page_results(monkeypatch):
+    from summary_model.commercial_offer_vlm import extract_commercial_offer_with_vlm, CommercialOfferVlmOptions
+
+    responses = iter([
+        '{"supplier_name":"ООО Тест","outgoing_number":"42","items":['
+        '{"row_number":"1.1","name":"Услуга","unit":"усл. ед.","quantity":1,"unit_price":100,"total_price":100}]}',
+        '{"total_amount":300,"delivery_term_text":"до 01.09.2026","items":['
+        '{"row_number":"1.2","name":"Сервер","unit":"шт.","quantity":2,"unit_price":100,"total_price":200}]}',
+        '{"items":[{"row_number":"1","name":"Техническая характеристика без цены"}]}',
+    ])
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.content = content
+
+        def model_dump(self, mode="json"):
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class FakeOpenAI:
+        def __init__(self):
+            self.chat = type(
+                "Chat",
+                (),
+                {"completions": type("Completions", (), {"create": lambda _self, **_kwargs: FakeResponse(next(responses))})()},
+            )()
+
+    monkeypatch.setattr("summary_model.commercial_offer_vlm.get_chatGPT_client", lambda: FakeOpenAI())
+    monkeypatch.setattr(
+        "summary_model.commercial_offer_vlm._pdf_images",
+        lambda _path, **_kwargs: [
+            {"page": 1, "mime": "image/png", "data": b"page-1", "text": ""},
+            {"page": 2, "mime": "image/png", "data": b"page-2", "text": ""},
+            {"page": 3, "mime": "image/png", "data": b"appendix", "text": ""},
+        ],
+    )
+
+    with _runtime_temp_dir("vlm_offer_pages_") as tmp_path:
+        path = tmp_path / "offer.pdf"
+        path.write_bytes(b"%PDF")
+        result = extract_commercial_offer_with_vlm(path, options=CommercialOfferVlmOptions())
+
+    assert result.metrics["calls"] == 3
+    assert result.offer.supplier_name == "ООО Тест"
+    assert result.offer.total_amount.amount == Decimal("300")
+    assert [item.row_number for item in result.offer.items] == ["1.1", "1.2"]
 
 
 def test_commercial_offer_text_layer_restores_requisites_and_leaf_items():

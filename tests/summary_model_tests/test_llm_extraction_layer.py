@@ -281,7 +281,7 @@ def test_llm_error_returns_deterministic_schema_with_warning(tmp_path):
 
     assert error == "fake LLM failure"
     assert result.purchase_subject == package.schedule_application.purchase_subject
-    assert "fake LLM failure" in result.parser_warnings
+    assert any("fake LLM failure" in warning for warning in result.parser_warnings)
 
 
 def test_extraction_cli_with_mocked_llm_writes_llm_artifacts(tmp_path, monkeypatch):

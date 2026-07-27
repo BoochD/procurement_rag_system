@@ -127,7 +127,7 @@ def test_report_uses_russian_labels_for_commercial_offers():
 
     text = build_checks_report_text(report)
 
-    assert "5) Коммерческие предложения:" in text
+    assert "6) Коммерческие предложения:" in text
     assert "КП не приложены" in text
     assert "commercial_offer" not in text
     assert "manual.commercial" not in text
@@ -199,6 +199,7 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     assert "26.20.14.000 (префикс КТРУ)" in text
     assert "| Сервер / 26.20.14.000-00000189 |" in text
     assert "| RAID | 0; 1 | ОШИБКА |" in text
+    assert text.count("Дополнительные характеристики запрещены.") == 1
 
 
 def test_report_renders_commercial_offer_comparison_as_one_compact_table():
