@@ -10,14 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from shared_modules.llm_models import OPENAI_MODEL, get_chatGPT_client
 from summary_model.checks.normalization import normalize_decimal
+from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
 from summary_model.extraction_models import CommercialOfferItem, CommercialOfferSchema, MoneyValue
 
 
-COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.2.0"
+COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.3.0"
 
 
 @dataclass
@@ -62,8 +61,11 @@ COMMERCIAL_OFFER_VLM_PROMPT = """
 - Если таблица содержит агрегатную строку `1` и детальные строки `1.1`, `1.2`,
   ..., агрегатную строку не добавляй как отдельный item: извлекай только
   детальные строки. Строки этапов услуг при этом являются реальными позициями.
-- В payload может быть приложен извлечённый текст PDF. Используй его вместе с
-  изображениями: числа и реквизиты из текстового слоя обычно точнее OCR.
+- Все страницы одного КП переданы вместе. Считай их единым документом: таблица
+  может продолжаться на следующей странице без повторения заголовка. Объединяй
+  такую строку только когда продолжение видно по соседним страницам.
+- В payload может быть приложен извлечённый текст PDF. Это вспомогательная
+  подсказка, а не источник истины: разметка и числа на изображениях приоритетнее.
 - Если страница является только техническим приложением с характеристиками и
   не содержит ценовых строк КП, не превращай комплектующие/характеристики в
   items. Верни пустой items для такой страницы.
@@ -87,7 +89,6 @@ def extract_commercial_offer_with_vlm(
         base_offer.parser_warnings.append("VLM parsing disabled for commercial offer.")
         return CommercialOfferVlmResult(base_offer, {"enabled": False})
 
-    page_errors: list[str] = []
     try:
         images = _document_images(path, max_pages=options.max_pages, pdf_zoom=options.pdf_zoom)
     except Exception as error:
@@ -123,41 +124,12 @@ def extract_commercial_offer_with_vlm(
         "page_texts": _page_text_payload(images),
     }
     try:
-        if _embedded_text(images):
-            vlm_offer, responses = _extract_vlm_offer(
-                images,
-                payload=payload,
-                model=options.model,
-                file_name=path.name,
-            )
-        else:
-            page_offers: list[CommercialOfferSchema] = []
-            responses = []
-            for item in images:
-                page_payload = {
-                    **payload,
-                    "pages": [item["page"]],
-                    "page_texts": [],
-                }
-                try:
-                    page_offer, page_responses = _extract_vlm_offer(
-                        [item],
-                        payload=page_payload,
-                        model=options.model,
-                        file_name=path.name,
-                    )
-                except Exception as error:
-                    page_errors.append(f"страница {item['page']}: {type(error).__name__}: {error}")
-                    continue
-                page_offers.append(page_offer)
-                responses.extend(page_responses)
-            if not page_offers:
-                raise ValueError("VLM не вернула корректную схему ни для одной страницы КП.")
-            vlm_offer = _merge_page_offers(page_offers, path.name)
-            if page_errors:
-                vlm_offer.parser_warnings.append(
-                    "Часть страниц КП не распознана: " + "; ".join(page_errors)
-                )
+        vlm_offer, responses, recovery = _extract_vlm_offer(
+            images,
+            payload=payload,
+            model=options.model,
+            file_name=path.name,
+        )
 
         offer = _merge_offer_with_deterministic(vlm_offer, deterministic_offer)
         if not _offer_has_content(offer):
@@ -168,12 +140,11 @@ def extract_commercial_offer_with_vlm(
             "pages": [item["page"] for item in images],
             "usage": [response.get("usage") for response in responses if response.get("usage")],
             "embedded_text_characters": len(_embedded_text(images)),
+            "structured_recovery": _recovery_metrics(recovery),
             "duration_seconds": round(time.perf_counter() - started, 3),
         }
-        if page_errors:
-            metrics["errors"] = page_errors
         return CommercialOfferVlmResult(offer, metrics)
-    except (json.JSONDecodeError, KeyError, ValidationError, Exception) as error:
+    except Exception as error:
         deterministic_offer.parser_warnings.append(
             f"VLM не вернула корректную схему КП: {type(error).__name__}. Использован текстовый слой PDF."
         )
@@ -181,7 +152,7 @@ def extract_commercial_offer_with_vlm(
             deterministic_offer,
             {
                 "enabled": True,
-                "calls": 1 if _embedded_text(images) else len(images),
+                "calls": 1,
                 "errors": [str(error)],
                 "duration_seconds": round(time.perf_counter() - started, 3),
             },
@@ -194,14 +165,76 @@ def _extract_vlm_offer(
     payload: dict[str, Any],
     model: str,
     file_name: str,
-) -> tuple[CommercialOfferSchema, list[dict[str, Any]]]:
+) -> tuple[CommercialOfferSchema, list[dict[str, Any]], StructuredRecovery]:
     response = _call_vlm(images, payload=payload, model=model)
     content = response["choices"][0]["message"]["content"]
     data = json.loads(content)
     if isinstance(data, dict):
         data.setdefault("document_title", file_name)
         data.setdefault("source_pages", [item["page"] for item in images])
-    return CommercialOfferSchema.model_validate(data), [response]
+        data = _normalize_vlm_offer_payload(data)
+    recovery = recover_model(CommercialOfferSchema, data)
+    if not isinstance(recovery.value, CommercialOfferSchema):
+        raise ValueError(
+            "Ответ VLM не удалось привести к CommercialOfferSchema: "
+            f"{recovery.error or 'неизвестная ошибка валидации'}"
+        )
+    return recovery.value, [response], recovery
+
+
+def _recovery_metrics(recovery: StructuredRecovery) -> dict[str, Any]:
+    return {
+        "status": recovery.status,
+        "warnings": recovery.all_warnings,
+        "lossy_warnings": recovery.lossy_warnings,
+    }
+
+
+def _normalize_vlm_offer_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Accept common Russian date and money strings before strict schema validation."""
+    normalized = dict(data)
+    for field_name in ("outgoing_date", "offer_date"):
+        value = normalized.get(field_name)
+        if isinstance(value, str):
+            parsed = _parse_date(value.strip())
+            if parsed is not None:
+                normalized[field_name] = parsed
+
+    for field_name in ("vat_rate", "vat_amount"):
+        _normalize_decimal_field(normalized, field_name)
+    total = normalized.get("total_amount")
+    if isinstance(total, dict):
+        total = dict(total)
+        _normalize_decimal_field(total, "amount")
+        normalized["total_amount"] = total
+
+    items = normalized.get("items")
+    if isinstance(items, list):
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                normalized_items.append(item)
+                continue
+            normalized_item = dict(item)
+            for field_name in (
+                "quantity",
+                "unit_price",
+                "total_price",
+                "vat_rate",
+                "vat_amount",
+            ):
+                _normalize_decimal_field(normalized_item, field_name)
+            normalized_items.append(normalized_item)
+        normalized["items"] = normalized_items
+    return normalized
+
+
+def _normalize_decimal_field(data: dict[str, Any], field_name: str) -> None:
+    value = data.get(field_name)
+    if isinstance(value, str):
+        parsed = normalize_decimal(value)
+        if parsed is not None:
+            data[field_name] = parsed
 
 
 def _merge_page_offers(
@@ -437,6 +470,7 @@ def _merge_offer_with_deterministic(
     data = vlm_offer.model_dump(mode="python")
     deterministic_fields = (
         "supplier_name",
+        "inn",
         "outgoing_number",
         "outgoing_date",
         "offer_date",
@@ -446,54 +480,73 @@ def _merge_offer_with_deterministic(
     )
     for field_name in deterministic_fields:
         value = getattr(deterministic_offer, field_name)
-        if value is not None and value != "":
+        if data.get(field_name) in (None, "") and value not in (None, ""):
             data[field_name] = value
     if deterministic_offer.source_pages:
         data["source_pages"] = sorted(set(vlm_offer.source_pages + deterministic_offer.source_pages))
 
-    deterministic_by_row = {
-        str(item.row_number): item
-        for item in deterministic_offer.items
-        if item.row_number is not None
-    }
-    vlm_by_row = {
-        str(item.row_number): item
-        for item in vlm_offer.items
-        if item.row_number is not None
-    }
-    if deterministic_by_row:
-        merged_items = []
-        for row_number, deterministic_item in deterministic_by_row.items():
-            vlm_item = vlm_by_row.get(row_number)
-            item_data = vlm_item.model_dump(mode="python") if vlm_item else {}
-            for field_name in (
-                "row_number",
-                "name",
-                "unit",
-                "quantity",
-                "quantity_raw",
-                "unit_price",
-                "unit_price_raw",
-                "total_price",
-                "total_price_raw",
-                "vat_rate",
-                "vat_text",
-                "notes",
-                "evidence_text",
-            ):
-                value = getattr(deterministic_item, field_name)
-                if value is not None and value != []:
-                    item_data[field_name] = value
-            if not item_data.get("trademark") and deterministic_item.trademark:
-                item_data["trademark"] = deterministic_item.trademark
-            merged_items.append(CommercialOfferItem.model_validate(item_data))
-        data["items"] = merged_items
+    if not vlm_offer.items and deterministic_offer.items:
+        data["items"] = deterministic_offer.items
+    elif vlm_offer.items:
+        data["items"] = _fill_vlm_items_from_text(vlm_offer.items, deterministic_offer.items)
 
     warnings = list(dict.fromkeys(vlm_offer.parser_warnings + deterministic_offer.parser_warnings))
     if not vlm_offer.items and deterministic_offer.items:
         warnings.append("Позиции КП восстановлены из текстового слоя PDF.")
     data["parser_warnings"] = warnings
     return CommercialOfferSchema.model_validate(data)
+
+
+def _fill_vlm_items_from_text(
+    vlm_items: list[CommercialOfferItem],
+    text_items: list[CommercialOfferItem],
+) -> list[CommercialOfferItem]:
+    """Use PDF text only to fill blanks in a visually extracted row."""
+    text_by_key = {
+        _offer_item_key(item): item
+        for item in text_items
+        if _offer_item_key(item) is not None
+    }
+    result: list[CommercialOfferItem] = []
+    fields = (
+        "okpd2_code",
+        "ktru_code",
+        "trademark",
+        "model",
+        "unit",
+        "quantity",
+        "quantity_raw",
+        "unit_price",
+        "unit_price_raw",
+        "total_price",
+        "total_price_raw",
+        "vat_rate",
+        "vat_amount",
+        "vat_text",
+        "delivery_term_text",
+        "delivery_place",
+        "notes",
+        "evidence_text",
+    )
+    for item in vlm_items:
+        data = item.model_dump(mode="python")
+        fallback = text_by_key.get(_offer_item_key(item))
+        if fallback is not None:
+            for field_name in fields:
+                if data.get(field_name) in (None, "", []):
+                    value = getattr(fallback, field_name)
+                    if value not in (None, "", []):
+                        data[field_name] = value
+        result.append(CommercialOfferItem.model_validate(data))
+    return result
+
+
+def _offer_item_key(item: CommercialOfferItem) -> tuple[str, str] | None:
+    row_number = str(item.row_number or "").strip()
+    name = " ".join(str(item.name or "").casefold().split())
+    if not row_number or not name:
+        return None
+    return row_number, name[:180]
 
 
 def _call_vlm(

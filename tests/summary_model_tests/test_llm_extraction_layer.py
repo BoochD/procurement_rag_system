@@ -4,6 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from summary_model.domain.models import DocumentType, InputDocument
 from summary_model import web_service
 from summary_model.extraction.llm_document_extractor import (
@@ -14,9 +16,13 @@ from summary_model.extraction.llm_document_extractor import (
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction.llm_payloads import build_document_llm_payload
 from summary_model.extraction.llm_prompts import prompt_for_document_type
-from summary_model.extraction_pipeline import extract_package
+from summary_model.extraction_pipeline import (
+    RequiredDocumentExtractionError,
+    extract_package,
+)
 from summary_model.extraction_models import (
     ContractDraftSchema,
+    DocumentEnvelope,
     ExplanatoryNoteSchema,
     MoneyValue,
     NmckJustificationSchema,
@@ -27,6 +33,7 @@ from summary_model.extraction_models import (
     PurchaseRequestSchema,
     RawField,
     ScheduleApplicationSchema,
+    SecurityValue,
 )
 from summary_model.ingestion import read_docx
 from summary_model.tables import extract_tables
@@ -257,6 +264,32 @@ def test_llm_result_restores_stage_fields_and_removes_empty_money():
     assert result.stages[0].price.amount == Decimal("40000.00")
 
 
+def test_contract_llm_guard_preserves_structured_security_values():
+    deterministic = ContractDraftSchema(
+        contract_security_raw="Размер указан в ЕИС, см. п. 8.2.",
+        contract_security=SecurityValue(
+            raw="30%",
+            source_reference="п. 8.2",
+            value_percent=Decimal("30"),
+        ),
+    )
+
+    class ContractLLMClient:
+        def extract(self, schema, system_prompt, payload):
+            return schema(contract_security_raw="нет данных"), None
+
+    result, error = extract_document_schema_with_llm(
+        payload={"known_extracted": deterministic.model_dump(mode="json")},
+        document_type=DocumentType.CONTRACT,
+        deterministic_schema=deterministic,
+        llm_client=ContractLLMClient(),
+    )
+
+    assert error is None
+    assert result.contract_security_raw == deterministic.contract_security_raw
+    assert result.contract_security.value_percent == Decimal("30")
+
+
 def test_llm_error_returns_deterministic_schema_with_warning(tmp_path):
     path = tmp_path / "plan.docx"
     _save_plan(path)
@@ -462,3 +495,197 @@ def test_web_llm_extraction_keeps_package_on_failed_document(monkeypatch):
     assert any("planned failure" in warning for warning in warnings)
     assert package.schedule_application.document_title == "old plan"
     assert package.purchase_request.document_title == "updated request"
+
+
+def test_web_llm_extraction_skips_failed_preparation(monkeypatch):
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(document_title="plan"),
+        purchase_request=PurchaseRequestSchema(document_title="request"),
+    )
+    documents = [
+        InputDocument(path=Path("plan.docx"), type_hint=DocumentType.PLAN, display_name="plan"),
+        InputDocument(path=Path("request.docx"), type_hint=DocumentType.REQUEST, display_name="request"),
+    ]
+
+    class FakeClassifier:
+        def classify(self, ir, type_hint):
+            return SimpleNamespace(document_type=type_hint)
+
+    def fake_read_docx(path):
+        if Path(path).name == "plan.docx":
+            raise ValueError("broken DOCX")
+        return SimpleNamespace(file_name=Path(path).name)
+
+    async def fake_aextract_document_schema_with_llm(**kwargs):
+        return kwargs["deterministic_schema"], None
+
+    monkeypatch.setattr(web_service, "DocumentClassifier", FakeClassifier)
+    monkeypatch.setattr(web_service, "read_docx", fake_read_docx)
+    monkeypatch.setattr(web_service, "extract_tables", lambda ir, document_type: [])
+    monkeypatch.setattr(web_service, "build_document_llm_payload", lambda **kwargs: {})
+    monkeypatch.setattr(
+        web_service,
+        "aextract_document_schema_with_llm",
+        fake_aextract_document_schema_with_llm,
+    )
+
+    warnings, _metrics = asyncio.run(web_service._apply_llm_extraction(package, documents))
+
+    assert any("plan.docx: LLM preparation failed" in warning for warning in warnings)
+    assert package.schedule_application.document_title == "plan"
+    assert package.purchase_request.document_title == "request"
+
+
+def test_web_llm_extraction_keeps_deterministic_schema_when_apply_fails(monkeypatch):
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(document_title="plan"),
+    )
+    documents = [
+        InputDocument(path=Path("plan.docx"), type_hint=DocumentType.PLAN, display_name="plan"),
+    ]
+
+    class FakeClassifier:
+        def classify(self, ir, type_hint):
+            return SimpleNamespace(document_type=type_hint)
+
+    async def fake_aextract_document_schema_with_llm(**kwargs):
+        schema = kwargs["deterministic_schema"].model_copy(deep=True)
+        schema.document_title = "LLM plan"
+        return schema, None
+
+    monkeypatch.setattr(web_service, "DocumentClassifier", FakeClassifier)
+    monkeypatch.setattr(web_service, "read_docx", lambda path: SimpleNamespace(file_name=Path(path).name))
+    monkeypatch.setattr(web_service, "extract_tables", lambda ir, document_type: [])
+    monkeypatch.setattr(web_service, "build_document_llm_payload", lambda **kwargs: {})
+    monkeypatch.setattr(
+        web_service,
+        "aextract_document_schema_with_llm",
+        fake_aextract_document_schema_with_llm,
+    )
+    monkeypatch.setattr(
+        web_service,
+        "apply_llm_document_result",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bad result")),
+    )
+
+    warnings, _metrics = asyncio.run(web_service._apply_llm_extraction(package, documents))
+
+    assert any("LLM result apply failed" in warning for warning in warnings)
+    assert package.schedule_application.document_title == "plan"
+
+
+def test_extract_package_web_mode_skips_broken_non_plan(monkeypatch):
+    document = InputDocument(path=Path("broken.docx"), type_hint=DocumentType.OOZ)
+    monkeypatch.setattr("summary_model.extraction_pipeline.read_docx", lambda path: (_ for _ in ()).throw(ValueError("broken")))
+
+    package = extract_package([document], continue_on_document_error=True)
+
+    assert package.purchase_description is None
+    assert package.files[0].document_type == "unknown"
+    assert "broken.docx: DOCX parsing failed" in package.package_warnings[0]
+
+
+def test_extract_package_web_mode_rejects_broken_plan(monkeypatch):
+    document = InputDocument(path=Path("broken-plan.docx"), type_hint=DocumentType.PLAN)
+    monkeypatch.setattr("summary_model.extraction_pipeline.read_docx", lambda path: (_ for _ in ()).throw(ValueError("broken")))
+
+    with pytest.raises(RequiredDocumentExtractionError, match="обязательную заявку"):
+        extract_package([document], continue_on_document_error=True)
+
+
+def test_extract_package_web_mode_skips_non_plan_schema_failure(monkeypatch):
+    document = InputDocument(path=Path("broken-schema.docx"), type_hint=DocumentType.OOZ)
+
+    class FakeClassifier:
+        def classify(self, ir, type_hint):
+            return SimpleNamespace(document_type=type_hint, confidence=1.0)
+
+    ir = SimpleNamespace(document_id="ooz", file_name="broken-schema.docx", blocks=[])
+    monkeypatch.setattr("summary_model.extraction_pipeline.read_docx", lambda path: ir)
+    monkeypatch.setattr("summary_model.extraction_pipeline.DocumentClassifier", FakeClassifier)
+    monkeypatch.setattr("summary_model.extraction_pipeline.extract_tables", lambda ir, document_type: [])
+    monkeypatch.setattr(
+        "summary_model.extraction_pipeline._envelope",
+        lambda document, ir, document_type, confidence, tables: DocumentEnvelope(
+            file_name=ir.file_name,
+            file_path=str(document.path),
+            document_type="purchase_description",
+        ),
+    )
+    monkeypatch.setattr(
+        "summary_model.extraction_pipeline._purchase_description",
+        lambda ir, tables: (_ for _ in ()).throw(ValueError("bad schema")),
+    )
+
+    package = extract_package([document], continue_on_document_error=True)
+
+    assert package.purchase_description is None
+    assert package.files[0].document_type == "unknown"
+    assert "schema extraction failed" in package.package_warnings[0]
+
+
+def test_web_pipeline_maps_broken_plan_to_user_facing_error(monkeypatch):
+    async def fail_for_plan(*args, **kwargs):
+        raise RequiredDocumentExtractionError(
+            "Не удалось прочитать обязательную заявку в план-график: broken-plan.docx."
+        )
+
+    monkeypatch.setattr(web_service, "_aprocess_uploaded_documents", fail_for_plan)
+
+    with pytest.raises(web_service.WebPipelineInputError, match="broken-plan.docx"):
+        web_service.process_uploaded_documents([])
+
+
+def test_web_pipeline_keeps_report_when_optional_llm_checks_fail(monkeypatch):
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(document_title="plan"),
+    )
+    package.package_warnings.append(
+        "Commercial offers are missing or fewer than the required count."
+    )
+    captured = {}
+
+    monkeypatch.setattr(web_service, "extract_package", lambda *args, **kwargs: package)
+    monkeypatch.setattr(
+        web_service,
+        "run_semantic_llm_checks",
+        lambda package: (_ for _ in ()).throw(RuntimeError("semantic unavailable")),
+    )
+    monkeypatch.setattr(
+        web_service,
+        "run_stage_llm_checks",
+        lambda package: (_ for _ in ()).throw(RuntimeError("stage unavailable")),
+    )
+    monkeypatch.setattr(
+        web_service,
+        "run_penalty_llm_checks",
+        lambda package: (_ for _ in ()).throw(RuntimeError("penalty unavailable")),
+    )
+
+    def fake_run_checks(package, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(web_service, "run_checks", fake_run_checks)
+    monkeypatch.setattr(web_service, "build_checks_report_text", lambda report: "report")
+
+    result = asyncio.run(
+        web_service._aprocess_uploaded_documents(
+            [],
+            options=web_service.WebPipelineOptions(
+                with_llm_extraction=False,
+                with_semantic_llm=True,
+                with_ktru=False,
+            ),
+        )
+    )
+
+    assert result.report_text == "report"
+    assert captured["semantic_results"] is None
+    assert captured["stage_results"] is None
+    assert captured["penalty_results"] is None
+    assert result.metrics["semantic_llm"]["error"].startswith("RuntimeError")
+    assert result.metrics["stage_llm"]["error"].startswith("RuntimeError")
+    assert result.metrics["penalty_llm"]["error"].startswith("RuntimeError")
+    assert len(result.warnings) == 3
+    assert not any("Commercial offers are missing" in warning for warning in result.warnings)

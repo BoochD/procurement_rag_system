@@ -68,22 +68,52 @@ TYPE_MAP: dict[DocumentType, ExtractionDocumentType] = {
 TableRepairer = Callable[[DocumentIR, DocumentType, list[ParsedTable]], list[ParsedTable]]
 
 
+class RequiredDocumentExtractionError(RuntimeError):
+    """Raised when the mandatory plan document cannot be parsed."""
+
+
 def extract_package(
     documents: list[InputDocument],
     *,
     table_repairer: TableRepairer | None = None,
+    continue_on_document_error: bool = False,
 ) -> ProcurementPackageExtraction:
     classifier = DocumentClassifier()
     files: list[DocumentEnvelope] = []
     parsed_by_document: list[tuple[InputDocument, DocumentIR, DocumentType, list[ParsedTable]]] = []
-    package = ProcurementPackageExtraction(package_id=_package_id(documents))
+    package = ProcurementPackageExtraction(
+        package_id=_package_id(documents, tolerate_read_errors=continue_on_document_error)
+    )
 
     for document in documents:
-        ir = read_docx(document.path)
-        decision = classifier.classify(ir, document.type_hint)
-        parsed_tables = extract_tables(ir, decision.document_type)
-        if table_repairer is not None:
-            parsed_tables = table_repairer(ir, decision.document_type, parsed_tables)
+        try:
+            ir = read_docx(document.path)
+            decision = classifier.classify(ir, document.type_hint)
+            parsed_tables = extract_tables(ir, decision.document_type)
+            if table_repairer is not None:
+                parsed_tables = table_repairer(ir, decision.document_type, parsed_tables)
+        except Exception as error:
+            if not continue_on_document_error:
+                raise
+            if document.type_hint == DocumentType.PLAN:
+                raise RequiredDocumentExtractionError(
+                    f"Не удалось прочитать обязательную заявку в план-график: {document.path.name}."
+                ) from error
+            warning = (
+                f"{document.path.name}: DOCX parsing failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            package.package_warnings.append(warning)
+            files.append(
+                DocumentEnvelope(
+                    file_name=document.path.name,
+                    file_path=str(document.path),
+                    document_type="unknown",
+                    confidence=0.0,
+                    parser_warnings=[warning],
+                )
+            )
+            continue
         parsed_by_document.append((document, ir, decision.document_type, parsed_tables))
         files.append(_envelope(document, ir, decision.document_type, decision.confidence, parsed_tables))
 
@@ -98,21 +128,35 @@ def extract_package(
         for table in tables
     ]
 
-    for _, ir, document_type, tables in parsed_by_document:
-        if document_type == DocumentType.PLAN:
-            package.schedule_application = _schedule_application(ir, tables)
-        elif document_type == DocumentType.REQUEST:
-            package.purchase_request = _purchase_request(ir, tables)
-        elif document_type == DocumentType.ONMCK:
-            package.nmck_justification = _nmck_justification(ir, tables)
-        elif document_type == DocumentType.OOZ:
-            package.purchase_description = _purchase_description(ir, tables)
-        elif document_type == DocumentType.CONTRACT:
-            package.contract_draft = _contract_draft(ir, tables)
-        elif document_type == DocumentType.EXPLANATORY_NOTE:
-            package.explanatory_note = _explanatory_note(ir, tables)
-        elif document_type == DocumentType.COMMERCIAL_OFFER:
-            package.commercial_offers.append(_commercial_offer(ir, tables))
+    for document, ir, document_type, tables in parsed_by_document:
+        try:
+            if document_type == DocumentType.PLAN:
+                package.schedule_application = _schedule_application(ir, tables)
+            elif document_type == DocumentType.REQUEST:
+                package.purchase_request = _purchase_request(ir, tables)
+            elif document_type == DocumentType.ONMCK:
+                package.nmck_justification = _nmck_justification(ir, tables)
+            elif document_type == DocumentType.OOZ:
+                package.purchase_description = _purchase_description(ir, tables)
+            elif document_type == DocumentType.CONTRACT:
+                package.contract_draft = _contract_draft(ir, tables)
+            elif document_type == DocumentType.EXPLANATORY_NOTE:
+                package.explanatory_note = _explanatory_note(ir, tables)
+            elif document_type == DocumentType.COMMERCIAL_OFFER:
+                package.commercial_offers.append(_commercial_offer(ir, tables))
+        except Exception as error:
+            if not continue_on_document_error:
+                raise
+            if document.type_hint == DocumentType.PLAN or document_type == DocumentType.PLAN:
+                raise RequiredDocumentExtractionError(
+                    f"Не удалось прочитать обязательную заявку в план-график: {document.path.name}."
+                ) from error
+            warning = (
+                f"{document.path.name}: schema extraction failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            package.package_warnings.append(warning)
+            _mark_document_failed(files, document, warning)
 
     package.commercial_offers_found_count = len(package.commercial_offers)
     package.commercial_offers_missing = (
@@ -125,13 +169,36 @@ def extract_package(
     return package
 
 
-def _package_id(documents: list[InputDocument]) -> str:
+def _package_id(
+    documents: list[InputDocument],
+    *,
+    tolerate_read_errors: bool = False,
+) -> str:
     digest = hashlib.sha256()
     for document in sorted(documents, key=lambda item: str(item.path)):
         path = Path(document.path)
         digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            if not tolerate_read_errors:
+                raise
+            digest.update(f"unreadable:{path.name}".encode("utf-8"))
     return f"extraction-{digest.hexdigest()[:16]}"
+
+
+def _mark_document_failed(
+    files: list[DocumentEnvelope],
+    document: InputDocument,
+    warning: str,
+) -> None:
+    for envelope in files:
+        if envelope.file_path != str(document.path):
+            continue
+        envelope.document_type = "unknown"
+        envelope.confidence = 0.0
+        envelope.parser_warnings.append(warning)
+        return
 
 
 def _document_text(ir: DocumentIR) -> str:
@@ -586,7 +653,8 @@ def _contract_smp_sonko_clause(text: str) -> str | None:
     best_window: str | None = None
     best_score = -1
     for index, line in enumerate(lines):
-        lowered = line.casefold()
+        window = " ".join(lines[index : index + 4])
+        lowered = window.casefold()
         has_smp = (
             "смп" in lowered
             or "сонко" in lowered
@@ -599,7 +667,6 @@ def _contract_smp_sonko_clause(text: str) -> str | None:
         )
         if not has_smp or not has_subcontract:
             continue
-        window = " ".join(lines[index : index + 3])
         window_lowered = window.casefold()
         score = 0
         if "привлечь к исполнению" in window_lowered:

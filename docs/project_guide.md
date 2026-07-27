@@ -142,10 +142,67 @@ Independent typed extraction pipeline:
 - Add `--with-llm` to run live document-level LLM canonicalization. This additionally creates `llm_documents/*.json` and `extraction_result.llm.json`. It is opt-in because it uses the configured OpenAI-compatible model.
 - Does not run PP 1875, live KTRU, legal checks, package-level semantic analyzers, or commercial-offer OCR.
 
+Commercial-offer VLM lab:
+
+- `python -m summary_model.commercial_offer_lab.run --input <offer_1.pdf> <offer_2.pdf> <offer_3.pdf> --model <model>`
+- Uses the production visual VLM path for every PDF and writes per-model
+  `commercial_offers.json`, `checks.json`, `report.txt`, and `run.json` under
+  `runtime/commercial_offer_lab/<model>/` by default.
+
+Structured-output recovery lab:
+
+- `python -m summary_model.structured_output_lab.run` writes an offline example
+  of normalizing Russian dates, money, VAT text, and string lists before a
+  strict Pydantic schema.
+- Add `--live` to test the configured LangChain/OpenAI-compatible provider with
+  `include_raw=True`; add `--compare-direct` to make a second, old-style call
+  without raw recovery. Artifacts are stored under
+  `runtime/structured_output_lab/<model>/`.
+
+### Structured LLM output recovery
+
+All LangChain structured-output calls in `summary_model` request
+`include_raw=True`. The strict Pydantic domain schemas remain the final
+contract, but a provider response is processed in four explicit steps:
+
+1. retain the raw tool-call arguments or JSON message content;
+2. normalize safe representation differences such as Russian dates, formatted
+   decimals, scalar values returned for list fields, and textual VAT markers;
+3. validate against the original strict schema;
+4. when necessary, remove only an invalid optional field or the single nested
+   row whose required field is unusable, then validate again.
+
+Safe, lossless conversions are recorded in LLM/VLM runtime metrics and do not
+produce public warnings. Removed fields or rows produce a targeted warning
+with the field path and short raw value. A document or commercial offer is not
+replaced by an empty fallback merely because one nested field failed
+validation.
+
+The recovery layer also accepts a small explicit alias set for commercial
+offers and VLM table rows, Russian textual dates, ruble/kopeck money phrases,
+million/thousand suffixes, and Russian decimal separators. If an invalid
+numeric field has a matching `*_raw` or `raw` field, the original value is
+preserved there before the typed field is removed. This alias set is tied to
+known schemas; it must not grow into semantic field guessing.
+
+Schema mismatch with valid recoverable JSON is not a reason for a paid retry.
+Retries remain available for transport/provider failures and responses whose
+JSON is missing or genuinely malformed. If recovery still cannot produce the
+strict top-level schema, the existing deterministic fallback is used.
+
 ## Architectural Constraints
 
 - The web/worker contract is JSON over Celery and should remain base64-safe.
 - Only `plan` is mandatory; all other documents must be handled as optional and reflected as skipped checks when absent.
+- In the web pipeline, a DOCX failure for an optional document is recorded as a
+  technical warning and the remaining package is checked. A failure to read the
+  mandatory plan document stops the task with a user-facing error; no partial
+  report is produced.
+- Optional LLM checks and local PP No. 1875 registry access must degrade to
+  warnings or `manual_review`, never abort an otherwise parseable web package.
+- LLM/VLM ingestion must preserve raw structured output long enough to recover
+  safe type differences and isolate invalid nested fields. Checks only receive
+  strict validated domain models, never arbitrary raw provider dictionaries.
 - Temporary uploaded files are worker-local and must be cleaned up.
 - Registry checks rely on `data/parsed_tables`; changing artifact shape requires updating registry code and tests together.
 - Plain-text OKPD fallback extraction must use exact OKPD2 regex matching and must not treat the OKPD-like prefix of a KTRU code as a standalone OKPD2 code.

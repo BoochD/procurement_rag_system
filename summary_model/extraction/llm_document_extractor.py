@@ -294,7 +294,7 @@ def _merge_with_deterministic_guard(
 
 
 def _prefer_deterministic_security(
-    merged: dict[str, Any],
+    merged: BaseModel,
     deterministic_schema: BaseModel,
     raw_field: str,
     value_field: str,
@@ -303,9 +303,9 @@ def _prefer_deterministic_security(
     raw_value = getattr(deterministic_schema, raw_field, None)
     structured_value = getattr(deterministic_schema, value_field, None)
     if raw_value:
-        merged[raw_field] = raw_value
+        setattr(merged, raw_field, raw_value)
     if structured_value is not None:
-        merged[value_field] = structured_value.model_dump(mode="python")
+        setattr(merged, value_field, structured_value.model_copy(deep=True))
 
 
 def _copy_model(value: BaseModel | None) -> BaseModel | None:

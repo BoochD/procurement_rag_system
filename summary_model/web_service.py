@@ -24,7 +24,7 @@ from summary_model.extraction.llm_document_extractor import (
     apply_llm_document_result,
 )
 from summary_model.extraction.llm_payloads import build_document_llm_payload
-from summary_model.extraction_pipeline import extract_package
+from summary_model.extraction_pipeline import RequiredDocumentExtractionError, extract_package
 from summary_model.ingestion import read_docx
 from summary_model.tables import extract_tables
 from summary_model.vlm_fallback import VlmFallbackOptions, VlmFallbackRepairer
@@ -62,12 +62,19 @@ class WebPipelineResult:
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
+class WebPipelineInputError(ValueError):
+    """A user-facing error for a mandatory document that cannot be processed."""
+
+
 def process_uploaded_documents(
     uploaded_documents: list[dict[str, Any]],
     *,
     options: WebPipelineOptions | None = None,
 ) -> WebPipelineResult:
-    return asyncio.run(_aprocess_uploaded_documents(uploaded_documents, options=options))
+    try:
+        return asyncio.run(_aprocess_uploaded_documents(uploaded_documents, options=options))
+    except RequiredDocumentExtractionError as error:
+        raise WebPipelineInputError(str(error)) from error
 
 
 async def _aprocess_uploaded_documents(
@@ -88,8 +95,13 @@ async def _aprocess_uploaded_documents(
     package = extract_package(
         docx_documents,
         table_repairer=vlm_repairer.repair_document_tables if options.with_vlm_tables else None,
+        continue_on_document_error=True,
     )
-    warnings: list[str] = []
+    warnings: list[str] = [
+        warning
+        for warning in package.package_warnings
+        if "DOCX parsing failed:" in warning or "schema extraction failed:" in warning
+    ]
     metrics: dict[str, Any] = {
         "vlm_tables": vlm_repairer.metrics if options.with_vlm_tables else {"enabled": False}
     }
@@ -125,6 +137,9 @@ async def _aprocess_uploaded_documents(
                 **result.metrics,
             }
         )
+        warnings.extend(
+            _commercial_offer_recovery_warnings(document.path.name, result.metrics)
+        )
     if media_commercial_offers:
         package.commercial_offers_found_count = len(package.commercial_offers)
         package.commercial_offers_missing = (
@@ -141,17 +156,33 @@ async def _aprocess_uploaded_documents(
         )
         warnings.extend(llm_warnings)
         metrics["document_llm"] = llm_metrics
+        warnings.extend(_llm_recovery_warnings("извлечение документа через LLM", llm_metrics))
 
     semantic_results = None
     stage_results = None
     penalty_results = None
     if options.with_semantic_llm:
-        semantic_results, semantic_metrics = run_semantic_llm_checks(package)
-        metrics["semantic_llm"] = semantic_metrics
-        stage_results, stage_metrics = run_stage_llm_checks(package)
-        metrics["stage_llm"] = stage_metrics
-        penalty_results, penalty_metrics = run_penalty_llm_checks(package)
-        metrics["penalty_llm"] = penalty_metrics
+        try:
+            semantic_results, semantic_metrics = run_semantic_llm_checks(package)
+            metrics["semantic_llm"] = semantic_metrics
+            warnings.extend(_llm_recovery_warnings("семантическая LLM-проверка", semantic_metrics))
+        except Exception as error:
+            warnings.append(_pipeline_warning("semantic LLM", error))
+            metrics["semantic_llm"] = {"error": _error_summary(error)}
+        try:
+            stage_results, stage_metrics = run_stage_llm_checks(package)
+            metrics["stage_llm"] = stage_metrics
+            warnings.extend(_llm_recovery_warnings("LLM-проверка этапов", stage_metrics))
+        except Exception as error:
+            warnings.append(_pipeline_warning("stage LLM", error))
+            metrics["stage_llm"] = {"error": _error_summary(error)}
+        try:
+            penalty_results, penalty_metrics = run_penalty_llm_checks(package)
+            metrics["penalty_llm"] = penalty_metrics
+            warnings.extend(_llm_recovery_warnings("LLM-проверка штрафов", penalty_metrics))
+        except Exception as error:
+            warnings.append(_pipeline_warning("penalty LLM", error))
+            metrics["penalty_llm"] = {"error": _error_summary(error)}
 
     external_results = None
     if options.with_ktru:
@@ -163,7 +194,7 @@ async def _aprocess_uploaded_documents(
             ktru_results.append(run_pp1875_checks(package))
             external_results = external_manual_checks_with_replacements(package, ktru_results)
         except Exception as error:
-            warnings.append(f"KTRU checks failed: {error}")
+            warnings.append(_pipeline_warning("KTRU checks", error))
 
     checks_report = run_checks(
         package,
@@ -233,22 +264,33 @@ async def _apply_llm_extraction(
     prepared: list[dict[str, Any]] = []
 
     for document in documents:
-        ir = read_docx(document.path)
-        decision = classifier.classify(ir, document.type_hint)
-        document_tables = extract_tables(ir, decision.document_type)
-        if vlm_repairer is not None:
-            document_tables = vlm_repairer.repair_document_tables(
-                ir,
-                decision.document_type,
-                document_tables,
+        try:
+            ir = read_docx(document.path)
+            decision = classifier.classify(ir, document.type_hint)
+            document_tables = extract_tables(ir, decision.document_type)
+            if vlm_repairer is not None:
+                document_tables = vlm_repairer.repair_document_tables(
+                    ir,
+                    decision.document_type,
+                    document_tables,
+                )
+            deterministic_schema = _schema_for_document_type(package, decision.document_type)
+            if deterministic_schema is None:
+                warnings.append(
+                    f"{document.path.name}: LLM preparation skipped: deterministic document schema is unavailable."
+                )
+                continue
+            payload = build_document_llm_payload(
+                ir=ir,
+                document_type=decision.document_type,
+                tables=document_tables,
+                deterministic_schema=deterministic_schema,
             )
-        deterministic_schema = _schema_for_document_type(package, decision.document_type)
-        payload = build_document_llm_payload(
-            ir=ir,
-            document_type=decision.document_type,
-            tables=document_tables,
-            deterministic_schema=deterministic_schema,
-        )
+        except Exception as error:
+            warnings.append(
+                f"{document.path.name}: LLM preparation failed: {_error_summary(error)}"
+            )
+            continue
         prepared.append(
             {
                 "file_name": ir.file_name,
@@ -279,13 +321,68 @@ async def _apply_llm_extraction(
     for index, result in enumerate(results):
         item = prepared[index]
         if isinstance(result, Exception):
-            warnings.append(f"{item['file_name']}: {result}")
+            warnings.append(
+                f"{item['file_name']}: LLM extraction failed: {_error_summary(result)}"
+            )
             continue
         if result["error"]:
             warnings.append(f"{result['file_name']}: {result['error']}")
-        apply_llm_document_result(package, result["document_type"], result["schema"])
+        try:
+            apply_llm_document_result(package, result["document_type"], result["schema"])
+        except Exception as error:
+            warnings.append(
+                f"{result['file_name']}: LLM result apply failed: {_error_summary(error)}"
+            )
 
     return warnings, llm_client.metrics()
+
+
+def _pipeline_warning(phase: str, error: Exception) -> str:
+    return f"{phase} failed: {_error_summary(error)}"
+
+
+def _llm_recovery_warnings(
+    phase: str,
+    metrics: dict[str, Any] | None,
+) -> list[str]:
+    if not metrics:
+        return []
+    result: list[str] = []
+    attempts = metrics.get("attempts", [])
+    if not isinstance(attempts, list):
+        return []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        file_name = attempt.get("file_name")
+        prefix = f"{file_name}: {phase}" if file_name else phase
+        lossy_warnings = attempt.get("lossy_recovery_warnings", [])
+        if not isinstance(lossy_warnings, list):
+            continue
+        for warning in lossy_warnings:
+            result.append(f"{prefix}: ответ LLM восстановлен частично: {warning}")
+    return list(dict.fromkeys(result))
+
+
+def _commercial_offer_recovery_warnings(
+    file_name: str,
+    metrics: dict[str, Any],
+) -> list[str]:
+    recovery = metrics.get("structured_recovery")
+    if not isinstance(recovery, dict):
+        return []
+    lossy_warnings = recovery.get("lossy_warnings", [])
+    if not isinstance(lossy_warnings, list):
+        return []
+    return [
+        f"{file_name}: VLM-разбор КП восстановлен частично: {warning}"
+        for warning in lossy_warnings
+    ]
+
+
+def _error_summary(error: Exception) -> str:
+    text = " ".join(str(error).split())
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
 
 
 def _schema_for_document_type(package, document_type: DocumentType) -> BaseModel | None:

@@ -7,10 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from shared_modules.llm_models import OPENAI_MODEL, get_chatGPT_client
 from summary_model.domain.models import DocumentIR, DocumentType, TableIR
+from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
 from summary_model.tables.models import ParsedTable
 from summary_model.tables.table_compactor import build_compact_markdown
 from summary_model.tables.utils import clean_text
@@ -41,6 +40,9 @@ class VlmFallbackRepairer:
         "errors": [],
         "tables_considered": 0,
         "tables_repaired": 0,
+        "recovered_calls": 0,
+        "partial_calls": 0,
+        "recovery_warnings": [],
         "duration_seconds": 0.0,
         "usage": [],
     })
@@ -134,7 +136,29 @@ class VlmFallbackRepairer:
                         "usage": usage,
                     }
                 )
-            extraction = _parse_response(response, role=role, table_title=table.title)
+            extraction, recovery = _parse_response(
+                response,
+                role=role,
+                table_title=table.title,
+            )
+            if recovery.status == "recovered":
+                self.metrics["recovered_calls"] = int(self.metrics["recovered_calls"]) + 1
+            elif recovery.status == "partial":
+                self.metrics["partial_calls"] = int(self.metrics["partial_calls"]) + 1
+            if recovery.all_warnings:
+                self.metrics["recovery_warnings"].append(
+                    {
+                        "file_name": ir.file_name,
+                        "table_index": table.table_index,
+                        "warnings": recovery.all_warnings,
+                        "lossy_warnings": recovery.lossy_warnings,
+                    }
+                )
+            for warning in recovery.lossy_warnings:
+                self._warn(
+                    f"{ir.file_name}, table {table.table_index}: "
+                    f"ответ VLM восстановлен частично: {warning}"
+                )
             _write_json(output_dir / "vlm_result.json", extraction.model_dump(mode="json", exclude_none=True))
         except Exception as error:
             message = f"{ir.file_name}, table {table.table_index}: VLM fallback failed: {error}"
@@ -310,19 +334,20 @@ def _parse_response(
     *,
     role: VlmTableRole,
     table_title: str | None,
-) -> VlmTableExtraction:
+) -> tuple[VlmTableExtraction, StructuredRecovery]:
     content = response["choices"][0]["message"]["content"]
     data = json.loads(content)
     if isinstance(data, dict):
         data.setdefault("table_role", role)
         if table_title:
             data.setdefault("table_title", table_title)
-    try:
-        return VlmTableExtraction.model_validate(data)
-    except ValidationError:
-        if isinstance(data, dict):
-            data["table_role"] = role
-        return VlmTableExtraction.model_validate(data)
+    recovery = recover_model(VlmTableExtraction, data)
+    if not isinstance(recovery.value, VlmTableExtraction):
+        raise ValueError(
+            "Ответ VLM не удалось привести к VlmTableExtraction: "
+            f"{recovery.error or 'неизвестная ошибка валидации'}"
+        )
+    return recovery.value, recovery
 
 
 def _compact_json_from_vlm(

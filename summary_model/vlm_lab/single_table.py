@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
 from pydantic import BaseModel
 
 from shared_modules.llm_models import get_chatGPT_client, OPENAI_MODEL
 from summary_model.classification import DocumentClassifier
 from summary_model.domain.models import DocumentIR, DocumentType, TableIR
+from summary_model.extraction.structured_recovery import recover_model
 from summary_model.ingestion import read_docx
 from summary_model.tables import ParsedTable, extract_tables
 from summary_model.vlm_lab.candidates import rank_table_candidates, table_role
@@ -241,10 +241,10 @@ def _parse_vlm_result(
         data.setdefault("table_role", role)
         if table_title:
             data.setdefault("table_title", table_title)
-    try:
-        return VlmTableExtraction.model_validate(data), None
-    except ValidationError as error:
-        return None, str(error)
+    recovery = recover_model(VlmTableExtraction, data)
+    if isinstance(recovery.value, VlmTableExtraction):
+        return recovery.value, None
+    return None, recovery.error or "VLM response does not match VlmTableExtraction."
 
 
 def _write_json(path: Path, data: Any) -> None:

@@ -223,6 +223,14 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_commercial_offer_report_text(report: ProcurementChecksReport) -> str:
+    """Render commercial-offer checks with the production report formatting."""
+    by_id = {result.check_id: result for result in report.results}
+    lines = ["Результат извлечения коммерческих предложений"]
+    lines.extend(_render_commercial_offer_section(by_id))
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _render_document_presence(by_id: dict[str, CheckResult]) -> list[str]:
     lines: list[str] = []
     for check_id in DOCUMENT_CHECK_ORDER:
@@ -562,6 +570,12 @@ def _render_commercial_offer_content(result: CheckResult) -> list[str]:
             lines.append("  <b>Не найдены или не распознаны в КП:</b>")
             for label, fields in unresolved:
                 lines.append(f"  - {label}: {', '.join(fields)}.")
+        parser_warnings = result.details.get("parser_warnings") if result.details else None
+        if isinstance(parser_warnings, list) and parser_warnings:
+            lines.append("")
+            lines.append("  <b>Проблемы подготовки или VLM-разбора:</b>")
+            for warning in parser_warnings:
+                lines.append(f"  - <warn>{_human_text(str(warning))}</warn>")
         trademarks = sorted({
             trademark
             for offer in offers if isinstance(offer, dict)

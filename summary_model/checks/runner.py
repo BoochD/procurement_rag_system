@@ -176,6 +176,7 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
     summary_lines: list[str] = []
     missing: list[str] = []
     warnings: list[str] = []
+    parser_warnings: list[str] = []
     offer_summaries: list[dict[str, Any]] = []
     for index, offer in enumerate(offers, 1):
         label = _commercial_offer_label(index, offer)
@@ -235,6 +236,11 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 warnings.append(
                     f"{label}: найден товарный знак '{item.trademark}' по позиции '{item.name or item.row_number}'"
                 )
+        parser_warnings.extend(
+            f"{label}: {warning}"
+            for warning in offer.parser_warnings
+            if warning
+        )
 
     if missing:
         status = "manual_review"
@@ -261,10 +267,11 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 "commercial_offers[].total_amount",
             ],
             details={
-                "summary_lines": summary_lines + warnings + missing,
+                "summary_lines": summary_lines + warnings + parser_warnings + missing,
                 "offer_summaries": offer_summaries,
                 "missing": missing,
                 "warnings": warnings,
+                "parser_warnings": parser_warnings,
             },
         )
     ]
@@ -2143,9 +2150,31 @@ def _check_plan_national_regime_fields(
                 found[f"17.{key_match.group(1)}"] = value
         missing = [code for code in expected if not found.get(code)]
         plan_codes = _plan_okpd2_codes(schedule)
-        registry = registry or ProcurementReferenceRegistry(Path("data/parsed_tables"))
         expected_rows: list[dict[str, str]] = []
         registry_errors: list[str] = []
+        try:
+            registry = registry or ProcurementReferenceRegistry(Path("data/parsed_tables"))
+        except Exception as error:
+            registry_error = f"{type(error).__name__}: {error}"
+            return [
+                _result(
+                    "strict.plan.national_regime_fields",
+                    "Запреты, ограничения и преимущества по ПП №1875",
+                    "manual_review",
+                    "strict",
+                    "Локальный реестр ПП №1875 недоступен; строки национального режима ПГ требуют ручной проверки.",
+                    documents=["schedule_application"],
+                    fields=["schedule_application.national_regime_fields"],
+                    details={
+                        "summary_lines": [
+                            "Локальный реестр ПП №1875 недоступен; автоматическая сверка не выполнена."
+                        ],
+                        "expected_rows": [],
+                        "registry_errors": [registry_error],
+                        "unexpected_codes": [],
+                    },
+                )
+            ]
         for code in plan_codes:
             try:
                 result = registry.check_okpd2(code)

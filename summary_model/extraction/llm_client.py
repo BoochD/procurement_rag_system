@@ -5,12 +5,19 @@ import json
 import re
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from summary_model.classification.document_classifier import ClassificationDecision
 from summary_model.domain.models import DocumentIR, DocumentType
+from .structured_recovery import (
+    StructuredRecovery,
+    raw_message_text,
+    raw_payload_from_message,
+    recover_model,
+)
 from .prompts import CLASSIFIER_PROMPT, COMMON_EXTRACTION_PROMPT
 from .table_projection import render_table_for_llm
 
@@ -22,8 +29,19 @@ class EmptyStructuredOutputError(RuntimeError):
     pass
 
 
+class UnrecoverableStructuredOutputError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class _RecoveredResponse:
+    recovery: StructuredRecovery
+    parsing_error: str | None = None
+    raw_text: str = ""
+
+
 def _is_non_retryable(error: Exception) -> bool:
-    if isinstance(error, EmptyStructuredOutputError):
+    if isinstance(error, (EmptyStructuredOutputError, UnrecoverableStructuredOutputError, ValidationError)):
         return True
     message = str(error).lower()
     if "input_value=none" in message and "input_type=nonetype" in message:
@@ -102,6 +120,12 @@ class StructuredLLMClient:
             "reasoning_effort": getattr(self.model, "reasoning_effort", None),
             "max_tokens": getattr(self.model, "max_tokens", None),
             "attempts": list(self.attempts),
+            "recovered_calls": sum(
+                1 for attempt in self.attempts if attempt.get("result_status") == "recovered"
+            ),
+            "partial_calls": sum(
+                1 for attempt in self.attempts if attempt.get("result_status") == "partial"
+            ),
         }
 
     @contextmanager
@@ -119,28 +143,27 @@ class StructuredLLMClient:
         system_prompt: str,
         payload: str,
     ) -> tuple[T | None, str | None]:
-        structured = self.model.with_structured_output(
-            schema,
-            method="function_calling",
-        )
+        structured = _structured_runnable(self.model, schema)
         prompt = f"{COMMON_EXTRACTION_PROMPT}\n\n{system_prompt}\n\nDOCUMENT:\n{payload}"
         started = time.perf_counter()
         try:
             self.calls += 1
             self.input_characters += len(prompt)
             attempt_started = time.perf_counter()
-            result = structured.invoke(prompt)
-            if result is None:
-                raise EmptyStructuredOutputError(
-                    "LLM вернула пустой structured output (None). Использован deterministic fallback."
-                )
-            validated = schema.model_validate(result)
+            response = structured.invoke(prompt)
+            recovered = _recover_response(schema, response)
+            validated = _require_recovered_value(recovered)
             self._record_attempt(
                 schema=schema,
                 prompt=prompt,
                 output=_model_output_text(validated),
                 duration_seconds=time.perf_counter() - attempt_started,
                 success=True,
+                result_status=recovered.recovery.status,
+                recovery_warnings=recovered.recovery.all_warnings,
+                lossy_recovery_warnings=recovered.recovery.lossy_warnings,
+                parsing_error=recovered.parsing_error,
+                raw_output=recovered.raw_text,
             )
             return validated, None
         except Exception as first_error:
@@ -166,12 +189,9 @@ class StructuredLLMClient:
                 self.calls += 1
                 self.input_characters += len(retry_prompt)
                 attempt_started = time.perf_counter()
-                result = structured.invoke(retry_prompt)
-                if result is None:
-                    raise EmptyStructuredOutputError(
-                        "LLM вернула пустой structured output (None). Использован deterministic fallback."
-                    )
-                validated = schema.model_validate(result)
+                response = structured.invoke(retry_prompt)
+                recovered = _recover_response(schema, response)
+                validated = _require_recovered_value(recovered)
                 self._record_attempt(
                     schema=schema,
                     prompt=retry_prompt,
@@ -179,6 +199,11 @@ class StructuredLLMClient:
                     duration_seconds=time.perf_counter() - attempt_started,
                     success=True,
                     is_retry=True,
+                    result_status=recovered.recovery.status,
+                    recovery_warnings=recovered.recovery.all_warnings,
+                    lossy_recovery_warnings=recovered.recovery.lossy_warnings,
+                    parsing_error=recovered.parsing_error,
+                    raw_output=recovered.raw_text,
                 )
                 return validated, None
             except Exception as second_error:
@@ -202,10 +227,7 @@ class StructuredLLMClient:
         system_prompt: str,
         payload: str,
     ) -> tuple[T | None, str | None]:
-        structured = self.model.with_structured_output(
-            schema,
-            method="function_calling",
-        )
+        structured = _structured_runnable(self.model, schema)
         prompt = f"{COMMON_EXTRACTION_PROMPT}\n\n{system_prompt}\n\nDOCUMENT:\n{payload}"
         started = time.perf_counter()
         first_error: Exception | None = None
@@ -226,15 +248,12 @@ class StructuredLLMClient:
                         self.calls += 1
                         self.input_characters += len(request_prompt)
                         attempt_started = time.perf_counter()
-                        result = await asyncio.wait_for(
+                        response = await asyncio.wait_for(
                             structured.ainvoke(request_prompt),
                             timeout=self.timeout_seconds,
                         )
-                    if result is None:
-                        raise EmptyStructuredOutputError(
-                            "LLM вернула пустой structured output (None). Использован deterministic fallback."
-                        )
-                    validated = schema.model_validate(result)
+                    recovered = _recover_response(schema, response)
+                    validated = _require_recovered_value(recovered)
                     self._record_attempt(
                         schema=schema,
                         prompt=request_prompt,
@@ -242,6 +261,11 @@ class StructuredLLMClient:
                         duration_seconds=time.perf_counter() - attempt_started,
                         success=True,
                         is_retry=bool(attempt),
+                        result_status=recovered.recovery.status,
+                        recovery_warnings=recovered.recovery.all_warnings,
+                        lossy_recovery_warnings=recovered.recovery.lossy_warnings,
+                        parsing_error=recovered.parsing_error,
+                        raw_output=recovered.raw_text,
                     )
                     return validated, None
                 except Exception as error:
@@ -298,6 +322,11 @@ class StructuredLLMClient:
         success: bool,
         error: Exception | None = None,
         is_retry: bool = False,
+        result_status: str | None = None,
+        recovery_warnings: list[str] | None = None,
+        lossy_recovery_warnings: list[str] | None = None,
+        parsing_error: str | None = None,
+        raw_output: str | None = None,
     ) -> None:
         payload_file_name = self._call_context.get("file_name") or _file_name_from_prompt(prompt)
         payload_document_type = self._call_context.get("document_type") or _document_type_from_prompt(prompt)
@@ -316,7 +345,83 @@ class StructuredLLMClient:
             record["estimated_output_tokens"] = _estimate_tokens(len(output))
         if error is not None:
             record["error"] = _structured_error_message(error)[:500]
+        if result_status is not None:
+            record["result_status"] = result_status
+        if recovery_warnings:
+            record["recovery_warnings"] = recovery_warnings
+        if lossy_recovery_warnings:
+            record["lossy_recovery_warnings"] = lossy_recovery_warnings
+        if parsing_error:
+            record["parsing_error"] = parsing_error[:1000]
+        if raw_output:
+            record["raw_output_characters"] = len(raw_output)
+            record["raw_output_preview"] = raw_output[:2000]
         self.attempts.append(record)
+
+
+def _structured_runnable(model, schema: type[BaseModel]):
+    try:
+        return model.with_structured_output(
+            schema,
+            method="function_calling",
+            include_raw=True,
+        )
+    except TypeError as error:
+        if "include_raw" not in str(error):
+            raise
+        # Compatibility for local test doubles and non-LangChain adapters.
+        return model.with_structured_output(schema, method="function_calling")
+
+
+def _recover_response(schema: type[T], response) -> _RecoveredResponse:
+    if response is None:
+        raise EmptyStructuredOutputError(
+            "LLM вернула пустой structured output (None). Использован deterministic fallback."
+        )
+
+    if isinstance(response, dict) and {"raw", "parsed", "parsing_error"}.issubset(response):
+        raw = response.get("raw")
+        parsed = response.get("parsed")
+        parsing_error = response.get("parsing_error")
+        raw_text = raw_message_text(raw)
+        if parsed is not None:
+            return _RecoveredResponse(
+                recovery=recover_model(schema, parsed),
+                parsing_error=_optional_error_text(parsing_error),
+                raw_text=raw_text,
+            )
+        raw_payload = raw_payload_from_message(raw)
+        if raw_payload is not None:
+            return _RecoveredResponse(
+                recovery=recover_model(schema, raw_payload),
+                parsing_error=_optional_error_text(parsing_error),
+                raw_text=raw_text,
+            )
+        if parsing_error is None and not raw_text:
+            raise EmptyStructuredOutputError(
+                "LLM вернула пустой structured output (None). Использован deterministic fallback."
+            )
+        raise RuntimeError(
+            "LLM structured output не удалось извлечь из raw-ответа: "
+            f"{_optional_error_text(parsing_error) or 'JSON отсутствует или повреждён.'}"
+        )
+
+    return _RecoveredResponse(recovery=recover_model(schema, response))
+
+
+def _require_recovered_value(response: _RecoveredResponse) -> T:
+    if response.recovery.value is not None:
+        return response.recovery.value  # type: ignore[return-value]
+    raise UnrecoverableStructuredOutputError(
+        "LLM вернула JSON, но его не удалось привести к строгой схеме: "
+        f"{response.recovery.error or 'неизвестная ошибка валидации'}"
+    )
+
+
+def _optional_error_text(error: object | None) -> str | None:
+    if error is None:
+        return None
+    return f"{type(error).__name__}: {error}"
 
 
 def _estimate_tokens(characters: int) -> int:

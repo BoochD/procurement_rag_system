@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from summary_model.checks import run_checks
-from summary_model.checks.report import build_checks_report_text
+from summary_model.checks import runner as checks_runner
+from summary_model.checks.models import ProcurementChecksReport
+from summary_model.checks.report import build_checks_report_text, build_commercial_offer_report_text
 from summary_model.checks_cli import main as checks_cli_main
 from summary_model.extraction_models import (
     CommercialOfferItem,
@@ -364,6 +366,42 @@ def test_smp_sonko_subcontract_fails_when_plan_requires_percent_missing_in_contr
 
     assert checks["strict.smp_sonko_subcontract"].status == "failed"
     assert "процент" in checks["strict.smp_sonko_subcontract"].message.casefold()
+
+
+def test_smp_sonko_plain_contract_clause_matches_plan_without_semantic_llm():
+    from summary_model.extraction_pipeline import (
+        _contract_smp_sonko_clause,
+        _contract_smp_sonko_required,
+        _percent_from_text,
+    )
+
+    contract_text = """
+    5. Права и обязанности Сторон
+    5.4.11. Привлечь к исполнению Контракта соисполнителей из числа субъектов
+    малого предпринимательства, социально ориентированных некоммерческих
+    организаций в объеме 90 (девяноста) процентов от цены Контракта.
+    6. Приемка услуг
+    """
+    clause = _contract_smp_sonko_clause(contract_text)
+
+    assert clause is not None
+    assert _contract_smp_sonko_required(clause) is True
+    assert _percent_from_text(clause) == Decimal("90")
+
+    package = _base_package()
+    package.schedule_application.subcontract_smp_sonko_required_raw = (
+        "Предусмотрена в объеме 90% от цены Контракта"
+    )
+    package.schedule_application.subcontract_smp_sonko_required = True
+    package.schedule_application.subcontract_smp_sonko_percent = Decimal("90")
+    package.contract_draft.subcontract_smp_sonko_required_raw = clause
+    package.contract_draft.subcontract_smp_sonko_required = True
+    package.contract_draft.subcontract_smp_sonko_percent = Decimal("90")
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.smp_sonko_subcontract"].status == "passed"
+    assert "согласованы" in checks["strict.smp_sonko_subcontract"].message
 
 
 def test_plan_ground_truth_text_fields_warn_on_mismatch_and_pass_on_match():
@@ -808,6 +846,28 @@ def test_plan_national_regime_missing_advantages_row_is_warning():
     assert checks["strict.plan.national_regime_fields"].status == "warning"
 
 
+def test_plan_national_regime_registry_initialization_failure_is_manual_review(monkeypatch):
+    package = _base_package()
+    package.schedule_application.okpd2_codes = ["58.29.31.000"]
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.1.", value="Запрет: 58.29.31", is_empty=False),
+        RawField(key="17.2.", value="Нет", is_empty=False),
+        RawField(key="17.3.", value="Нет", is_empty=False),
+    ]
+    monkeypatch.setattr(
+        checks_runner,
+        "ProcurementReferenceRegistry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("registry unavailable")),
+    )
+
+    checks = _by_id(run_checks(package))
+    result = checks["strict.plan.national_regime_fields"]
+
+    assert result.status == "manual_review"
+    assert "Локальный реестр ПП №1875 недоступен" in result.message
+    assert "registry unavailable" in result.details["registry_errors"][0]
+
+
 def test_checks_cli_writes_artifacts():
     package = _base_package()
     with _runtime_temp_dir("checks_cli_") as tmp_path:
@@ -1239,16 +1299,46 @@ def test_mocked_vlm_commercial_offer_extraction(monkeypatch):
         assert result.offer.total_amount.amount == Decimal("123456.0")
 
 
-def test_scanned_commercial_offer_merges_page_results(monkeypatch):
+def test_commercial_offer_lab_report_uses_production_section_renderer():
+    package = ProcurementPackageExtraction(
+        commercial_offers=[
+            CommercialOfferSchema(
+                supplier_name="ООО Ромашка",
+                outgoing_number="42",
+                items=[CommercialOfferItem(name="Товар", quantity=Decimal("1"))],
+                parser_warnings=["Для VLM-парсинга PDF КП нужен пакет PyMuPDF."],
+            )
+        ],
+        commercial_offers_found_count=1,
+        commercial_offers_missing=True,
+    )
+    checks = run_checks(package)
+    commercial_report = ProcurementChecksReport.from_results(
+        package_id=package.package_id,
+        results=[
+            result
+            for result in checks.results
+            if result.check_id.startswith("manual.commercial_offers.")
+        ],
+    )
+
+    text = build_commercial_offer_report_text(commercial_report)
+
+    assert "6) Коммерческие предложения:" in text
+    assert "ООО Ромашка" in text
+    assert "Проблемы подготовки или VLM-разбора" in text
+    assert "PyMuPDF" in text
+
+
+def test_scanned_commercial_offer_uses_all_pages_in_one_vlm_request(monkeypatch):
     from summary_model.commercial_offer_vlm import extract_commercial_offer_with_vlm, CommercialOfferVlmOptions
 
-    responses = iter([
-        '{"supplier_name":"ООО Тест","outgoing_number":"42","items":['
-        '{"row_number":"1.1","name":"Услуга","unit":"усл. ед.","quantity":1,"unit_price":100,"total_price":100}]}',
-        '{"total_amount":300,"delivery_term_text":"до 01.09.2026","items":['
-        '{"row_number":"1.2","name":"Сервер","unit":"шт.","quantity":2,"unit_price":100,"total_price":200}]}',
-        '{"items":[{"row_number":"1","name":"Техническая характеристика без цены"}]}',
-    ])
+    response_content = (
+        '{"supplier_name":"ООО Тест","outgoing_number":"42","total_amount":300,'
+        '"delivery_term_text":"до 01.09.2026","items":['
+        '{"row_number":"1.1","name":"Услуга","unit":"усл. ед.","quantity":1,"unit_price":100,"total_price":100},'
+        '{"row_number":"1.2","name":"Сервер","unit":"шт.","quantity":2,"unit_price":100,"total_price":200}]}'
+    )
 
     class FakeResponse:
         def __init__(self, content):
@@ -1262,7 +1352,7 @@ def test_scanned_commercial_offer_merges_page_results(monkeypatch):
             self.chat = type(
                 "Chat",
                 (),
-                {"completions": type("Completions", (), {"create": lambda _self, **_kwargs: FakeResponse(next(responses))})()},
+                {"completions": type("Completions", (), {"create": lambda _self, **_kwargs: FakeResponse(response_content)})()},
             )()
 
     monkeypatch.setattr("summary_model.commercial_offer_vlm.get_chatGPT_client", lambda: FakeOpenAI())
@@ -1280,10 +1370,70 @@ def test_scanned_commercial_offer_merges_page_results(monkeypatch):
         path.write_bytes(b"%PDF")
         result = extract_commercial_offer_with_vlm(path, options=CommercialOfferVlmOptions())
 
-    assert result.metrics["calls"] == 3
+    assert result.metrics["calls"] == 1
     assert result.offer.supplier_name == "ООО Тест"
     assert result.offer.total_amount.amount == Decimal("300")
     assert [item.row_number for item in result.offer.items] == ["1.1", "1.2"]
+
+
+def test_commercial_offer_vlm_prices_are_not_overwritten_by_text_layer():
+    from summary_model.commercial_offer_vlm import _merge_offer_with_deterministic
+
+    vlm_offer = CommercialOfferSchema(
+        items=[
+            CommercialOfferItem(
+                row_number="1.1",
+                name="Сервер",
+                unit="шт.",
+                quantity=Decimal("4"),
+                unit_price=Decimal("10245000"),
+                total_price=Decimal("40980000"),
+            )
+        ]
+    )
+    text_offer = CommercialOfferSchema(
+        items=[
+            CommercialOfferItem(
+                row_number="1.1",
+                name="Сервер",
+                unit="шт.",
+                quantity=Decimal("4"),
+                unit_price=Decimal("10300000"),
+                total_price=Decimal("41200000"),
+                trademark="DEPO",
+            )
+        ]
+    )
+
+    result = _merge_offer_with_deterministic(vlm_offer, text_offer)
+
+    assert result.items[0].unit_price == Decimal("10245000")
+    assert result.items[0].trademark == "DEPO"
+
+
+def test_commercial_offer_vlm_normalizes_russian_dates_and_money_strings():
+    from summary_model.commercial_offer_vlm import _normalize_vlm_offer_payload
+
+    payload = _normalize_vlm_offer_payload(
+        {
+            "outgoing_date": "28.04.2026",
+            "offer_date": "30.04.2026",
+            "items": [
+                {
+                    "name": "Сервер",
+                    "quantity": "4",
+                    "unit_price": "10 470 000,00",
+                    "total_price": "41 880 000,00",
+                }
+            ],
+        }
+    )
+    offer = CommercialOfferSchema.model_validate(payload)
+
+    assert str(offer.outgoing_date) == "2026-04-28"
+    assert str(offer.offer_date) == "2026-04-30"
+    assert offer.items[0].unit_price == Decimal("10470000.00")
+    assert offer.items[0].total_price == Decimal("41880000.00")
 
 
 def test_commercial_offer_text_layer_restores_requisites_and_leaf_items():
