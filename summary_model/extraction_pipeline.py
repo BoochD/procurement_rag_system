@@ -1235,6 +1235,123 @@ def _line_after_marker(text: str, *markers: str) -> str | None:
     return None
 
 
+_OOZ_SUBJECT_MARKER_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:наименование\s+объекта\s+закупки|наименование\s+закупки|наименование)"
+    r"\s*(?::|[-–—])?\s*(.*)$",
+    flags=re.IGNORECASE,
+)
+
+
+def _purchase_subject_from_ooz_section(text: str) -> str | None:
+    """Extract the exact procurement name from an OOZ section header window."""
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    heading_indexes = [index for index, line in enumerate(lines) if _is_ooz_heading(line)]
+    heading_indexes.sort(key=lambda index: 0 if _is_exact_ooz_heading(lines[index]) else 1)
+    for heading_index in heading_indexes:
+        window = lines[heading_index + 1 : heading_index + 16]
+        explicit = _explicit_ooz_subject(window)
+        if explicit:
+            return explicit
+        direct = _direct_ooz_subject(window)
+        if direct:
+            return direct
+    return None
+
+
+def _is_ooz_heading(line: str) -> bool:
+    normalized = _normalized_ooz_heading(line)
+    return bool(
+        re.fullmatch(
+            r"(?:(?:приложение\s*№?\s*\d+)\s+)?"
+            r"(?:\d+(?:\.\d+)*[.)]?\s*)?описание\s+объекта\s+закупки",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _is_exact_ooz_heading(line: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:\d+(?:\.\d+)*[.)]?\s*)?описание\s+объекта\s+закупки",
+            _normalized_ooz_heading(line),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalized_ooz_heading(line: str) -> str:
+    normalized = clean_text(line).casefold()
+    normalized = normalized.replace("«", " ").replace("»", " ").replace('"', " ")
+    normalized = re.sub(r"[;:.,]+$", "", normalized)
+    return clean_text(normalized)
+
+
+def _explicit_ooz_subject(lines: list[str]) -> str | None:
+    for index, line in enumerate(lines):
+        match = _OOZ_SUBJECT_MARKER_RE.match(line)
+        if not match:
+            continue
+        value = _clean_ooz_subject(match.group(1))
+        if value:
+            return value
+        if index + 1 < len(lines):
+            value = _clean_ooz_subject(lines[index + 1])
+            if value and not _is_ooz_service_line(value):
+                return value
+    return None
+
+
+def _direct_ooz_subject(lines: list[str]) -> str | None:
+    for line in lines:
+        value = _clean_ooz_subject(line)
+        if not value or _is_ooz_service_line(value):
+            continue
+        return value
+    return None
+
+
+def _clean_ooz_subject(value: str | None) -> str | None:
+    value = clean_text(value)
+    if not value:
+        return None
+    value = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", value)
+    value = value.strip(" \t:;.-–—")
+    return clean_text(value) or None
+
+
+def _is_ooz_service_line(line: str) -> bool:
+    lowered = clean_text(line).casefold()
+    if not lowered:
+        return True
+    if lowered in {"общие сведения", "общая информация"}:
+        return True
+    if lowered.startswith((
+        "приложение",
+        "к контракту",
+        "от «",
+        "от \"",
+        "место поставки",
+        "место оказания",
+        "адрес поставки",
+        "срок поставки",
+        "срок оказания",
+        "срок выполнения",
+        "окпд",
+        "ктру",
+        "таблица",
+        "требования",
+        "характеристики",
+        "условия поставки",
+        "цели",
+    )):
+        return True
+    if re.match(r"^\d+(?:\.\d+)*[.)]?\s*(?:общие сведения|цели|требования)\b", lowered):
+        return True
+    return False
+
+
 def _date_after_marker(text: str, *markers: str) -> date | None:
     value = _line_after_marker(text, *markers)
     if value is None:
@@ -1570,7 +1687,10 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
     _link_codes_to_items_from_text(items, subject_codes)
     return PurchaseDescriptionSchema(
         document_title=_title(ir),
-        purchase_subject=_line_after_marker(text, "предмет закупки", "объект закупки"),
+        purchase_subject=(
+            _purchase_subject_from_ooz_section(text)
+            or _line_after_marker(text, "предмет закупки", "объект закупки")
+        ),
         okpd2_codes=unique_codes(OKPD2_RE, text),
         ktru_codes=unique_codes(KTRU_RE, text),
         subject_codes=subject_codes,
@@ -1611,7 +1731,9 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     stages = _stages_from_tables(tables)
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
+    embedded_subject = _purchase_subject_from_ooz_section(text)
     embedded = PurchaseDescriptionSchema(
+        purchase_subject=embedded_subject,
         stages=stages,
         items=description_items,
         parser_warnings=["Embedded purchase description inferred from contract tables."],
@@ -1643,7 +1765,9 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         warranty_security=_security_value(warranty_security_text),
         referenced_attachments=referenced_attachments,
         actual_attachments=table_attachments,
-        embedded_purchase_description=embedded if embedded.items else None,
+        embedded_purchase_description=(
+            embedded if embedded.purchase_subject or embedded.items or embedded.stages else None
+        ),
         items=description_items,
         specification_items=specification_items,
         parser_warnings=_contract_attachment_warnings(

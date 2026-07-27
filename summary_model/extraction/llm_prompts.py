@@ -3,7 +3,7 @@ from __future__ import annotations
 from summary_model.domain.models import DocumentType
 
 
-LLM_EXTRACTION_PROMPT_VERSION = "extraction-llm-prompts-1.0.0"
+LLM_EXTRACTION_PROMPT_VERSION = "extraction-llm-prompts-1.1.0"
 
 COMMON_CANONICAL_EXTRACTION_PROMPT = """
 You extract a final typed procurement document schema from compact parser output.
@@ -64,6 +64,11 @@ text, variation coefficient and stage descriptions when missing.
 Build PurchaseDescriptionSchema.
 Preserve parsed purchase items and characteristics. Use paragraph text for
 purchase subject, delivery place, delivery term and warranty requirements.
+For purchase_subject, prefer the exact name inside the section headed
+"Описание объекта закупки". It may follow labels such as "Наименование
+закупки", "Наименование объекта закупки" or "Наименование", or appear as the
+first content line after the heading. Do not shorten an exact name already
+present in known_extracted.
 Preserve okpd2_codes/ktru_codes and subject_codes from known_extracted.
 Preserve parsed stages when an OOZ stage table is present.
 Do not invent missing KTRU/OKPD2 codes.
@@ -81,17 +86,14 @@ text for contract number, subject, price, funding source, delivery place,
 delivery term, stages, warranty text and attachments. Do not merge specification rows
 into purchase-description items.
 Preserve okpd2_codes/ktru_codes and subject_codes from known_extracted.
-Extract the responsibility/penalty section into penalty_clauses and peni_clauses.
-If known_extracted contains responsibility_section_text, preserve it and use it
-as the main source for penalties and peni.
-Use exact contract wording in raw_text. Classify clauses only when explicit:
-- supplier value-obligation fine: party=supplier, obligation_kind=value_obligation;
-- supplier non-value obligation fine: party=supplier, obligation_kind=non_value_obligation;
-- customer fine: party=customer;
-- delay peni formula: obligation_kind=delay_peni and place it in peni_clauses;
-- SMP/SONKO subcontracting fine: obligation_kind=smp_sonko_subcontract.
-If the clause states a percent like "10 процентов" or "5%", fill percent.
-If it states a fixed amount like "1000 рублей", fill amount.
+Do not extract or check penalties and peni in this general document pass. Leave
+penalty_clauses and peni_clauses empty. Never rewrite, summarize or shorten
+responsibility_section_text from known_extracted; a dedicated penalty check
+uses the complete deterministic section later.
+For embedded_purchase_description.purchase_subject, use the exact procurement
+name from the embedded section headed "Описание объекта закупки". Do not use a
+generic cross-reference such as "оказание услуг согласно ООЗ" as that exact
+name. Fill it only when known_extracted did not already provide it.
 For subcontract_smp_sonko_* fields use only explicit contract clauses about
 attracting subcontractors/co-executors from SMP/SONKO. Do not infer these fields
 from generic legal references or from the plan. If the contract has no such

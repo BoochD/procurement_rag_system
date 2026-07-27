@@ -177,9 +177,17 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
     missing: list[str] = []
     warnings: list[str] = []
     parser_warnings: list[str] = []
+    parser_warning_groups: list[dict[str, Any]] = []
+    arithmetic_rows: list[dict[str, Any]] = []
+    arithmetic_failures: list[str] = []
+    arithmetic_manual: list[str] = []
     offer_summaries: list[dict[str, Any]] = []
     for index, offer in enumerate(offers, 1):
         label = _commercial_offer_label(index, offer)
+        arithmetic = _commercial_offer_arithmetic(label, offer)
+        arithmetic_rows.append(arithmetic)
+        arithmetic_failures.extend(arithmetic["failures"])
+        arithmetic_manual.extend(arithmetic["manual_review"])
         offer_summaries.append(
             {
                 "label": label,
@@ -194,6 +202,7 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 "has_vat": bool(offer.vat_text or offer.vat_rate is not None or offer.vat_amount is not None),
                 "has_advance_payment": bool(offer.advance_payment_text),
                 "trademarks": sorted({item.trademark for item in offer.items if item.trademark}),
+                "arithmetic_status": arithmetic["status"],
             }
         )
         summary_lines.append(
@@ -236,15 +245,16 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 warnings.append(
                     f"{label}: найден товарный знак '{item.trademark}' по позиции '{item.name or item.row_number}'"
                 )
-        parser_warnings.extend(
-            f"{label}: {warning}"
-            for warning in offer.parser_warnings
-            if warning
-        )
+        offer_parser_warnings = [str(warning) for warning in offer.parser_warnings if warning]
+        parser_warning_groups.append({"label": label, "warnings": offer_parser_warnings})
+        parser_warnings.extend(f"{label}: {warning}" for warning in offer_parser_warnings)
 
-    if missing:
+    if arithmetic_failures:
+        status = "failed"
+        message = "В арифметике коммерческих предложений найдены ошибки."
+    elif missing or arithmetic_manual:
         status = "manual_review"
-        message = "Часть обязательных реквизитов или строк КП не распознана."
+        message = "Часть реквизитов или арифметических данных КП требует проверки."
     elif warnings:
         status = "warning"
         message = "КП распознаны, но часть условий требует проверки."
@@ -272,9 +282,79 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 "missing": missing,
                 "warnings": warnings,
                 "parser_warnings": parser_warnings,
+                "parser_warning_groups": parser_warning_groups,
+                "arithmetic_rows": arithmetic_rows,
+                "arithmetic_failures": arithmetic_failures,
+                "arithmetic_manual_review": arithmetic_manual,
             },
         )
     ]
+
+
+def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
+    failures: list[str] = []
+    manual: list[str] = []
+    checked_rows = 0
+    row_errors = 0
+    item_totals: list[Decimal] = []
+
+    for index, item in enumerate(offer.items, 1):
+        item_label = str(item.row_number or item.name or f"строка {index}")
+        quantity = normalize_decimal(item.quantity)
+        unit_price = _money(item.unit_price)
+        total = _money(item.total_price)
+        if total is not None:
+            item_totals.append(total)
+        if quantity is None or unit_price is None or total is None:
+            missing_fields = []
+            if quantity is None:
+                missing_fields.append("количество")
+            if unit_price is None:
+                missing_fields.append("цена за единицу")
+            if total is None:
+                missing_fields.append("итог строки")
+            manual.append(
+                f"{label}, {item_label}: не проверены {', '.join(missing_fields)}"
+            )
+            continue
+        checked_rows += 1
+        calculated = _money(quantity * unit_price)
+        if calculated != total:
+            row_errors += 1
+            failures.append(
+                f"{label}, {item_label}: итог строки {_format_money(total)} не равен "
+                f"количество × цена {_format_money(calculated)}"
+            )
+
+    declared_total = _money_amount(offer.total_amount)
+    calculated_total = _money(sum(item_totals, Decimal("0"))) if item_totals else None
+    all_rows_have_totals = bool(offer.items) and len(item_totals) == len(offer.items)
+    total_matches: bool | None = None
+    if declared_total is None:
+        manual.append(f"{label}: итоговая сумма КП не распознана")
+    elif not all_rows_have_totals:
+        manual.append(f"{label}: сумма строк КП не рассчитана, так как распознаны не все итоги строк")
+    else:
+        total_matches = calculated_total == declared_total
+        if not total_matches:
+            failures.append(
+                f"{label}: сумма строк {_format_money(calculated_total)} не равна "
+                f"итогу КП {_format_money(declared_total)}"
+            )
+
+    status = "failed" if failures else "manual_review" if manual else "passed"
+    return {
+        "label": label,
+        "items_count": len(offer.items),
+        "checked_rows": checked_rows,
+        "row_errors": row_errors,
+        "calculated_total": _format_money(calculated_total) if calculated_total is not None else None,
+        "declared_total": _format_money(declared_total) if declared_total is not None else None,
+        "total_matches": total_matches,
+        "status": status,
+        "failures": failures,
+        "manual_review": manual,
+    }
 
 
 def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction) -> list[CheckResult]:
@@ -349,12 +429,19 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
 
         selected = _money(nmck_item.selected_min_unit_price)
         minimum = min((price for _, price in offer_prices), default=None)
+        expected_prices_count = len(nmck_item.supplier_prices)
+        has_all_offer_prices = bool(expected_prices_count) and len(offer_prices) == expected_prices_count
         if offer_prices and selected is not None:
             price_text = ", ".join(
                 f"{_supplier_label(source_id)} = {_format_money(price)}"
                 for source_id, price in offer_prices
             )
-            if selected != minimum:
+            if not has_all_offer_prices:
+                manual.append(
+                    f"{item_label}: минимальную цену по КП нельзя подтвердить, "
+                    f"сопоставлено цен {len(offer_prices)} из {expected_prices_count}"
+                )
+            elif selected != minimum:
                 failures.append(
                     f"{item_label}: в ОНМЦК выбрана минимальная цена {_format_money(selected)}, фактический минимум по КП {_format_money(minimum)}"
                 )
@@ -1397,6 +1484,12 @@ def _check_funding_source(package: ProcurementPackageExtraction) -> list[CheckRe
     if not schedule_norm or not contract_norm:
         status = "manual_review"
         message = "Источник финансирования отсутствует в одном из документов."
+    elif _is_structured_eis_reference(contract_value):
+        status = "manual_review"
+        message = (
+            "В проекте контракта источник финансирования напрямую не указан; "
+            "есть ссылка на структурированную форму ЕИС. Сверка с заявкой требует проверки."
+        )
     elif schedule_norm == contract_norm or schedule_norm in contract_norm or contract_norm in schedule_norm:
         status = "passed"
         message = "Источник финансирования совпадает по нормализованному тексту."
@@ -1417,29 +1510,25 @@ def _check_funding_source(package: ProcurementPackageExtraction) -> list[CheckRe
     ]
 
 
+def _is_structured_eis_reference(value: str | None) -> bool:
+    normalized = normalize_text(value)
+    return bool(
+        normalized
+        and "структурированном виде" in normalized
+        and "единой информационной систем" in normalized
+    )
+
+
 def _check_plan_ground_truth(
     package: ProcurementPackageExtraction,
     *,
     stage_results: list[CheckResult] | None = None,
 ) -> list[CheckResult]:
+    deterministic_stage_result = _check_stages_against_plan(package)
     return [
         _check_subject_against_plan(package),
-        _check_text_against_plan(
+        _check_delivery_term_against_plan(
             package,
-            check_id="strict.plan.delivery_term",
-            title="Срок поставки / оказания услуг",
-            schedule_value=getattr(package.schedule_application, "delivery_term_text", None) if package.schedule_application else None,
-            candidates=[
-                ("purchase_request", getattr(package.purchase_request, "delivery_term_text", None) if package.purchase_request else None),
-                ("purchase_description", getattr(package.purchase_description, "delivery_term_text", None) if package.purchase_description else None),
-                ("contract_draft", getattr(package.contract_draft, "delivery_term_text", None) if package.contract_draft else None),
-            ],
-            fields=[
-                "schedule_application.delivery_term_text",
-                "purchase_request.delivery_term_text",
-                "purchase_description.delivery_term_text",
-                "contract_draft.delivery_term_text",
-            ],
         ),
         _check_text_against_plan(
             package,
@@ -1469,17 +1558,116 @@ def _check_plan_ground_truth(
                 "contract_draft.contract_execution_term_text",
             ],
         ),
-        *(stage_results if stage_results is not None else [_check_stages_against_plan(package)]),
+        *(stage_results if stage_results is not None else [deterministic_stage_result]),
         _check_warranty_between_ooz_and_contract(package),
     ]
 
 
+def _check_delivery_term_against_plan(
+    package: ProcurementPackageExtraction,
+) -> CheckResult:
+    direct_result = _check_text_against_plan(
+        package,
+        check_id="strict.plan.delivery_term",
+        title="Срок поставки / оказания услуг",
+        schedule_value=(
+            getattr(package.schedule_application, "delivery_term_text", None)
+            if package.schedule_application
+            else None
+        ),
+        candidates=[
+            (
+                "purchase_request",
+                getattr(package.purchase_request, "delivery_term_text", None)
+                if package.purchase_request
+                else None,
+            ),
+            (
+                "purchase_description",
+                getattr(package.purchase_description, "delivery_term_text", None)
+                if package.purchase_description
+                else None,
+            ),
+            (
+                "contract_draft",
+                getattr(package.contract_draft, "delivery_term_text", None)
+                if package.contract_draft
+                else None,
+            ),
+        ],
+        fields=[
+            "schedule_application.delivery_term_text",
+            "purchase_request.delivery_term_text",
+            "purchase_description.delivery_term_text",
+            "contract_draft.delivery_term_text",
+            "schedule_application.stages",
+            "purchase_description.stages",
+            "contract_draft.stages",
+        ],
+    )
+    if direct_result.status != "manual_review":
+        return direct_result
+
+    plan_stages = list(
+        getattr(package.schedule_application, "stages", []) or []
+    ) if package.schedule_application else []
+    stage_documents = [
+        (
+            "purchase_description",
+            list(getattr(package.purchase_description, "stages", []) or [])
+            if package.purchase_description
+            else [],
+        ),
+        (
+            "contract_draft",
+            list(getattr(package.contract_draft, "stages", []) or [])
+            if package.contract_draft
+            else [],
+        ),
+    ]
+    if not plan_stages or not any(stages for _name, stages in stage_documents):
+        return direct_result
+    comparison = _compare_stage_sets(plan_stages, stage_documents)
+    if comparison["failed"] or comparison["manual"]:
+        return direct_result
+    return _result(
+        "strict.plan.delivery_term",
+        "Срок поставки / оказания услуг",
+        "passed",
+        "strict",
+        "Сроки поставки/оказания услуг совпадают с заявкой в план-график по этапам.",
+        documents=[
+            "schedule_application",
+            *[name for name, stages in stage_documents if stages],
+        ],
+        fields=direct_result.fields_compared,
+        details={
+            "summary_lines": [
+                f"Заявка в план-график: {_stages_summary(True, plan_stages)}",
+                *[
+                    f"{DOCUMENT_LABELS.get(name, name)}: {_stages_summary(bool(stages), stages)}"
+                    for name, stages in stage_documents
+                ],
+                *comparison["summary_lines"],
+            ],
+            "comparison_source": "stages",
+        },
+    )
+
+
 def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
     schedule_value = getattr(package.schedule_application, "purchase_subject", None) if package.schedule_application else None
+    contract = package.contract_draft
+    embedded_contract_subject = (
+        getattr(contract.embedded_purchase_description, "purchase_subject", None)
+        if contract and contract.embedded_purchase_description
+        else None
+    )
+    contract_subject = embedded_contract_subject or (getattr(contract, "subject", None) if contract else None)
     candidates = [
         ("purchase_request", getattr(package.purchase_request, "purchase_subject", None) if package.purchase_request else None),
         ("purchase_description", getattr(package.purchase_description, "purchase_subject", None) if package.purchase_description else None),
-        ("contract_draft", getattr(package.contract_draft, "subject", None) if package.contract_draft else None),
+        ("contract_draft", contract_subject),
         ("explanatory_note", getattr(package.explanatory_note, "subject", None) if package.explanatory_note else None),
     ]
     return _check_text_against_plan(
@@ -1492,7 +1680,11 @@ def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckR
             "schedule_application.purchase_subject",
             "purchase_request.purchase_subject",
             "purchase_description.purchase_subject",
-            "contract_draft.subject",
+            (
+                "contract_draft.embedded_purchase_description.purchase_subject"
+                if embedded_contract_subject
+                else "contract_draft.subject"
+            ),
             "explanatory_note.subject",
         ],
     )
@@ -2331,14 +2523,24 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
         contract_price = _money_amount(package.schedule_application.nmck if package.schedule_application else None)
     responsibility_section = getattr(contract, "responsibility_section_text", None)
     section_found = bool(normalize_text(responsibility_section))
-    section_has_penalty_words = _has_penalty_words(responsibility_section)
     penalty_clauses = list(getattr(contract, "penalty_clauses", []) or [])
     peni_clauses = list(getattr(contract, "peni_clauses", []) or [])
     all_clauses = penalty_clauses + peni_clauses
+    section_has_penalty_words = _has_penalty_words(responsibility_section)
+    clauses_have_penalty_words = any(
+        _has_penalty_words(getattr(clause, "raw_text", None))
+        for clause in all_clauses
+    )
     section_lines = [
         f"Глава ответственности: {'найдена' if section_found else 'не найдена'}",
-        f"Слова штраф/пеня/неустойка: {'найдены' if section_has_penalty_words else 'не найдены'}",
+        (
+            "Слова штраф/пеня/неустойка: найдены"
+            if section_has_penalty_words
+            else "Слова штраф/пеня/неустойка: в тексте главы не найдены"
+        ),
     ]
+    if clauses_have_penalty_words and not section_has_penalty_words:
+        section_lines.append("Штрафные формулировки найдены в структурированных пунктах с доказательствами.")
     if not section_found and not all_clauses:
         return [
             _result(
@@ -2356,14 +2558,14 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
                 details={"summary_lines": section_lines},
             )
         ]
-    if section_found and not section_has_penalty_words:
+    if section_found and not section_has_penalty_words and not clauses_have_penalty_words:
         return [
             _result(
                 "strict.contract.penalties",
                 "Штрафы, пени и неустойки",
-                "failed",
+                "manual_review",
                 "strict",
-                "Глава ответственности найдена, но в ней не найдены слова штраф/пеня/неустойка.",
+                "Глава ответственности найдена, но штрафы/пени в ней не выделены; требуется ручная проверка.",
                 documents=["contract_draft"],
                 fields=[
                     "contract_draft.responsibility_section_text",
@@ -3012,7 +3214,6 @@ def _semantic_manual_checks(package: ProcurementPackageExtraction) -> list[Check
         ("semantic.subject", "Предмет закупки", ["purchase_subject", "subject"]),
         ("semantic.delivery_term", "Срок поставки", ["delivery_term_text"]),
         ("semantic.delivery_place", "Место поставки", ["delivery_place"]),
-        ("semantic.stages", "Этапы исполнения", ["stages", "stage_execution_terms"]),
         ("semantic.warranty", "Гарантии", ["warranty_text", "warranty_requirements_text"]),
         ("semantic.procurement_method", "Способ закупки и основание ЕП", ["procurement_method_raw", "single_supplier_basis_text"]),
         ("semantic.smp_preferences", "СМП/СОНКО", ["smp_preference", "subcontract_smp_sonko_required"]),

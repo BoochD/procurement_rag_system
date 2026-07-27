@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from summary_model.checks import run_checks
 from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks, run_pp1875_checks
+from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.penalty_llm import run_penalty_llm_checks
 from summary_model.checks.report import build_checks_report_text
 from summary_model.checks.runner import external_manual_checks_with_replacements
@@ -17,7 +18,7 @@ from summary_model.checks.stage_llm import run_stage_llm_checks
 from summary_model.classification import DocumentClassifier
 from summary_model.commercial_offer_vlm import CommercialOfferVlmOptions, extract_commercial_offer_with_vlm
 from summary_model.domain.models import DocumentType, InputDocument
-from summary_model.extraction_models import DocumentEnvelope
+from summary_model.extraction_models import DocumentEnvelope, ProcurementPackageExtraction
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction.llm_document_extractor import (
     aextract_document_schema_with_llm,
@@ -52,6 +53,7 @@ class WebPipelineOptions:
     llm_concurrency: int = 6
     vlm_max_tables_per_document: int = 4
     vlm_max_commercial_offer_pages: int = 8
+    vlm_output_dir: Path | None = None
 
 
 @dataclass
@@ -60,6 +62,8 @@ class WebPipelineResult:
     package_id: str | None
     warnings: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    package: ProcurementPackageExtraction | None = None
+    checks_report: ProcurementChecksReport | None = None
 
 
 class WebPipelineInputError(ValueError):
@@ -88,7 +92,7 @@ async def _aprocess_uploaded_documents(
     vlm_repairer = VlmFallbackRepairer(
         VlmFallbackOptions(
             enabled=options.with_vlm_tables,
-            output_dir=Path("runtime/web_vlm_tables"),
+            output_dir=options.vlm_output_dir or Path("runtime/web_vlm_tables"),
             max_tables_per_document=max(1, options.vlm_max_tables_per_document),
         )
     )
@@ -105,7 +109,7 @@ async def _aprocess_uploaded_documents(
     metrics: dict[str, Any] = {
         "vlm_tables": vlm_repairer.metrics if options.with_vlm_tables else {"enabled": False}
     }
-    warnings.extend(vlm_repairer.warnings)
+    warnings.extend(_public_vlm_table_warnings(vlm_repairer.warnings))
     if unsupported_documents:
         warnings.extend(
             f"{document.path.name}: формат поддерживается только для КП через VLM."
@@ -208,6 +212,8 @@ async def _aprocess_uploaded_documents(
         package_id=package.package_id,
         warnings=warnings,
         metrics=metrics,
+        package=package,
+        checks_report=checks_report,
     )
 
 
@@ -341,13 +347,25 @@ def _pipeline_warning(phase: str, error: Exception) -> str:
     return f"{phase} failed: {_error_summary(error)}"
 
 
+def _public_vlm_table_warnings(warnings: list[str]) -> list[str]:
+    benign_markers = (
+        "спецификация не содержит заполненных товарных позиций",
+        "спецификация распознана как пустая или шаблонная",
+    )
+    return [
+        warning
+        for warning in warnings
+        if not any(marker in warning.casefold() for marker in benign_markers)
+    ]
+
+
 def _llm_recovery_warnings(
     phase: str,
     metrics: dict[str, Any] | None,
 ) -> list[str]:
     if not metrics:
         return []
-    result: list[str] = []
+    grouped: dict[str, list[str]] = {}
     attempts = metrics.get("attempts", [])
     if not isinstance(attempts, list):
         return []
@@ -360,8 +378,26 @@ def _llm_recovery_warnings(
         if not isinstance(lossy_warnings, list):
             continue
         for warning in lossy_warnings:
-            result.append(f"{prefix}: ответ LLM восстановлен частично: {warning}")
-    return list(dict.fromkeys(result))
+            warning_text = str(warning)
+            if _is_evidence_only_recovery(warning_text):
+                continue
+            grouped.setdefault(prefix, []).append(warning_text)
+
+    result: list[str] = []
+    for prefix, raw_warnings in grouped.items():
+        warnings = list(dict.fromkeys(raw_warnings))
+        if len(warnings) == 1:
+            result.append(
+                f"{prefix}: ответ LLM восстановлен частично: "
+                f"{_short_recovery_warning(warnings[0])}"
+            )
+            continue
+        examples = ", ".join(_recovery_path(warning) for warning in warnings[:3])
+        result.append(
+            f"{prefix}: ответ LLM восстановлен частично; локальный fallback применён "
+            f"к {len(warnings)} полям/строкам ({examples}). Подробности сохранены в метриках."
+        )
+    return result
 
 
 def _commercial_offer_recovery_warnings(
@@ -374,10 +410,37 @@ def _commercial_offer_recovery_warnings(
     lossy_warnings = recovery.get("lossy_warnings", [])
     if not isinstance(lossy_warnings, list):
         return []
-    return [
-        f"{file_name}: VLM-разбор КП восстановлен частично: {warning}"
+    warnings = [
+        str(warning)
         for warning in lossy_warnings
+        if not _is_evidence_only_recovery(str(warning))
     ]
+    if not warnings:
+        return []
+    if len(warnings) == 1:
+        return [
+            f"{file_name}: VLM-разбор КП восстановлен частично: "
+            f"{_short_recovery_warning(warnings[0])}"
+        ]
+    examples = ", ".join(_recovery_path(warning) for warning in warnings[:3])
+    return [
+        f"{file_name}: VLM-разбор КП восстановлен частично; локальный fallback применён "
+        f"к {len(warnings)} полям/строкам ({examples}). Подробности сохранены в метриках."
+    ]
+
+
+def _is_evidence_only_recovery(warning: str) -> bool:
+    path = warning.split(":", 1)[0]
+    return path == "evidence" or path.endswith(".evidence")
+
+
+def _recovery_path(warning: str) -> str:
+    return warning.split(":", 1)[0] or "неизвестное поле"
+
+
+def _short_recovery_warning(warning: str, limit: int = 220) -> str:
+    text = warning.split("; raw=", 1)[0].strip()
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
 
 
 def _error_summary(error: Exception) -> str:

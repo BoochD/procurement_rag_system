@@ -43,7 +43,7 @@ def run_stage_llm_checks(
     llm_client: StructuredLLMClient | None = None,
 ) -> tuple[list[CheckResult] | None, dict[str, object] | None]:
     deterministic = _check_stages_against_plan(package)
-    if deterministic.status in {"passed", "not_applicable"}:
+    if deterministic.status != "manual_review":
         return None, None
 
     client = llm_client or StructuredLLMClient(model_name=OPENAI_NANO_MODEL)
@@ -107,11 +107,28 @@ def _document_stages(document) -> dict[str, object]:
     return {
         "has_stages": getattr(document, "has_stages", None),
         "stages_text": getattr(document, "stages_text", None),
-        "contract_execution_term_text": getattr(document, "contract_execution_term_text", None),
         "stages": [
-            stage.model_dump(mode="json", exclude_none=True)
-            if hasattr(stage, "model_dump")
-            else stage
+            _stage_for_llm(stage)
             for stage in (getattr(document, "stages", []) or [])
         ],
+    }
+
+
+def _stage_for_llm(stage) -> dict[str, object]:
+    fields = (
+        "stage_number",
+        "stage_name",
+        "result_text",
+        "start_text",
+        "service_term_text",
+        "service_start_date",
+        "service_end_date",
+        "execution_end_date",
+        "quantity_text",
+        "evidence",
+    )
+    return {
+        field_name: value
+        for field_name in fields
+        if (value := getattr(stage, field_name, None)) is not None
     }

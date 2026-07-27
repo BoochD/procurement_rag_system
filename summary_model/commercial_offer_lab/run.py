@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from shared_modules.llm_models import OPENAI_MODEL
+from shared_modules.llm_models import OPENAI_VLM_MODEL
 from summary_model.checks import run_checks
 from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.report import build_commercial_offer_report_text
@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=OPENAI_MODEL,
+        default=OPENAI_VLM_MODEL,
         help="OpenAI-compatible multimodal model used only for this run.",
     )
     parser.add_argument(

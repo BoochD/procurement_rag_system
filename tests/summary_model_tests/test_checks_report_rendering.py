@@ -193,7 +193,7 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     text = build_checks_report_text(report)
 
     assert "| КП №1 | не найден | К-033 / 2026-04-27 | 100.00 | 8 |" in text
-    assert "Не найдены или не распознаны в КП:" in text
+    assert "Не указаны в документе либо не распознаны:" in text
     assert "КП №1: поставщик, ИНН, срок, место, НДС." in text
     assert "Распознаны товарные знаки: DEPO, YADRO." in text
     assert "26.20.14.000 (префикс КТРУ)" in text
@@ -218,6 +218,7 @@ def test_report_renders_commercial_offer_comparison_as_one_compact_table():
                         "offer_2": "10470000.00",
                         "offer_3": "10245000.00",
                         "selected_min": "10245000.00",
+                        "actual_min": "10245000.00",
                         "coefficient": "0.90%",
                         "status": "passed",
                     }
@@ -230,6 +231,59 @@ def test_report_renders_commercial_offer_comparison_as_one_compact_table():
 
     text = build_checks_report_text(report)
 
-    assert "| Позиция | КП №1 | КП №2 | КП №3 | Минимум ОНМЦК | Коэф. вариации | Статус |" in text
-    assert "| Сервер | 10300000.00 | 10470000.00 | 10245000.00 | 10245000.00 | 0.90% | ОК |" in text
+    assert "| Позиция | КП №1 | КП №2 | КП №3 | Минимум ОНМЦК | Минимум КП | Коэф. вариации | Статус |" in text
+    assert "| Сервер | 10300000.00 | 10470000.00 | 10245000.00 | 10245000.00 | 10245000.00 | 0.90% | ОК |" in text
     assert "выбранная минимальная цена" not in text
+
+
+def test_report_renders_offer_arithmetic_and_compacts_vlm_warnings():
+    report = _report(
+        _check_result(
+            "manual.commercial_offers.content",
+            "Проверка КП",
+            "warning",
+            "КП требуют проверки.",
+            details={
+                "offer_summaries": [{
+                    "label": "КП №1",
+                    "supplier_name": "ООО Тест",
+                    "outgoing_number": "42",
+                    "outgoing_date": "2026-04-27",
+                    "total_amount": "100.00",
+                    "items_count": 2,
+                    "has_delivery_term": True,
+                    "has_delivery_place": False,
+                    "has_vat": True,
+                    "trademarks": [],
+                }],
+                "arithmetic_rows": [{
+                    "label": "КП №1",
+                    "items_count": 2,
+                    "checked_rows": 2,
+                    "row_errors": 0,
+                    "calculated_total": "100.00",
+                    "declared_total": "100.00",
+                    "status": "passed",
+                    "failures": [],
+                    "manual_review": [],
+                }],
+                "parser_warning_groups": [{
+                    "label": "КП №1",
+                    "warnings": [
+                        "Место поставки/оказания услуг в документе не указано.",
+                        "Агрегатная итоговая строка КП исключена после проверки арифметики.",
+                        "НДС по строкам смешанный.",
+                    ],
+                }],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Проверка арифметики КП:" in text
+    assert "| КП №1 | 2 из 2 | 0 | 100.00 | 100.00 | ОК |" in text
+    assert "Особенности распознавания:" in text
+    assert "Агрегатная итоговая строка" in text
+    assert "НДС по строкам смешанный" in text
+    assert "Место поставки/оказания услуг в документе не указано" not in text

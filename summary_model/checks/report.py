@@ -57,7 +57,6 @@ SEMANTIC_CHECK_ORDER = [
     "semantic.subject",
     "semantic.delivery_term",
     "semantic.delivery_place",
-    "semantic.stages",
     "semantic.warranty",
     "semantic.procurement_method",
     "semantic.smp_preferences",
@@ -567,15 +566,58 @@ def _render_commercial_offer_content(result: CheckResult) -> list[str]:
                 unresolved.append((str(offer.get("label") or "КП"), fields))
         if unresolved:
             lines.append("")
-            lines.append("  <b>Не найдены или не распознаны в КП:</b>")
+            lines.append("  <b>Не указаны в документе либо не распознаны:</b>")
             for label, fields in unresolved:
                 lines.append(f"  - {label}: {', '.join(fields)}.")
-        parser_warnings = result.details.get("parser_warnings") if result.details else None
-        if isinstance(parser_warnings, list) and parser_warnings:
+
+        arithmetic_rows = result.details.get("arithmetic_rows") if result.details else None
+        if isinstance(arithmetic_rows, list) and arithmetic_rows:
+            lines.extend([
+                "",
+                "  <b>Проверка арифметики КП:</b>",
+                "",
+                "| КП | Проверено строк | Ошибок строк | Сумма строк | Итог КП | Статус |",
+                "| :--- | ---: | ---: | ---: | ---: | :---: |",
+            ])
+            for row in arithmetic_rows:
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    "| {label} | {checked} из {count} | {errors} | {calculated} | {declared} | {status} |".format(
+                        label=_table_cell(row.get("label")),
+                        checked=_table_cell(row.get("checked_rows")),
+                        count=_table_cell(row.get("items_count")),
+                        errors=_table_cell(row.get("row_errors")),
+                        calculated=_table_cell(row.get("calculated_total") or "не рассчитана"),
+                        declared=_table_cell(row.get("declared_total") or "не найден"),
+                        status=STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or "")),
+                    )
+                )
+            arithmetic_issues = [
+                str(issue)
+                for row in arithmetic_rows if isinstance(row, dict)
+                for issue in [*(row.get("failures") or []), *(row.get("manual_review") or [])]
+            ]
+            if arithmetic_issues:
+                lines.append("")
+                lines.append("  <b>Замечания по арифметике:</b>")
+                lines.extend(f"  - {_human_text(issue)}" for issue in arithmetic_issues[:6])
+                if len(arithmetic_issues) > 6:
+                    lines.append(
+                        f"  - ещё {len(arithmetic_issues) - 6}; полный список сохранён в checks.json."
+                    )
+
+        warning_groups = result.details.get("parser_warning_groups") if result.details else None
+        compact_warnings, total_warning_count = _compact_commercial_offer_warnings(warning_groups)
+        if compact_warnings:
             lines.append("")
-            lines.append("  <b>Проблемы подготовки или VLM-разбора:</b>")
-            for warning in parser_warnings:
-                lines.append(f"  - <warn>{_human_text(str(warning))}</warn>")
+            lines.append("  <b>Особенности распознавания:</b>")
+            for label, warning_text in compact_warnings:
+                lines.append(f"  - <b>{_human_text(label)}</b>: <warn>{_human_text(warning_text)}</warn>")
+            if total_warning_count > len(compact_warnings):
+                lines.append(
+                    f"  - показаны основные замечания; полный список ({total_warning_count}) сохранён в checks.json."
+                )
         trademarks = sorted({
             trademark
             for offer in offers if isinstance(offer, dict)
@@ -602,19 +644,20 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
     if isinstance(comparison_rows, list) and comparison_rows:
         lines.extend([
             "",
-            "| Позиция | КП №1 | КП №2 | КП №3 | Минимум ОНМЦК | Коэф. вариации | Статус |",
-            "| :--- | ---: | ---: | ---: | ---: | ---: | :---: |",
+            "| Позиция | КП №1 | КП №2 | КП №3 | Минимум ОНМЦК | Минимум КП | Коэф. вариации | Статус |",
+            "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |",
         ])
         for row in comparison_rows:
             if not isinstance(row, dict):
                 continue
             lines.append(
-                "| {item} | {offer_1} | {offer_2} | {offer_3} | {selected} | {coefficient} | {status} |".format(
+                "| {item} | {offer_1} | {offer_2} | {offer_3} | {selected} | {actual} | {coefficient} | {status} |".format(
                     item=_table_cell(row.get("item")),
                     offer_1=_table_cell(row.get("offer_1") or "—"),
                     offer_2=_table_cell(row.get("offer_2") or "—"),
                     offer_3=_table_cell(row.get("offer_3") or "—"),
                     selected=_table_cell(row.get("selected_min") or "—"),
+                    actual=_table_cell(row.get("actual_min") or "—"),
                     coefficient=_table_cell(row.get("coefficient") or "не рассчитан"),
                     status=STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or "")),
                 )
@@ -630,6 +673,60 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
         if len(failures) > 6:
             lines.append(f"  - ещё {len(failures) - 6}; полный список сохранён в checks.json.")
     return lines
+
+
+def _compact_commercial_offer_warnings(
+    groups: object,
+) -> tuple[list[tuple[str, str]], int]:
+    if not isinstance(groups, list):
+        return [], 0
+    result: list[tuple[str, str]] = []
+    total = 0
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        label = str(group.get("label") or "КП")
+        warnings = [str(value) for value in (group.get("warnings") or []) if value]
+        total += len(warnings)
+        useful = [warning for warning in warnings if not _is_repeated_offer_absence(warning)]
+        useful.sort(key=_commercial_offer_warning_priority)
+        if useful:
+            compact = "; ".join(_short_warning(warning) for warning in useful[:3])
+            result.append((label, compact))
+    return result, total
+
+
+def _is_repeated_offer_absence(value: str) -> bool:
+    normalized = value.casefold().replace("ё", "е")
+    return any(
+        marker in normalized
+        for marker in (
+            "место поставки/оказания услуг не указ",
+            "место поставки/оказания услуг в документе не указ",
+            "авансовый платеж в документе не указан",
+            "авансовый платеж не указан явно",
+            "явный авансовый платеж",
+        )
+    )
+
+
+def _commercial_offer_warning_priority(value: str) -> int:
+    normalized = value.casefold().replace("ё", "е")
+    priorities = (
+        ("vlm не вернула", "jsondecode", "ошиб"),
+        ("агрегат", "итоговая строка"),
+        ("продолж", "обрез", "перенес", "строк"),
+        ("ндс",),
+    )
+    for index, markers in enumerate(priorities):
+        if any(marker in normalized for marker in markers):
+            return index
+    return len(priorities)
+
+
+def _short_warning(value: str, limit: int = 260) -> str:
+    text = " ".join(value.split())
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
 
 
 def _unique_issue_positions(values: list[object]) -> list[str]:

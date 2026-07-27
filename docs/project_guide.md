@@ -148,6 +148,21 @@ Commercial-offer VLM lab:
 - Uses the production visual VLM path for every PDF and writes per-model
   `commercial_offers.json`, `checks.json`, `report.txt`, and `run.json` under
   `runtime/commercial_offer_lab/<model>/` by default.
+- Text structured extraction uses `OPENAI_MODEL` (`gpt-5-mini` by default).
+  Visual document/table extraction uses the separate `OPENAI_VLM_MODEL`
+  (`gpt-5.4-mini` by default). Lab `--model` remains an explicit per-run
+  override and does not change production configuration.
+
+Commercial-offer arithmetic:
+
+- Every recognized row is checked as `quantity * unit price = row total`.
+- When every row total is available, their sum is compared with the declared
+  commercial-offer total.
+- A row equal to the whole offer total is removed as an aggregate row only when
+  the sum of all remaining rows independently equals the same declared total.
+  Otherwise it is retained and reported for review.
+- The report shows one compact arithmetic row per offer. Complete VLM warnings
+  remain in `checks.json`; the public report shows only prioritized summaries.
 
 Structured-output recovery lab:
 
@@ -158,6 +173,23 @@ Structured-output recovery lab:
   `include_raw=True`; add `--compare-direct` to make a second, old-style call
   without raw recovery. Artifacts are stored under
   `runtime/structured_output_lab/<model>/`.
+
+Full web-pipeline diagnostics:
+
+- `python -m summary_model.full_pipeline_cli --input-dir <pack> --output-dir <output>`
+  runs the same `summary_model.web_service` orchestration used by the Celery
+  worker, including document LLM extraction, semantic/stage/penalty checks,
+  VLM table fallback, commercial-offer VLM parsing, KTRU and PP 1875 checks.
+- The CLI recognizes the current Russian document file names, ignores generated
+  `analysis_result*.docx` files, prefers DOCX over a duplicate non-offer PDF,
+  and records every selected or ignored file in `inputs.json`.
+- Diagnostic artifacts include the final merged extraction schema in
+  `extraction_result.final.json`, structured checks, LLM/VLM metrics, warnings,
+  and report text. A pipeline exception writes `error.json` and a failed
+  `run.json` before the exception is re-raised.
+- Use `--no-vlm-tables`, `--no-ktru`, `--no-semantic-llm`, or
+  `--no-llm-extraction` only for focused diagnostics. Production model names
+  still come exclusively from `shared_modules/llm_models.py`.
 
 ### Structured LLM output recovery
 
@@ -189,6 +221,62 @@ Schema mismatch with valid recoverable JSON is not a reason for a paid retry.
 Retries remain available for transport/provider failures and responses whose
 JSON is missing or genuinely malformed. If recovery still cannot produce the
 strict top-level schema, the existing deterministic fallback is used.
+
+Deterministic extraction remains authoritative during document-level LLM
+canonicalization. Non-empty plan fields, ONMCK totals/items/stages, and parsed
+OOZ/contract tables cannot be replaced by empty or conflicting LLM values. The
+LLM fills fields that deterministic parsing did not find, primarily prose facts
+such as delivery terms, addresses, warranties, and contract clauses.
+
+The complete deterministic contract responsibility section is authoritative.
+The general document-level LLM neither rewrites that section nor extracts
+penalty/peni clauses. A dedicated penalty LLM receives the complete section,
+the plan NMCK, stage presence and expected statutory thresholds. If the section
+is absent, contains no penalty terms, or the dedicated call fails, the check is
+manual review rather than a result inferred from a weaker general extraction.
+
+The exact procurement name is extracted deterministically from the section
+headed `Описание объекта закупки`. Supported forms include `Наименование
+закупки`, `Наименование объекта закупки`, `Наименование`, and an unlabelled
+first content line after the heading. In a contract, the main legal wording
+remains in `contract.subject`, while the exact appendix name is stored in
+`contract.embedded_purchase_description.purchase_subject` and is preferred for
+comparison with the plan. The document-level LLM fills this field only when the
+deterministic parser did not find it. Real document disagreement is preserved;
+for example, the current `MONOBLOCK_PACK` standalone OOZ says `поставка
+ноутбуков`, while its contract appendix says `поставка моноблоков`.
+
+Stages have one comparison path: deterministic extraction and strict comparison
+against the plan, followed by the dedicated stage LLM only for `manual_review`
+ambiguity. Confirmed mismatches do not invoke the fallback. Stage LLM payloads
+contain numbers, names, terms and quantities, but not prices; stage prices and
+arithmetic remain an ONMCK check. The general semantic LLM no longer emits a
+second `semantic.stages` result.
+
+Delivery-term comparison uses stage terms only as a narrow fallback: the
+top-level terms must be absent, and the stage numbers and terms in the plan,
+OOZ and contract must compare successfully. ONMCK stage availability does not
+control this delivery-term fallback. A contract value that only refers the
+funding source to the structured EIS form is manual review, not a confirmed
+mismatch with the plan.
+
+Commercial-offer minimum-price checks never declare a selected minimum wrong
+from an incomplete set of matched offers. If one offer row cannot be mapped to
+the ONMCK position, the row remains manual review until the mapping is
+unambiguous.
+
+Provider-specific fact wrappers such as `{raw_value, normalized_value,
+confidence, evidence}` and a one-element list around a scalar fact are unwrapped
+locally before Pydantic validation. This recovery does not make another paid
+request. Safe conversions and discarded evidence metadata stay in runtime
+metrics. The public technical-warning section groups actual lossy recovery by
+document and never prints one warning per item characteristic.
+
+Commercial-offer VLM postprocessing treats only rows with quantity or price
+data as commercial positions. A total row is removed only when the remaining
+priced rows independently add up to the declared offer total. Text-only rows
+from technical appendices are excluded from price arithmetic and matching, with
+a compact diagnostic retained in parser warnings.
 
 ## Architectural Constraints
 

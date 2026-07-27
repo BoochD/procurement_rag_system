@@ -8,6 +8,7 @@ from pydantic import SecretStr
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.hydraai.ru/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 OPENAI_NANO_MODEL = os.getenv("OPENAI_NANO_MODEL", "gpt-5-mini")
+OPENAI_VLM_MODEL = os.getenv("OPENAI_VLM_MODEL", "gpt-5.4-mini")
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 

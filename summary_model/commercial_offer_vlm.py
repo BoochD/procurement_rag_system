@@ -5,13 +5,15 @@ import json
 import mimetypes
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from shared_modules.llm_models import OPENAI_MODEL, get_chatGPT_client
-from summary_model.checks.normalization import normalize_decimal
+from shared_modules.llm_models import OPENAI_VLM_MODEL, get_chatGPT_client
+from summary_model.checks.normalization import normalize_decimal, normalize_money
 from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
 from summary_model.extraction_models import CommercialOfferItem, CommercialOfferSchema, MoneyValue
 
@@ -22,7 +24,7 @@ COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.3.0"
 @dataclass
 class CommercialOfferVlmOptions:
     enabled: bool = True
-    model: str = OPENAI_MODEL
+    model: str = OPENAI_VLM_MODEL
     max_pages: int = 8
     pdf_zoom: float = 2.0
 
@@ -132,6 +134,8 @@ def extract_commercial_offer_with_vlm(
         )
 
         offer = _merge_offer_with_deterministic(vlm_offer, deterministic_offer)
+        offer, aggregate_rows_removed = _remove_proven_aggregate_items(offer)
+        offer, reference_rows_removed = _remove_noncommercial_reference_items(offer)
         if not _offer_has_content(offer):
             offer.parser_warnings.append("VLM не распознала реквизиты и ценовые строки КП.")
         metrics = {
@@ -140,6 +144,8 @@ def extract_commercial_offer_with_vlm(
             "pages": [item["page"] for item in images],
             "usage": [response.get("usage") for response in responses if response.get("usage")],
             "embedded_text_characters": len(_embedded_text(images)),
+            "aggregate_rows_removed": aggregate_rows_removed,
+            "reference_rows_removed": reference_rows_removed,
             "structured_recovery": _recovery_metrics(recovery),
             "duration_seconds": round(time.perf_counter() - started, 3),
         }
@@ -291,6 +297,76 @@ def _offer_has_content(offer: CommercialOfferSchema) -> bool:
         or offer.total_amount
         or offer.items
     )
+
+
+def _remove_proven_aggregate_items(
+    offer: CommercialOfferSchema,
+) -> tuple[CommercialOfferSchema, int]:
+    declared_total = normalize_money(
+        offer.total_amount.amount if offer.total_amount is not None else None
+    )
+    if declared_total is None or len(offer.items) < 3:
+        return offer, 0
+
+    item_totals = [
+        (index, normalize_money(item.total_price))
+        for index, item in enumerate(offer.items)
+        if normalize_money(item.total_price) is not None
+    ]
+    if len(item_totals) < 3:
+        return offer, 0
+
+    for index, item_total in item_totals:
+        if item_total != declared_total:
+            continue
+        remaining_totals = [
+            total
+            for other_index, total in item_totals
+            if other_index != index
+        ]
+        if len(remaining_totals) < 2 or normalize_money(sum(remaining_totals, Decimal("0"))) != declared_total:
+            continue
+        result = offer.model_copy(deep=True)
+        removed = result.items.pop(index)
+        marker = removed.row_number or removed.name or "итоговая строка"
+        result.parser_warnings = list(dict.fromkeys([
+            *result.parser_warnings,
+            (
+                "Агрегатная итоговая строка КП исключена из позиций после проверки арифметики: "
+                f"{marker}."
+            ),
+        ]))
+        return result, 1
+    return offer, 0
+
+
+def _remove_noncommercial_reference_items(
+    offer: CommercialOfferSchema,
+) -> tuple[CommercialOfferSchema, int]:
+    priced_items = [
+        item
+        for item in offer.items
+        if item.quantity is not None or item.unit_price is not None or item.total_price is not None
+    ]
+    if len(priced_items) < 2 or len(priced_items) == len(offer.items):
+        return offer, 0
+
+    removed_items = [item for item in offer.items if item not in priced_items]
+    result = offer.model_copy(deep=True)
+    result.items = deepcopy(priced_items)
+    labels = ", ".join(
+        str(item.row_number or item.name or "строка без номера")[:80]
+        for item in removed_items[:3]
+    )
+    suffix = "; ..." if len(removed_items) > 3 else ""
+    result.parser_warnings = list(dict.fromkeys([
+        *result.parser_warnings,
+        (
+            f"{len(removed_items)} справочных строк без количества и цен не включены "
+            f"в ценовые позиции КП: {labels}{suffix}."
+        ),
+    ]))
+    return result, len(removed_items)
 
 
 def _document_images(path: Path, *, max_pages: int, pdf_zoom: float) -> list[dict[str, Any]]:

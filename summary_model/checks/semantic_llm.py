@@ -15,7 +15,6 @@ SEMANTIC_CHECK_IDS = {
     "semantic.subject": "Предмет закупки",
     "semantic.delivery_term": "Срок поставки",
     "semantic.delivery_place": "Место поставки",
-    "semantic.stages": "Этапы исполнения",
     "semantic.warranty": "Гарантии",
     "semantic.procurement_method": "Способ закупки и основание ЕП",
     "semantic.smp_preferences": "Преференции СМП/СОНКО",
@@ -27,7 +26,6 @@ class SemanticCheckFinding(BaseModel):
         "semantic.subject",
         "semantic.delivery_term",
         "semantic.delivery_place",
-        "semantic.stages",
         "semantic.warranty",
         "semantic.procurement_method",
         "semantic.smp_preferences",
@@ -55,7 +53,6 @@ SEMANTIC_CHECKS_PROMPT = """
 - semantic.subject: предмет закупки;
 - semantic.delivery_term: срок поставки;
 - semantic.delivery_place: место поставки;
-- semantic.stages: этапы исполнения;
 - semantic.warranty: гарантии;
 - semantic.procurement_method: способ закупки и основание единственного поставщика;
 - semantic.smp_preferences: СМП/СОНКО.
@@ -69,9 +66,6 @@ SEMANTIC_CHECKS_PROMPT = """
 исполнения Контракта противоречием сроку поставки. Например, "поставка в течение 15 рабочих дней" и
 "срок исполнения Контракта 70 календарных дней" описывают разные сущности; при совпадении сроков поставки
 между ООЗ и контрактом это passed.
-Для semantic.stages отдельно оценивай этапы, стоимость этапов и общий срок исполнения Контракта.
-Если этапы явно не предусмотрены во всех документах, это passed. Если этапы есть только в одном документе,
-ставь manual_review или failed и укажи, где они найдены.
 Если документы явно противоречат друг другу, это failed.
 Если есть слабый риск или частично неполные данные, это warning/manual_review.
 
@@ -260,6 +254,11 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
     request = package.purchase_request
     ooz = package.purchase_description
     contract = package.contract_draft
+    embedded_contract_subject = (
+        getattr(contract.embedded_purchase_description, "purchase_subject", None)
+        if contract and contract.embedded_purchase_description
+        else None
+    )
     note = package.explanatory_note
     return {
         "schedule_application": {
@@ -267,9 +266,6 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "delivery_place": getattr(schedule, "delivery_place", None),
             "delivery_term_text": getattr(schedule, "delivery_term_text", None),
             "contract_execution_term_text": getattr(schedule, "contract_execution_term_text", None),
-            "has_stages": getattr(schedule, "has_stages", None),
-            "stages": _dump(getattr(schedule, "stages", [])),
-            "stage_execution_terms": _dump(getattr(schedule, "stage_execution_terms", [])),
             "smp_preference_raw": getattr(schedule, "smp_preference_raw", None),
             "smp_preference": getattr(schedule, "smp_preference", None),
             "subcontract_smp_sonko_required_raw": getattr(schedule, "subcontract_smp_sonko_required_raw", None),
@@ -282,23 +278,18 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "procurement_method": getattr(request, "procurement_method", None),
             "single_supplier_basis_text": getattr(request, "single_supplier_basis_text", None),
             "delivery_term_text": getattr(request, "delivery_term_text", None),
-            "stages_text": getattr(request, "stages_text", None),
-            "has_stages": getattr(request, "has_stages", None),
-            "stages": _dump(getattr(request, "stages", [])),
         },
         "purchase_description": {
             "purchase_subject": getattr(ooz, "purchase_subject", None),
             "delivery_place": getattr(ooz, "delivery_place", None),
             "delivery_term_text": getattr(ooz, "delivery_term_text", None),
-            "stages": _dump(getattr(ooz, "stages", [])),
             "warranty_requirements_text": getattr(ooz, "warranty_requirements_text", None),
         },
         "contract_draft": {
-            "subject": getattr(contract, "subject", None),
+            "subject": embedded_contract_subject or getattr(contract, "subject", None),
+            "legal_subject": getattr(contract, "subject", None),
             "delivery_place": getattr(contract, "delivery_place", None),
             "delivery_term_text": getattr(contract, "delivery_term_text", None),
-            "contract_execution_term_text_for_stages_only": getattr(contract, "contract_execution_term_text", None),
-            "stages": _dump(getattr(contract, "stages", [])),
             "warranty_text": getattr(contract, "warranty_text", None),
             "subcontract_smp_sonko_required_raw": getattr(contract, "subcontract_smp_sonko_required_raw", None),
             "subcontract_smp_sonko_required": getattr(contract, "subcontract_smp_sonko_required", None),
@@ -313,17 +304,16 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
     }
 
 
-def _dump(value) -> object:
-    if isinstance(value, list):
-        return [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in value]
-    return value
-
-
 def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str) -> list[str]:
     schedule = package.schedule_application
     request = package.purchase_request
     ooz = package.purchase_description
     contract = package.contract_draft
+    embedded_contract_subject = (
+        getattr(contract.embedded_purchase_description, "purchase_subject", None)
+        if contract and contract.embedded_purchase_description
+        else None
+    )
     note = package.explanatory_note
 
     values_by_check = {
@@ -331,7 +321,7 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
             ("Заявка в план-график", getattr(schedule, "purchase_subject", None)),
             ("Обращение", getattr(request, "purchase_subject", None)),
             ("ООЗ", getattr(ooz, "purchase_subject", None)),
-            ("Проект контракта", getattr(contract, "subject", None)),
+            ("Проект контракта", embedded_contract_subject or getattr(contract, "subject", None)),
             ("Пояснительная записка", getattr(note, "subject", None)),
         ],
         "semantic.delivery_term": [
@@ -344,12 +334,6 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
             ("Заявка в план-график", getattr(schedule, "delivery_place", None)),
             ("ООЗ", getattr(ooz, "delivery_place", None)),
             ("Проект контракта", getattr(contract, "delivery_place", None)),
-        ],
-        "semantic.stages": [
-            ("Заявка в план-график", _stage_text(getattr(schedule, "has_stages", None), getattr(schedule, "stages", []))),
-            ("Обращение", getattr(request, "stages_text", None) or _stage_text(getattr(request, "has_stages", None), getattr(request, "stages", []))),
-            ("ООЗ", _stage_text(bool(getattr(ooz, "stages", [])), getattr(ooz, "stages", []))),
-            ("Проект контракта", _stage_text(bool(getattr(contract, "stages", [])), getattr(contract, "stages", [])) or getattr(contract, "contract_execution_term_text", None)),
         ],
         "semantic.warranty": [
             ("ООЗ", getattr(ooz, "warranty_requirements_text", None)),
@@ -372,19 +356,6 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
         for label, value in values_by_check.get(check_id, [])
         if value not in (None, "", [], {})
     ]
-
-
-def _stage_text(has_stages, stages) -> str | None:
-    if stages:
-        numbers = [str(getattr(stage, "stage_number", "")).strip() for stage in stages]
-        numbers = [number for number in numbers if number]
-        suffix = f": {', '.join(numbers)}" if numbers else ""
-        return f"структурированно извлечено этапов: {len(stages)}{suffix}"
-    if has_stages is False:
-        return "этапы не предусмотрены"
-    if has_stages is True:
-        return "этапы указаны, но структурированный список не извлечён"
-    return None
 
 
 def _to_check_result(finding: SemanticCheckFinding, title: str, summary_lines: list[str]) -> CheckResult:

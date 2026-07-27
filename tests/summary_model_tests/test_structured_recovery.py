@@ -10,10 +10,16 @@ from summary_model.extraction.structured_recovery import (
     raw_payload_from_message,
     recover_model,
 )
-from summary_model.extraction_models import CommercialOfferSchema, PenaltyClause
+from summary_model.extraction_models import (
+    CommercialOfferSchema,
+    ContractDraftSchema,
+    NmckJustificationSchema,
+    PenaltyClause,
+    ScheduleApplicationSchema,
+)
 from summary_model.commercial_offer_vlm import _extract_vlm_offer
 from summary_model.vlm_fallback import _parse_response
-from summary_model.web_service import _llm_recovery_warnings
+from summary_model.web_service import _llm_recovery_warnings, _public_vlm_table_warnings
 
 
 class RequiredRow(BaseModel):
@@ -24,6 +30,24 @@ class RequiredRow(BaseModel):
 class RequiredRows(BaseModel):
     rows: list[RequiredRow] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+def test_empty_fact_wrapper_becomes_none_without_lossy_recovery():
+    recovery = recover_model(
+        NmckJustificationSchema,
+        {
+            "variation_coefficient": {
+                "raw_value": None,
+                "normalized_value": None,
+                "confidence": 0.0,
+                "evidence": [],
+            }
+        },
+    )
+
+    assert recovery.status == "recovered"
+    assert recovery.value.variation_coefficient is None
+    assert recovery.lossy_warnings == []
 
 
 def test_safe_normalization_keeps_strict_commercial_offer():
@@ -113,6 +137,114 @@ def test_offer_aliases_and_extended_money_and_date_formats_are_recovered():
     assert recovery.value.items[0].unit_price == Decimal("1234567.89")
     assert recovery.value.items[0].total_price == Decimal("1500000")
     assert recovery.value.items[0].trademark == "Тест"
+
+
+def test_fact_wrappers_and_single_fact_lists_are_recovered_without_data_loss():
+    schedule_recovery = recover_model(
+        ScheduleApplicationSchema,
+        {
+            "purchase_subject": {
+                "raw_value": "Оказание услуг",
+                "normalized_value": "Оказание услуг",
+                "confidence": 0.99,
+            },
+            "smp_preference": {
+                "raw_value": "Нет",
+                "normalized_value": False,
+                "confidence": 0.95,
+            },
+            "raw_fields": [
+                {
+                    "key": "НМЦК",
+                    "value": "106 312 006,00",
+                    "evidence": [
+                        {"document_id": "plan", "block_id": "table-1", "row": "r4"}
+                    ],
+                }
+            ],
+        },
+    )
+    contract_recovery = recover_model(
+        ContractDraftSchema,
+        {
+            "delivery_place": [
+                {
+                    "raw_value": "Место оказания услуг: г. Новосибирск",
+                    "normalized_value": "г. Новосибирск",
+                    "confidence": 0.9,
+                }
+            ],
+            "delivery_term": [
+                {
+                    "raw_value": "с даты заключения по 21.08.2026",
+                    "normalized_value": {
+                        "raw": "с даты заключения по 21.08.2026",
+                        "start_event": "date_of_contract",
+                        "end_event": "2026-08-21",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert schedule_recovery.lossy_warnings == []
+    assert schedule_recovery.value.purchase_subject == "Оказание услуг"
+    assert schedule_recovery.value.smp_preference is False
+    assert schedule_recovery.value.raw_fields[0].evidence == "plan:table-1:r4"
+    assert contract_recovery.lossy_warnings == []
+    assert contract_recovery.value.delivery_place == "г. Новосибирск"
+    assert contract_recovery.value.delivery_term.end_event == "2026-08-21"
+
+
+def test_onmck_fact_wrappers_do_not_drop_items_or_stage_dates():
+    recovery = recover_model(
+        NmckJustificationSchema,
+        {
+            "total_amount": {
+                "raw_value": "106 312 006,00",
+                "normalized_value": {"raw": "106 312 006,00", "amount": "106312006.00"},
+            },
+            "items": [
+                {
+                    "row_number": {
+                        "raw_value": "2.1",
+                        "normalized_value": "2.1",
+                        "confidence": 0.95,
+                    },
+                    "name": "Сервер",
+                    "quantity": "4",
+                    "is_declared_min_price_correct": {
+                        "raw_value": True,
+                        "normalized_value": True,
+                    },
+                    "is_row_total_correct": {
+                        "raw_value": True,
+                        "normalized_value": True,
+                    },
+                    "evidence": ["table-1:r5"],
+                }
+            ],
+            "stages": [
+                {
+                    "stage_number": "1",
+                    "service_start_date": {
+                        "raw_value": "13.07.2026",
+                        "normalized_value": "2026-07-13",
+                    },
+                    "service_end_date": {
+                        "raw_value": "13.07.2026",
+                        "normalized_value": "2026-07-13",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert recovery.lossy_warnings == []
+    assert len(recovery.value.items) == 1
+    assert recovery.value.items[0].row_number == "2.1"
+    assert recovery.value.items[0].is_declared_min_price_correct is True
+    assert str(recovery.value.stages[0].service_start_date) == "2026-07-13"
 
 
 def test_penalty_fraction_is_kept_as_basis_not_misread_as_percent():
@@ -305,3 +437,36 @@ def test_web_warning_exposes_only_lossy_recovery():
         "items[2].quantity: поле удалено"
     ]
     assert _llm_recovery_warnings("stage LLM", None) == []
+
+
+def test_web_recovery_warnings_hide_evidence_noise_and_group_real_losses():
+    warnings = _llm_recovery_warnings(
+        "извлечение документа через LLM",
+        {
+            "attempts": [
+                {
+                    "file_name": "contract.docx",
+                    "lossy_recovery_warnings": [
+                        "items[0].evidence: поле удалено; raw=[{}]",
+                        "items[1].evidence: поле удалено; raw=[{}]",
+                        "delivery_place: поле удалено; raw=[...]",
+                        "delivery_term: поле удалено; raw=[...]",
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert len(warnings) == 1
+    assert "локальный fallback применён к 2 полям/строкам" in warnings[0]
+    assert "raw=" not in warnings[0]
+    assert "evidence" not in warnings[0]
+
+
+def test_public_vlm_warnings_hide_expected_empty_contract_specification():
+    assert _public_vlm_table_warnings(
+        [
+            "contract.docx, table 11: спецификация не содержит заполненных товарных позиций.",
+            "ooz.docx, table 3: VLM fallback failed: timeout",
+        ]
+    ) == ["ooz.docx, table 3: VLM fallback failed: timeout"]

@@ -26,6 +26,7 @@ from summary_model.extraction_models import (
     ExplanatoryNoteSchema,
     MoneyValue,
     NmckJustificationSchema,
+    PenaltyClause,
     ProcurementStage,
     ProcurementPackageExtraction,
     PurchaseDescriptionSchema,
@@ -162,7 +163,7 @@ def test_llm_result_restores_lost_deterministic_fields(tmp_path):
     )
 
     assert error is None
-    assert result.purchase_subject == "LLM subject"
+    assert result.purchase_subject == package.schedule_application.purchase_subject
     assert result.raw_fields == package.schedule_application.raw_fields
     assert result.raw_fields_dict == package.schedule_application.raw_fields_dict
     assert result.ktru_codes == package.schedule_application.ktru_codes
@@ -174,6 +175,9 @@ def test_async_llm_result_restores_lost_deterministic_fields():
         raw_fields=[RawField(key="НМЦК", value="350000")],
         raw_fields_dict={"НМЦК": "350000"},
         ktru_codes=["22.11.11.000-00000007"],
+        purchase_subject="Поставка шин",
+        nmck=MoneyValue(raw="350 000,00", amount=Decimal("350000.00")),
+        application_security_raw="1%",
     )
 
     result, error = asyncio.run(
@@ -186,10 +190,96 @@ def test_async_llm_result_restores_lost_deterministic_fields():
     )
 
     assert error is None
-    assert result.purchase_subject == "LLM subject"
+    assert result.purchase_subject == "Поставка шин"
+    assert result.nmck.amount == Decimal("350000.00")
+    assert result.application_security_raw == "1%"
     assert result.raw_fields == deterministic.raw_fields
     assert result.raw_fields_dict == deterministic.raw_fields_dict
     assert result.ktru_codes == deterministic.ktru_codes
+
+
+def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
+    deterministic = NmckJustificationSchema(
+        total_amount=MoneyValue(raw="106 312 006,00", amount=Decimal("106312006.00")),
+        items=[],
+        stages=[
+            ProcurementStage(
+                stage_number="1",
+                stage_name="Первый этап",
+                price=MoneyValue(raw="40 000,00", amount=Decimal("40000.00")),
+            )
+        ],
+    )
+
+    class OnmckLLMClient:
+        def extract(self, schema, system_prompt, payload):
+            return schema(
+                total_amount=None,
+                stages=[
+                    ProcurementStage(
+                        stage_number="1",
+                        stage_name="Первый этап",
+                        price=MoneyValue(raw="Не выделена", amount=None),
+                    )
+                ],
+            ), None
+
+    result, error = extract_document_schema_with_llm(
+        payload={"known_extracted": deterministic.model_dump(mode="json")},
+        document_type=DocumentType.ONMCK,
+        deterministic_schema=deterministic,
+        llm_client=OnmckLLMClient(),
+    )
+
+    assert error is None
+    assert result.total_amount.amount == Decimal("106312006.00")
+    assert result.stages[0].price.amount == Decimal("40000.00")
+
+
+def test_contract_responsibility_section_is_not_replaced_by_llm_placeholder():
+    deterministic = ContractDraftSchema(
+        responsibility_section_text=(
+            "7. Ответственность сторон\n"
+            "7.1. За нарушение обязательств уплачивается штраф и пеня."
+        ),
+        embedded_purchase_description=PurchaseDescriptionSchema(
+            purchase_subject="Оказание услуг по расширению ЦОД"
+        ),
+    )
+
+    class ContractLLMClient:
+        def extract(self, schema, system_prompt, payload):
+            return schema(
+                responsibility_section_text=(
+                    "7.1. ... (full responsibility text preserved in known_extracted)."
+                ),
+                embedded_purchase_description=PurchaseDescriptionSchema(
+                    purchase_subject="Оказание услуг согласно ООЗ"
+                ),
+                penalty_clauses=[
+                    PenaltyClause(
+                        raw_text="Обобщённый штраф",
+                        party="unknown",
+                        obligation_kind="unknown",
+                    )
+                ],
+            ), None
+
+    result, error = extract_document_schema_with_llm(
+        payload={"known_extracted": deterministic.model_dump(mode="json")},
+        document_type=DocumentType.CONTRACT,
+        deterministic_schema=deterministic,
+        llm_client=ContractLLMClient(),
+    )
+
+    assert error is None
+    assert result.responsibility_section_text == deterministic.responsibility_section_text
+    assert result.penalty_clauses == []
+    assert result.peni_clauses == []
+    assert (
+        result.embedded_purchase_description.purchase_subject
+        == "Оказание услуг по расширению ЦОД"
+    )
 
 
 def test_llm_result_restores_missing_item_fields_when_item_count_matches():
@@ -214,7 +304,7 @@ def test_llm_result_restores_missing_item_fields_when_item_count_matches():
     assert error is None
     assert result.items[0].okpd2_code == "28.13.28.190"
     assert result.items[0].unit == "шт"
-    assert any("restored" in warning for warning in result.parser_warnings)
+    assert result.parser_warnings == []
 
 
 def test_empty_llm_response_does_not_retry_full_prompt():
@@ -344,8 +434,14 @@ def test_extraction_cli_with_mocked_llm_writes_llm_artifacts(tmp_path, monkeypat
     run = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
     assert run["llm"]["enabled"] is True
     assert run["llm"]["metrics"]["calls"] == 1
+    deterministic_result = json.loads(
+        (output_dir / "extraction_result.json").read_text(encoding="utf-8")
+    )
     llm_result = json.loads((output_dir / "extraction_result.llm.json").read_text(encoding="utf-8"))
-    assert llm_result["schedule_application"]["purchase_subject"] == "LLM subject"
+    assert (
+        llm_result["schedule_application"]["purchase_subject"]
+        == deterministic_result["schedule_application"]["purchase_subject"]
+    )
     assert llm_result["schedule_application"]["raw_fields"]
 
 

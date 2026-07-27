@@ -438,6 +438,42 @@ def test_plan_ground_truth_missing_plan_value_requires_manual_review():
     assert "не найдено поле" in checks["strict.plan.delivery_place"].message
 
 
+def test_delivery_term_uses_matching_stages_only_when_direct_fields_are_missing():
+    package = _base_package()
+    package.schedule_application.delivery_term_text = "оказание услуг по этапам"
+    package.schedule_application.stages = [
+        ProcurementStage(stage_number="1", service_term_text="по 13.07.2026")
+    ]
+    package.purchase_description.delivery_term_text = None
+    package.purchase_description.stages = [
+        ProcurementStage(stage_number="1", service_term_text="по 13.07.2026")
+    ]
+    package.contract_draft.delivery_term_text = None
+    package.contract_draft.stages = [
+        ProcurementStage(stage_number="1", service_term_text="по 13.07.2026")
+    ]
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["strict.plan.delivery_term"]
+    assert result.status == "passed"
+    assert result.details["comparison_source"] == "stages"
+
+
+def test_funding_source_eis_reference_requires_manual_review():
+    package = _base_package()
+    package.contract_draft.funding_source = (
+        "Источник финансирования указывается в структурированном виде электронной формы "
+        "контракта в единой информационной системе в сфере закупок."
+    )
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["strict.funding_source"]
+    assert result.status == "manual_review"
+    assert "напрямую не указан" in result.message
+
+
 def test_stages_against_plan_handle_absence_missing_structure_and_mismatch():
     package = _base_package()
     checks = _by_id(run_checks(package))
@@ -522,6 +558,215 @@ def test_contract_penalties_fail_on_wrong_supplier_percent():
     result = checks["strict.contract.penalties"]
     assert result.status == "failed"
     assert any("ожидалось 10%" in line for line in result.details["summary_lines"])
+
+
+def test_contract_penalties_use_structured_clauses_when_section_is_placeholder():
+    package = _base_package()
+    package.contract_draft.responsibility_section_text = (
+        "7.1. ... (full responsibility text preserved in known_extracted)."
+    )
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["strict.contract.penalties"]
+    assert result.status == "passed"
+    assert any("структурированных пунктах" in line for line in result.details["summary_lines"])
+
+
+def test_responsibility_section_parser_accepts_heading_variants_and_stops_at_next_section():
+    from summary_model.extraction_pipeline import _contract_responsibility_section
+
+    for heading in (
+        "7. ОТВЕТСТВЕННОСТЬ СТОРОН",
+        "7. Ответственности сторон",
+        "Ответственность Сторон",
+    ):
+        section = _contract_responsibility_section(
+            f"{heading}\n7.1. За нарушение начисляются штраф и пеня.\n"
+            "8. Обеспечение исполнения Контракта\n8.1. Размер обеспечения составляет 5%."
+        )
+
+        assert section is not None
+        assert "штраф и пеня" in section
+        assert "Размер обеспечения" not in section
+
+
+def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
+    from summary_model.checks.penalty_llm import run_penalty_llm_checks
+
+    package = _base_package()
+    package.schedule_application.nmck = MoneyValue(amount=Decimal("106312006"))
+    package.contract_draft.price = None
+    package.contract_draft.penalty_clauses = []
+    package.contract_draft.peni_clauses = []
+    package.contract_draft.responsibility_section_text = (
+        "7. ОТВЕТСТВЕННОСТЬ СТОРОН\n"
+        "7.4. За каждый факт неисполнения Заказчиком обязательств размер штрафа: "
+        "1000 рублей, если цена не превышает 3 млн рублей; "
+        "5000 рублей, если цена от 3 до 50 млн рублей; "
+        "10000 рублей, если цена от 50 до 100 млн рублей; "
+        "100000 рублей, если цена Контракта превышает 100 млн рублей.\n"
+        "7.6. Штраф Исполнителя за обязательство без стоимостного выражения составляет "
+        "100000 рублей при цене Контракта свыше 100 млн рублей.\n"
+        "7.7. Штраф Исполнителя за стоимостное обязательство составляет 0,5 процента.\n"
+        "7.8. Пеня начисляется как 1/300 действующей ключевой ставки."
+    )
+
+    class FakePenaltyClient:
+        def __init__(self):
+            self.payload = None
+
+        def extract(self, schema, system_prompt, payload):
+            self.payload = json.loads(payload)
+            return schema(
+                penalty_clauses=[
+                    PenaltyClause(
+                        party="customer",
+                        obligation_kind="value_obligation",
+                        raw_text="100000 рублей, если цена Контракта превышает 100 млн рублей.",
+                        amount=Decimal("100000"),
+                        evidence="п. 7.4",
+                    ),
+                    PenaltyClause(
+                        party="supplier",
+                        obligation_kind="non_value_obligation",
+                        raw_text="Штраф составляет 100000 рублей.",
+                        amount=Decimal("100000"),
+                        evidence="п. 7.6",
+                    ),
+                    PenaltyClause(
+                        party="supplier",
+                        obligation_kind="value_obligation",
+                        raw_text="Штраф составляет 0,5 процента.",
+                        percent=Decimal("0.5"),
+                        evidence="п. 7.7",
+                    ),
+                ],
+                peni_clauses=[
+                    PenaltyClause(
+                        party="supplier",
+                        obligation_kind="delay_peni",
+                        raw_text="Пеня начисляется как 1/300 действующей ключевой ставки.",
+                        basis="1/300 действующей ключевой ставки",
+                        evidence="п. 7.8",
+                    )
+                ],
+            ), None
+
+        def metrics(self):
+            return {"calls": 1}
+
+    client = FakePenaltyClient()
+    results, metrics = run_penalty_llm_checks(package, llm_client=client)
+
+    assert metrics["calls"] == 1
+    assert client.payload["nmck"] == "106312006.00"
+    assert "7.4." in client.payload["responsibility_section_text"]
+    assert results[0].status == "passed"
+    extraction = results[0].details["penalty_llm_extraction"]
+    assert extraction["penalty_clauses"][0]["amount"] == "100000"
+    assert extraction["penalty_clauses"][0]["evidence"] == "п. 7.4"
+
+
+def test_penalty_llm_is_not_called_without_usable_responsibility_section():
+    from summary_model.checks.penalty_llm import run_penalty_llm_checks
+
+    package = _base_package()
+    package.contract_draft.penalty_clauses = []
+    package.contract_draft.peni_clauses = []
+    package.contract_draft.responsibility_section_text = "7. Ответственность сторон."
+
+    class UnexpectedClient:
+        def extract(self, *args, **kwargs):
+            raise AssertionError("Penalty LLM must not be called")
+
+    results, metrics = run_penalty_llm_checks(package, llm_client=UnexpectedClient())
+
+    assert metrics["calls"] == 0
+    assert metrics["skipped_reason"] == "penalty_terms_not_found_in_section"
+    assert results[0].status == "manual_review"
+
+
+def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data():
+    from summary_model.checks.penalty_llm import run_penalty_llm_checks
+
+    package = _base_package()
+    package.contract_draft.penalty_clauses = []
+    package.contract_draft.peni_clauses = []
+    package.contract_draft.responsibility_section_text = (
+        "7. Ответственность сторон\n7.1. За нарушение обязательств начисляются штраф и пеня."
+    )
+
+    class FailedClient:
+        def extract(self, *args, **kwargs):
+            return None, "provider unavailable"
+
+        def metrics(self):
+            return {"calls": 1, "error": "provider unavailable"}
+
+    results, metrics = run_penalty_llm_checks(package, llm_client=FailedClient())
+
+    assert metrics["calls"] == 1
+    assert results[0].status == "manual_review"
+    assert results[0].details["penalty_llm_error"] == "provider unavailable"
+
+
+def test_stage_llm_runs_only_for_manual_review_and_excludes_prices():
+    from summary_model.checks.stage_llm import run_stage_llm_checks
+
+    package = _base_package()
+    package.schedule_application.has_stages = True
+    package.schedule_application.stages = [
+        ProcurementStage(
+            stage_number="1",
+            stage_name="Первый этап",
+            service_term_text="по 13.07.2026",
+            price=MoneyValue(amount=Decimal("40000")),
+        )
+    ]
+    package.purchase_description.stages = []
+    package.contract_draft.stages = []
+    package.nmck_justification.stages = []
+
+    class FakeStageClient:
+        def __init__(self):
+            self.payload = None
+
+        def extract(self, schema, system_prompt, payload):
+            self.payload = json.loads(payload)
+            return schema(
+                status="manual_review",
+                message="Не хватает этапов ООЗ и контракта.",
+                summary_lines=["ПГ: этап 1", "ООЗ: этапы не найдены"],
+            ), None
+
+        def metrics(self):
+            return {"calls": 1}
+
+    client = FakeStageClient()
+    results, metrics = run_stage_llm_checks(package, llm_client=client)
+
+    assert metrics["calls"] == 1
+    assert results[0].status == "manual_review"
+    assert "price" not in client.payload["schedule_application"]["stages"][0]
+
+    package.purchase_description.stages = [
+        ProcurementStage(stage_number="2", service_term_text="по 20.07.2026")
+    ]
+    assert run_stage_llm_checks(package, llm_client=client) == (None, None)
+
+
+def test_general_semantic_checks_do_not_include_stages():
+    from summary_model.checks.semantic_llm import SEMANTIC_CHECK_IDS, _semantic_payload
+
+    package = _base_package()
+    payload = _semantic_payload(package)
+
+    assert "semantic.stages" not in SEMANTIC_CHECK_IDS
+    assert "stages" not in payload["schedule_application"]
+    assert "stages" not in payload["purchase_description"]
+    assert "stages" not in payload["contract_draft"]
+    assert "semantic.stages" not in _by_id(run_checks(package))
 
 
 def test_onmck_arithmetic_and_min_price_fail():
@@ -614,6 +859,29 @@ def test_commercial_offers_onmck_match_fails_on_price_quantity_or_unit_mismatch(
     assert any("цена за единицу" in line for line in result.details["failures"])
     assert any("количество" in line for line in result.details["failures"])
     assert any("единица" in line for line in result.details["failures"])
+
+
+def test_commercial_offer_minimum_is_manual_when_one_offer_item_is_unmatched():
+    package = _base_package()
+    package.nmck_justification.items[0].supplier_prices[2].unit_price = Decimal("90")
+    package.nmck_justification.items[0].selected_min_unit_price = Decimal("90")
+    package.commercial_offers_found_count = 3
+    third_offer = _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("90"))
+    third_offer.items[0].name = "Неоднозначное программное обеспечение"
+    third_offer.items[0].okpd2_code = None
+    third_offer.items[0].ktru_code = None
+    package.commercial_offers = [
+        _commercial_offer(supplier_name="Поставщик 1", unit_price=Decimal("100")),
+        _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
+        third_offer,
+    ]
+
+    checks = _by_id(run_checks(package))
+
+    result = checks["manual.commercial_offers.onmck"]
+    assert result.status == "manual_review"
+    assert result.details["failures"] == []
+    assert any("минимальную цену" in line for line in result.details["manual_review"])
 
 
 def test_code_mismatch_fails_and_missing_codes_manual_review():
@@ -1299,6 +1567,17 @@ def test_mocked_vlm_commercial_offer_extraction(monkeypatch):
         assert result.offer.total_amount.amount == Decimal("123456.0")
 
 
+def test_vlm_defaults_to_dedicated_model_without_changing_text_model():
+    from shared_modules.llm_models import OPENAI_MODEL, OPENAI_VLM_MODEL
+    from summary_model.commercial_offer_vlm import CommercialOfferVlmOptions
+    from summary_model.vlm_fallback import VlmFallbackOptions
+
+    assert OPENAI_MODEL
+    assert OPENAI_VLM_MODEL
+    assert CommercialOfferVlmOptions().model == OPENAI_VLM_MODEL
+    assert VlmFallbackOptions().model == OPENAI_VLM_MODEL
+
+
 def test_commercial_offer_lab_report_uses_production_section_renderer():
     package = ProcurementPackageExtraction(
         commercial_offers=[
@@ -1326,7 +1605,7 @@ def test_commercial_offer_lab_report_uses_production_section_renderer():
 
     assert "6) Коммерческие предложения:" in text
     assert "ООО Ромашка" in text
-    assert "Проблемы подготовки или VLM-разбора" in text
+    assert "Особенности распознавания" in text
     assert "PyMuPDF" in text
 
 
@@ -1409,6 +1688,135 @@ def test_commercial_offer_vlm_prices_are_not_overwritten_by_text_layer():
 
     assert result.items[0].unit_price == Decimal("10245000")
     assert result.items[0].trademark == "DEPO"
+
+
+def test_commercial_offer_removes_only_arithmetically_proven_aggregate_row():
+    from summary_model.commercial_offer_vlm import _remove_proven_aggregate_items
+
+    offer = CommercialOfferSchema(
+        total_amount=MoneyValue(amount=Decimal("100")),
+        items=[
+            CommercialOfferItem(
+                row_number="1",
+                name="Итого услуги",
+                quantity=Decimal("1"),
+                unit_price=Decimal("100"),
+                total_price=Decimal("100"),
+            ),
+            CommercialOfferItem(
+                row_number="1.1",
+                name="Этап 1",
+                quantity=Decimal("1"),
+                unit_price=Decimal("40"),
+                total_price=Decimal("40"),
+            ),
+            CommercialOfferItem(
+                row_number="1.2",
+                name="Этап 2",
+                quantity=Decimal("1"),
+                unit_price=Decimal("60"),
+                total_price=Decimal("60"),
+            ),
+        ],
+    )
+
+    cleaned, removed = _remove_proven_aggregate_items(offer)
+
+    assert removed == 1
+    assert [item.row_number for item in cleaned.items] == ["1.1", "1.2"]
+    assert any("Агрегатная итоговая строка" in warning for warning in cleaned.parser_warnings)
+
+
+def test_commercial_offer_keeps_total_like_row_when_detail_sum_is_not_proven():
+    from summary_model.commercial_offer_vlm import _remove_proven_aggregate_items
+
+    offer = CommercialOfferSchema(
+        total_amount=MoneyValue(amount=Decimal("100")),
+        items=[
+            CommercialOfferItem(total_price=Decimal("100")),
+            CommercialOfferItem(total_price=Decimal("40")),
+            CommercialOfferItem(total_price=Decimal("50")),
+        ],
+    )
+
+    cleaned, removed = _remove_proven_aggregate_items(offer)
+
+    assert removed == 0
+    assert len(cleaned.items) == 3
+
+
+def test_commercial_offer_separates_aggregate_and_non_price_appendix_rows():
+    from summary_model.commercial_offer_vlm import (
+        _remove_noncommercial_reference_items,
+        _remove_proven_aggregate_items,
+    )
+
+    offer = CommercialOfferSchema(
+        total_amount=MoneyValue(amount=Decimal("100")),
+        items=[
+            CommercialOfferItem(name="Итого", total_price=Decimal("100")),
+            CommercialOfferItem(
+                name="Этап 1",
+                quantity=Decimal("1"),
+                unit_price=Decimal("40"),
+                total_price=Decimal("40"),
+            ),
+            CommercialOfferItem(
+                name="Этап 2",
+                quantity=Decimal("1"),
+                unit_price=Decimal("60"),
+                total_price=Decimal("60"),
+            ),
+            CommercialOfferItem(name="Техническая характеристика приложения"),
+        ],
+    )
+
+    without_aggregate, aggregate_removed = _remove_proven_aggregate_items(offer)
+    cleaned, references_removed = _remove_noncommercial_reference_items(without_aggregate)
+
+    assert aggregate_removed == 1
+    assert references_removed == 1
+    assert [item.name for item in cleaned.items] == ["Этап 1", "Этап 2"]
+    assert any("справочных строк" in warning for warning in cleaned.parser_warnings)
+
+
+def test_commercial_offer_arithmetic_checks_rows_and_declared_total():
+    package = ProcurementPackageExtraction(
+        commercial_offers=[
+            CommercialOfferSchema(
+                supplier_name="ООО Тест",
+                total_amount=MoneyValue(amount=Decimal("100")),
+                items=[
+                    CommercialOfferItem(
+                        name="Этап 1",
+                        quantity=Decimal("2"),
+                        unit_price=Decimal("20"),
+                        total_price=Decimal("40"),
+                    ),
+                    CommercialOfferItem(
+                        name="Этап 2",
+                        quantity=Decimal("1"),
+                        unit_price=Decimal("60"),
+                        total_price=Decimal("60"),
+                    ),
+                ],
+            )
+        ],
+        commercial_offers_found_count=1,
+    )
+
+    result = _by_id(run_checks(package))["manual.commercial_offers.content"]
+
+    assert result.details["arithmetic_rows"][0]["status"] == "passed"
+    assert result.details["arithmetic_rows"][0]["checked_rows"] == 2
+    assert result.details["arithmetic_rows"][0]["calculated_total"] == "100.00"
+
+    package.commercial_offers[0].items[1].total_price = Decimal("61")
+    result = _by_id(run_checks(package))["manual.commercial_offers.content"]
+
+    assert result.status == "failed"
+    assert result.details["arithmetic_rows"][0]["status"] == "failed"
+    assert len(result.details["arithmetic_failures"]) == 2
 
 
 def test_commercial_offer_vlm_normalizes_russian_dates_and_money_strings():

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from shared_modules.llm_models import get_chatGPT_client, OPENAI_MODEL
+from shared_modules.llm_models import get_chatGPT_client, OPENAI_VLM_MODEL
 from summary_model.classification import DocumentClassifier
 from summary_model.domain.models import DocumentIR, DocumentType, TableIR
 from summary_model.extraction.structured_recovery import recover_model
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             role=role,
             prompt=prompt,
             payload=payload,
-            model=args.model or OPENAI_MODEL,
+            model=args.model or OPENAI_VLM_MODEL,
         )
         _write_json(output_dir / "vlm_raw.json", result)
         parsed, validation_error = _parse_vlm_result(

@@ -244,6 +244,10 @@ def _normalize_value(
     base = _without_none(annotation)
     origin = get_origin(base)
 
+    if origin is not list:
+        value, wrapper_issues = _unwrap_fact_value(base, value, path)
+        issues.extend(wrapper_issues)
+
     if origin is list:
         item_type = get_args(base)[0] if get_args(base) else Any
         if value is None:
@@ -260,14 +264,15 @@ def _normalize_value(
 
     model_type = _base_model_type(base)
     if model_type is not None and isinstance(value, dict):
-        return _normalize_model_payload(model_type, value, path=path)
+        normalized_model, model_issues = _normalize_model_payload(model_type, value, path=path)
+        return normalized_model, [*issues, *model_issues]
     if model_type is not None and model_type.__name__ == "MoneyValue":
         parsed = _parse_decimal_text(value) if isinstance(value, (str, int, float, Decimal)) else None
         if parsed is not None:
             return {
                 "raw": str(value),
                 "amount": parsed,
-            }, [RecoveryIssue(_format_path(path), "денежное значение преобразовано в MoneyValue")]
+            }, [*issues, RecoveryIssue(_format_path(path), "денежное значение преобразовано в MoneyValue")]
 
     if base is Decimal and isinstance(value, dict):
         mapped = _text_from_mapping(value)
@@ -284,19 +289,109 @@ def _normalize_value(
     if base is date and isinstance(value, str):
         parsed_date = _parse_date(value)
         if parsed_date is not None and parsed_date.isoformat() != value.strip():
-            return parsed_date, [RecoveryIssue(_format_path(path), "дата преобразована в формат ISO")]
+            return parsed_date, [*issues, RecoveryIssue(_format_path(path), "дата преобразована в формат ISO")]
 
     if base is bool and isinstance(value, str):
         parsed_bool = _parse_bool(value)
         if parsed_bool is not None:
-            return parsed_bool, [RecoveryIssue(_format_path(path), "текстовое значение преобразовано в bool")]
+            return parsed_bool, [*issues, RecoveryIssue(_format_path(path), "текстовое значение преобразовано в bool")]
 
     if base is str and isinstance(value, dict):
         text = _text_from_mapping(value)
+        if text is None and path and path[-1] == "evidence":
+            text = _evidence_text(value)
         if text is not None:
-            return text, [RecoveryIssue(_format_path(path), "текст извлечён из объекта LLM")]
+            return text, [*issues, RecoveryIssue(_format_path(path), "текст извлечён из объекта LLM")]
 
     return value, issues
+
+
+def _unwrap_fact_value(
+    expected_type: Any,
+    value: Any,
+    path: tuple[str | int, ...],
+) -> tuple[Any, list[RecoveryIssue]]:
+    issues: list[RecoveryIssue] = []
+    expected_model = _base_model_type(expected_type)
+    if expected_model is not None and {
+        "raw_value",
+        "normalized_value",
+    }.issubset(expected_model.model_fields):
+        return value, issues
+    if isinstance(value, list):
+        if len(value) == 1:
+            value = value[0]
+            issues.append(
+                RecoveryIssue(
+                    _format_path(path),
+                    "одиночный факт извлечён из списка LLM",
+                )
+            )
+        elif expected_type is str:
+            texts = [_text_from_fact(item) for item in value]
+            texts = [text for text in texts if text]
+            if texts:
+                return "; ".join(dict.fromkeys(texts)), [
+                    RecoveryIssue(
+                        _format_path(path),
+                        "текстовые факты из списка LLM объединены в строку",
+                    )
+                ]
+
+    if not isinstance(value, dict) or not ({"raw_value", "normalized_value"} & value.keys()):
+        return value, issues
+
+    normalized = value.get("normalized_value")
+    raw = value.get("raw_value")
+    candidate = normalized if normalized not in (None, "", [], {}) else raw
+    model_type = expected_model
+    if (
+        model_type is not None
+        and isinstance(candidate, dict)
+        and "raw" in model_type.model_fields
+        and candidate.get("raw") in (None, "")
+        and isinstance(raw, (str, int, float, Decimal))
+    ):
+        candidate = {**candidate, "raw": str(raw)}
+    if expected_type is str and isinstance(candidate, (dict, list)):
+        candidate = raw if isinstance(raw, (str, int, float, Decimal)) else _text_from_fact(candidate)
+    if candidate in (None, "", [], {}):
+        return None, [
+            *issues,
+            RecoveryIssue(
+                _format_path(path),
+                "пустой fact-wrapper преобразован в null",
+            ),
+        ]
+    issues.append(
+        RecoveryIssue(
+            _format_path(path),
+            "значение извлечено из fact-wrapper LLM",
+        )
+    )
+    return candidate, issues
+
+
+def _text_from_fact(value: Any) -> str | None:
+    if isinstance(value, (str, int, float, Decimal)):
+        text = str(value).strip()
+        return text or None
+    if isinstance(value, dict):
+        text = _text_from_mapping(value)
+        if text:
+            return text
+        if {"document_id", "block_id", "table_id", "row"} & value.keys():
+            return _evidence_text(value)
+    return None
+
+
+def _evidence_text(value: dict[str, Any]) -> str | None:
+    parts = []
+    for key in ("document_id", "block_id", "table_id", "row", "column"):
+        item = value.get(key)
+        if item not in (None, ""):
+            parts.append(str(item))
+    return ":".join(parts) if parts else None
 
 
 def _normalize_semantic_special_cases(

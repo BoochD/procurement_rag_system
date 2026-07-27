@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from shared_modules.llm_models import OPENAI_MODEL, get_chatGPT_client
+from shared_modules.llm_models import OPENAI_VLM_MODEL, get_chatGPT_client
 from summary_model.domain.models import DocumentIR, DocumentType, TableIR
 from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
 from summary_model.tables.models import ParsedTable
@@ -23,7 +23,7 @@ from summary_model.vlm_lab.table_image import render_table_image
 class VlmFallbackOptions:
     enabled: bool = False
     output_dir: Path | None = None
-    model: str = OPENAI_MODEL
+    model: str = OPENAI_VLM_MODEL
     max_tables_per_document: int = 4
     min_complexity_score: int = 35
     max_width: int = 2600

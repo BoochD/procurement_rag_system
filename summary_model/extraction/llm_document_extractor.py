@@ -151,71 +151,71 @@ def _merge_with_deterministic_guard(
     warnings: list[str] = []
 
     if document_type == DocumentType.PLAN:
-        setattr(merged, "raw_fields", deepcopy(getattr(deterministic_schema, "raw_fields", []) or []))
-        setattr(
-            merged,
-            "raw_fields_dict",
-            deepcopy(getattr(deterministic_schema, "raw_fields_dict", {}) or {}),
-        )
+        _prefer_list(merged, deterministic_schema, "raw_fields")
+        _prefer_dict(merged, deterministic_schema, "raw_fields_dict")
         _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
         _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
-        _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "included_goods", warnings, warn=False)
-        _preserve_scalar(merged, deterministic_schema, "procurement_method_raw", warnings, warn=False)
-        _preserve_scalar(merged, deterministic_schema, "procurement_method", warnings, warn=False)
-        _preserve_scalar(merged, deterministic_schema, "single_supplier_basis_text", warnings, warn=False)
-        _preserve_scalar(merged, deterministic_schema, "delivery_place", warnings, warn=False)
-        _preserve_stage_fields(merged, deterministic_schema, warnings)
+        for field_name in (
+            "empty_fields",
+            "negative_value_fields",
+            "subject_codes",
+            "stage_deliverables",
+            "included_goods",
+            "stage_execution_terms",
+            "national_regime_fields",
+        ):
+            _prefer_list(merged, deterministic_schema, field_name)
+        for field_name in (
+            "purchase_subject",
+            "nmck",
+            "procurement_method_raw",
+            "procurement_method",
+            "single_supplier_basis_text",
+            "funding_source_text",
+            "delivery_place",
+            "delivery_term_text",
+            "delivery_term",
+            "contract_execution_term_text",
+            "contract_execution_term",
+            "aggregate_quantity_text",
+            "has_stages",
+            "smp_preference_raw",
+            "smp_preference",
+            "subcontract_smp_sonko_required_raw",
+            "subcontract_smp_sonko_required",
+            "subcontract_smp_sonko_percent_raw",
+            "subcontract_smp_sonko_percent",
+            "application_security_raw",
+            "application_security",
+            "contract_security_raw",
+            "contract_security",
+            "warranty_security_raw",
+            "warranty_security",
+            "additional_requirements_raw",
+            "national_regime_raw",
+            "additional_participant_requirements_text",
+        ):
+            _prefer_scalar(merged, deterministic_schema, field_name)
+        _prefer_stages(merged, deterministic_schema)
     elif document_type == DocumentType.REQUEST:
-        _preserve_list(merged, deterministic_schema, "attachments", warnings)
-        _preserve_stage_fields(merged, deterministic_schema, warnings)
+        _prefer_list(merged, deterministic_schema, "attachments")
+        _prefer_stages(merged, deterministic_schema)
     elif document_type == DocumentType.ONMCK:
         _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
         _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
         _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "price_sources", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
-        _preserve_stage_fields(merged, deterministic_schema, warnings)
-        _preserve_list_item_fields(
-            merged,
-            deterministic_schema,
-            "items",
-            [
-                "row_number",
-                "name",
-                "okpd2_code",
-                "ktru_code",
-                "unit",
-                "quantity",
-                "quantity_raw",
-                "supplier_prices",
-                "selected_min_unit_price",
-                "row_total_declared",
-            ],
-            warnings,
-        )
+        _prefer_list(merged, deterministic_schema, "price_sources")
+        _prefer_list(merged, deterministic_schema, "items")
+        _prefer_stages(merged, deterministic_schema)
+        _prefer_scalar(merged, deterministic_schema, "total_amount")
+        _prefer_scalar(merged, deterministic_schema, "total_amount_text")
     elif document_type == DocumentType.OOZ:
         _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
         _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
         _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
-        _preserve_stage_fields(merged, deterministic_schema, warnings)
-        _preserve_list_item_fields(
-            merged,
-            deterministic_schema,
-            "items",
-            [
-                "row_number",
-                "name",
-                "okpd2_code",
-                "ktru_code",
-                "unit",
-                "quantity",
-                "quantity_raw",
-                "characteristics",
-            ],
-            warnings,
-        )
+        _prefer_list(merged, deterministic_schema, "items")
+        _prefer_stages(merged, deterministic_schema)
+        _prefer_scalar(merged, deterministic_schema, "purchase_subject")
         _preserve_scalar(
             merged,
             deterministic_schema,
@@ -227,37 +227,16 @@ def _merge_with_deterministic_guard(
         _preserve_code_list(merged, deterministic_schema, "okpd2_codes", warnings)
         _preserve_code_list(merged, deterministic_schema, "ktru_codes", warnings)
         _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "specification_items", warnings, warn=False)
-        _preserve_stage_fields(merged, deterministic_schema, warnings)
-        _preserve_list_item_fields(
-            merged,
-            deterministic_schema,
-            "items",
-            [
-                "row_number",
-                "name",
-                "okpd2_code",
-                "ktru_code",
-                "unit",
-                "quantity",
-                "quantity_raw",
-                "characteristics",
-            ],
-            warnings,
-        )
-        _preserve_list_item_fields(
-            merged,
-            deterministic_schema,
-            "specification_items",
-            ["row_number", "name", "unit", "quantity", "unit_price", "total_price"],
-            warnings,
-        )
+        _prefer_list(merged, deterministic_schema, "items")
+        _prefer_list(merged, deterministic_schema, "specification_items")
+        _prefer_stages(merged, deterministic_schema)
         _preserve_list(merged, deterministic_schema, "referenced_attachments", warnings, warn=False)
         _preserve_list(merged, deterministic_schema, "actual_attachments", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_execution_term_text", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_execution_term", warnings, warn=False)
-        _preserve_scalar(merged, deterministic_schema, "responsibility_section_text", warnings, warn=False)
+        merged.responsibility_section_text = deepcopy(
+            getattr(deterministic_schema, "responsibility_section_text", None)
+        )
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_required_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_required", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_percent_raw", warnings, warn=False)
@@ -268,8 +247,14 @@ def _merge_with_deterministic_guard(
         _preserve_scalar(merged, deterministic_schema, "warranty_security", warnings, warn=False)
         _prefer_deterministic_security(merged, deterministic_schema, "contract_security_raw", "contract_security")
         _prefer_deterministic_security(merged, deterministic_schema, "warranty_security_raw", "warranty_security")
-        _preserve_list(merged, deterministic_schema, "penalty_clauses", warnings, warn=False)
-        _preserve_list(merged, deterministic_schema, "peni_clauses", warnings, warn=False)
+        # Penalties are owned by the dedicated package-level check. The general
+        # document LLM must not create a second, weaker interpretation.
+        merged.penalty_clauses = deepcopy(
+            getattr(deterministic_schema, "penalty_clauses", []) or []
+        )
+        merged.peni_clauses = deepcopy(
+            getattr(deterministic_schema, "peni_clauses", []) or []
+        )
         _preserve_embedded_description(merged, deterministic_schema, warnings, warn=False)
     elif document_type == DocumentType.COMMERCIAL_OFFER:
         _preserve_list(merged, deterministic_schema, "items", warnings, warn=False)
@@ -310,6 +295,32 @@ def _prefer_deterministic_security(
 
 def _copy_model(value: BaseModel | None) -> BaseModel | None:
     return value.model_copy(deep=True) if value is not None else None
+
+
+def _prefer_scalar(target: BaseModel, source: BaseModel, field_name: str) -> None:
+    """Keep a non-empty deterministic value; LLM only fills parser gaps."""
+    source_value = getattr(source, field_name, None)
+    if _is_missing_value(source_value):
+        return
+    setattr(target, field_name, deepcopy(source_value))
+
+
+def _prefer_list(target: BaseModel, source: BaseModel, field_name: str) -> None:
+    source_value = list(getattr(source, field_name, []) or [])
+    if source_value:
+        setattr(target, field_name, deepcopy(source_value))
+
+
+def _prefer_dict(target: BaseModel, source: BaseModel, field_name: str) -> None:
+    source_value = dict(getattr(source, field_name, {}) or {})
+    if source_value:
+        setattr(target, field_name, deepcopy(source_value))
+
+
+def _prefer_stages(target: BaseModel, source: BaseModel) -> None:
+    if hasattr(source, "has_stages"):
+        _prefer_scalar(target, source, "has_stages")
+    _prefer_list(target, source, "stages")
 
 
 def _append_warning(model: BaseModel, warning: str) -> None:
@@ -565,6 +576,12 @@ def _preserve_embedded_description(
     target_embedded = getattr(target, "embedded_purchase_description", None)
     if source_embedded is None:
         return
+    if target_embedded is None:
+        setattr(target, "embedded_purchase_description", source_embedded.model_copy(deep=True))
+        return
+    _prefer_scalar(target_embedded, source_embedded, "purchase_subject")
+    _prefer_list(target_embedded, source_embedded, "items")
+    _prefer_list(target_embedded, source_embedded, "stages")
     source_items = getattr(source_embedded, "items", []) or []
     target_items = getattr(target_embedded, "items", []) if target_embedded is not None else []
     if source_items and len(target_items) < len(source_items):
@@ -583,6 +600,8 @@ def _postprocess_document_schema(
     if source is not None:
         _fill_missing_text(target, source, "document_title")
     _clear_empty_money_fields(target)
+    _fill_term_text(target, "delivery_term_text", "delivery_term")
+    _fill_term_text(target, "contract_execution_term_text", "contract_execution_term")
     if document_type == DocumentType.REQUEST and hasattr(target, "purchase_subject"):
         subject = getattr(target, "purchase_subject", None)
         cleaned = _clean_purchase_subject(subject)
@@ -598,6 +617,15 @@ def _fill_missing_text(target: BaseModel, source: BaseModel, field_name: str) ->
     source_value = getattr(source, field_name, None)
     if isinstance(source_value, str) and source_value.strip():
         setattr(target, field_name, source_value.strip())
+
+
+def _fill_term_text(target: BaseModel, text_field: str, value_field: str) -> None:
+    if not hasattr(target, text_field) or getattr(target, text_field, None):
+        return
+    structured = getattr(target, value_field, None)
+    raw = getattr(structured, "raw", None)
+    if isinstance(raw, str) and raw.strip():
+        setattr(target, text_field, raw.strip())
 
 
 def _clear_empty_money_fields(target: BaseModel) -> None:

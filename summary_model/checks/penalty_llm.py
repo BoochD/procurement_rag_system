@@ -33,6 +33,9 @@ PENALTY_CHECK_PROMPT = """
 - придумывать штрафы, если их нет в тексте;
 - менять НМЦК;
 - делать внешние проверки.
+- сокращать пункты многоточием или возвращать заглушки;
+- объединять разные пункты, стороны или виды обязательств в одну запись;
+- копировать ожидаемую сумму из payload, если соответствующий порог отсутствует в тексте.
 
 Верни penalty_clauses и peni_clauses.
 
@@ -46,10 +49,24 @@ PENALTY_CHECK_PROMPT = """
 Для каждого пункта:
 - raw_text: точная короткая формулировка из главы;
 - percent: число процентов, если явно указано;
-- amount: сумма рублей, если явно указана;
+- amount: применимая к переданной НМЦК сумма рублей, если соответствующая ветка явно указана;
 - evidence: номер пункта, если есть.
 
 Если глава есть, но нужный штраф не найден, не выдумывай его.
+
+Примеры поведения:
+- При НМЦК 106 312 006 рублей и пункте 7.4 с диапазонами 1000 / 5000 /
+  10000 / 100000 рублей верни amount=100000, evidence="п. 7.4" и точный текст
+  ветки "100000 рублей, если цена Контракта превышает 100 млн. рублей".
+- Если штраф заказчика и штраф исполнителя за нестоимостное обязательство равны
+  100000 рублей, верни две отдельные penalty_clauses с разными party и
+  obligation_kind.
+- Формулу "1/300 действующей ключевой ставки" верни отдельной записью в
+  peni_clauses с obligation_kind=delay_peni.
+- Штраф 5 процентов за непривлечение СМП/СОНКО верни отдельной записью с
+  obligation_kind=smp_sonko_subcontract.
+- Если expected содержит сумму, которой нет в переданной главе, не создавай
+  запись только ради совпадения с expected.
 """.strip()
 
 
@@ -61,14 +78,31 @@ def run_penalty_llm_checks(
     contract = package.contract_draft
     section = getattr(contract, "responsibility_section_text", None) if contract else None
     if not section or not _has_penalty_words(section):
-        return None, None
+        return _check_contract_penalties(package), {
+            "calls": 0,
+            "skipped_reason": (
+                "responsibility_section_not_found"
+                if not section
+                else "penalty_terms_not_found_in_section"
+            ),
+        }
 
     client = llm_client or StructuredLLMClient()
     payload = json.dumps(_penalty_payload(package), ensure_ascii=False, default=str)
     result, error = client.extract(ContractPenaltyLLMResult, PENALTY_CHECK_PROMPT, payload)
     metrics = client.metrics()
     if error or result is None:
-        return None, metrics
+        fallback = _check_contract_penalties(package)
+        for check in fallback:
+            check.details["penalty_llm_error"] = error or "LLM вернула пустой результат."
+            check.message = (
+                "Специализированная LLM-проверка штрафов не выполнена; "
+                "требуется ручная проверка раздела ответственности."
+            )
+            check.status = "manual_review"
+            check.severity = "manual_review"
+            check.report_text = check.message
+        return fallback, metrics
 
     repaired_package = deepcopy(package)
     if repaired_package.contract_draft is not None:
@@ -77,7 +111,15 @@ def run_penalty_llm_checks(
         for warning in result.warnings:
             if warning not in repaired_package.contract_draft.parser_warnings:
                 repaired_package.contract_draft.parser_warnings.append(warning)
-    return _check_contract_penalties(repaired_package), metrics
+    checks = _check_contract_penalties(repaired_package)
+    extracted = {
+        "penalty_clauses": [item.model_dump(mode="json") for item in result.penalty_clauses],
+        "peni_clauses": [item.model_dump(mode="json") for item in result.peni_clauses],
+        "warnings": list(result.warnings),
+    }
+    for check in checks:
+        check.details["penalty_llm_extraction"] = extracted
+    return checks, metrics
 
 
 def _penalty_payload(package: ProcurementPackageExtraction) -> dict[str, object]:
@@ -87,6 +129,10 @@ def _penalty_payload(package: ProcurementPackageExtraction) -> dict[str, object]
         contract_price = _money_amount(package.schedule_application.nmck if package.schedule_application else None)
     return {
         "nmck": _format_money(contract_price),
+        "has_stages": bool(
+            getattr(package.schedule_application, "stages", None)
+            or getattr(contract, "stages", None)
+        ),
         "expected": {
             "supplier_value_obligation_percent": _optional_decimal_text(
                 _supplier_value_penalty_percent(contract_price)
