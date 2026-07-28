@@ -205,6 +205,29 @@ class PurchaseItemCharacteristic(BaseModel):
     evidence: str | None = None
 
 
+class AdditionalCharacteristicsJustification(BaseModel):
+    scope_text: str | None = None
+    characteristic_names: list[str] = Field(default_factory=list)
+    justification_text: str | None = None
+    evidence_text: str | None = None
+    source_document_title: str | None = None
+    source_document_type: str | None = None
+    source_table_id: str | None = None
+    source_table_index: int | None = None
+    source_table_title: str | None = None
+    extraction_method: str = "unknown"
+    parser_warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("characteristic_names", "parser_warnings", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if item is not None and str(item).strip()]
+
+
 class PurchaseItem(BaseModel):
     row_number: int | str | None = None
     name: str | None = None
@@ -396,6 +419,9 @@ class PurchaseDescriptionSchema(BaseModel):
     items: list[PurchaseItem] = Field(default_factory=list)
     warranty_requirements_text: str | None = None
     additional_characteristics_justification_text: str | None = None
+    additional_characteristics_justifications: list[AdditionalCharacteristicsJustification] = Field(
+        default_factory=list
+    )
     trademark_justification_text: str | None = None
     rights_transfer_text: str | None = None
     required_rights_documents: list[RequestAttachment] = Field(default_factory=list)

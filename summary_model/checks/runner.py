@@ -9,6 +9,13 @@ from typing import Any
 
 from services.procurement_reference_registry import ProcurementReferenceRegistry
 from summary_model.checks.models import CheckMode, CheckResult, ProcurementChecksReport
+from summary_model.checks.national_regime import (
+    FIELD_LABELS,
+    national_regime_code_listed,
+    plan_national_regime_fields,
+    plan_okpd2_codes,
+    resolve_plan_national_regime,
+)
 from summary_model.checks.normalization import (
     normalize_code,
     normalize_decimal,
@@ -53,6 +60,7 @@ def run_checks(
     penalty_results: list[CheckResult] | None = None,
     external_results: list[CheckResult] | None = None,
     pp1875_registry: Any | None = None,
+    commercial_offer_match_results: list[dict[str, Any]] | None = None,
 ) -> ProcurementChecksReport:
     results: list[CheckResult] = []
     results.extend(_check_package_completeness(package))
@@ -64,7 +72,10 @@ def run_checks(
     results.extend(_check_onmck_supplier_prices(package))
     results.extend(_check_onmck_stage_prices(package))
     results.extend(_check_commercial_offer_content(package))
-    results.extend(_check_commercial_offers_against_onmck(package))
+    results.extend(_check_commercial_offers_against_onmck(
+        package,
+        llm_matches=commercial_offer_match_results,
+    ))
     results.extend(_check_codes(package, "okpd2"))
     results.extend(_check_codes(package, "ktru"))
     results.extend(_check_plan_ground_truth(package, stage_results=stage_results))
@@ -357,7 +368,11 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
     }
 
 
-def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction) -> list[CheckResult]:
+def _check_commercial_offers_against_onmck(
+    package: ProcurementPackageExtraction,
+    *,
+    llm_matches: list[dict[str, Any]] | None = None,
+) -> list[CheckResult]:
     offers = list(package.commercial_offers or [])
     onmck = package.nmck_justification
     if not offers:
@@ -393,7 +408,7 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
     manual: list[str] = []
     comparison_rows: list[dict[str, Any]] = []
 
-    for nmck_item in onmck.items:
+    for nmck_item_index, nmck_item in enumerate(onmck.items):
         item_label = _item_label(nmck_item)
         offer_prices: list[tuple[str, Decimal]] = []
         row_manual_start = len(manual)
@@ -406,8 +421,23 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
                 continue
             offer_item, reason = _match_offer_item(nmck_item, offer.items)
             if offer_item is None:
-                manual.append(f"{item_label}: {_commercial_offer_name(offer)} - {reason}")
-                continue
+                decision = _commercial_offer_llm_decision(
+                    llm_matches,
+                    nmck_item_index=nmck_item_index,
+                    source_id=supplier_price.source_id,
+                )
+                if decision and decision.get("status") == "confirmed":
+                    offer_item = _offer_item_from_llm_decision(
+                        offer.items,
+                        decision,
+                        source_id=supplier_price.source_id,
+                    )
+                if offer_item is None:
+                    llm_reason = decision.get("reason") if decision else None
+                    manual.append(
+                        f"{item_label}: {_commercial_offer_name(offer)} - {llm_reason or reason}"
+                    )
+                    continue
             offer_unit_price = _money(offer_item.unit_price)
             nmck_unit_price = _money(supplier_price.unit_price)
             if offer_unit_price is not None:
@@ -505,9 +535,50 @@ def _check_commercial_offers_against_onmck(package: ProcurementPackageExtraction
                 "comparison_rows": comparison_rows,
                 "failures": failures,
                 "manual_review": manual,
+                "llm_matches": llm_matches or [],
             },
         )
     ]
+
+
+def _commercial_offer_llm_decision(
+    decisions: list[dict[str, Any]] | None,
+    *,
+    nmck_item_index: int,
+    source_id: str,
+) -> dict[str, Any] | None:
+    matches = [
+        item
+        for item in (decisions or [])
+        if item.get("nmck_item_index") == nmck_item_index
+        and str(item.get("source_id") or "") == str(source_id)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _offer_item_from_llm_decision(
+    items: list[Any],
+    decision: dict[str, Any],
+    *,
+    source_id: str,
+) -> Any | None:
+    candidate_id = str(decision.get("candidate_id") or "")
+    prefix = f"{source_id}:item:"
+    if candidate_id.startswith(prefix):
+        try:
+            index = int(candidate_id[len(prefix):])
+        except ValueError:
+            index = -1
+        if 0 <= index < len(items):
+            return items[index]
+    row_number = decision.get("offer_item_row_number")
+    candidates = [
+        item
+        for item in items
+        if row_number not in (None, "")
+        and str(item.row_number or "") == str(row_number)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _check_request_attachments(package: ProcurementPackageExtraction) -> list[CheckResult]:
@@ -2321,27 +2392,10 @@ def _check_plan_national_regime_fields(
         message = "Заявка в план-график отсутствует; строки национального режима проверить нельзя."
         summary_lines = []
     else:
-        fields = list(getattr(schedule, "national_regime_fields", []) or [])
-        if not fields:
-            fields = [
-                field
-                for field in (getattr(schedule, "raw_fields", []) or [])
-                if re.match(r"\s*17[._]?\d", str(getattr(field, "key", "") or ""))
-            ]
-        expected = {
-            "17.1": "Запреты",
-            "17.2": "Ограничения",
-            "17.3": "Преимущества",
-        }
-        found: dict[str, str] = {}
-        for field in fields:
-            key = str(getattr(field, "key", "") or "")
-            value = str(getattr(field, "value", "") or "").strip()
-            key_match = re.search(r"17[._]?(\d)", key)
-            if key_match:
-                found[f"17.{key_match.group(1)}"] = value
+        expected = FIELD_LABELS
+        found = plan_national_regime_fields(schedule)
         missing = [code for code in expected if not found.get(code)]
-        plan_codes = _plan_okpd2_codes(schedule)
+        plan_codes = plan_okpd2_codes(schedule)
         expected_rows: list[dict[str, str]] = []
         registry_errors: list[str] = []
         try:
@@ -2367,30 +2421,16 @@ def _check_plan_national_regime_fields(
                     },
                 )
             ]
-        for code in plan_codes:
-            try:
-                result = registry.check_okpd2(code)
-            except Exception as error:
-                registry_errors.append(f"{code}: {type(error).__name__}: {error}")
-                continue
-            if not getattr(result, "found", False):
-                continue
-            table_id = str(getattr(result, "table_id", "") or "")
-            field_code = {"table_01": "17.1", "table_02": "17.2"}.get(table_id)
-            if not field_code:
-                continue
-            field_value = found.get(field_code, "")
-            matched_code = normalize_code(getattr(result, "matched_okpd2", None)) or code
-            is_listed = _national_regime_code_listed(field_value, code, matched_code)
-            expected_rows.append(
-                {
-                    "code": code,
-                    "matched_code": matched_code,
-                    "field_code": field_code,
-                    "regime": "запрет" if field_code == "17.1" else "ограничение",
-                    "status": "passed" if is_listed else "failed",
-                }
-            )
+        resolution = resolve_plan_national_regime(schedule, registry, codes=plan_codes)
+        registry_errors.extend(resolution["errors"])
+        expected_rows = [
+            {
+                **row,
+                "status": "passed" if row["status"] == "confirmed" else "failed",
+            }
+            for row in resolution["rows"]
+            if row.get("field_code")
+        ]
         failed_rows = [row for row in expected_rows if row["status"] == "failed"]
         unexpected_codes = _unexpected_national_regime_codes(found, expected_rows)
         if registry_errors:
@@ -2445,40 +2485,6 @@ def _check_plan_national_regime_fields(
     ]
 
 
-def _plan_okpd2_codes(schedule: Any) -> list[str]:
-    codes: list[str] = []
-    for code in getattr(schedule, "okpd2_codes", []) or []:
-        normalized = normalize_code(code)
-        if normalized and normalized not in codes:
-            codes.append(normalized)
-    for reference in getattr(schedule, "subject_codes", []) or []:
-        normalized = normalize_code(getattr(reference, "code", None))
-        if normalized and normalized not in codes:
-            codes.append(normalized)
-    for item in getattr(schedule, "included_goods", []) or []:
-        normalized = normalize_code(getattr(item, "okpd2_code", None))
-        if normalized and normalized not in codes:
-            codes.append(normalized)
-    return codes
-
-
-def _national_regime_code_listed(value: str, *expected_codes: str) -> bool:
-    normalized_value = normalize_code(value)
-    if not normalized_value:
-        return False
-    value_codes = [normalize_code(code) for code in re.findall(r"\d{2}(?:\.\d{2}){1,3}", value)]
-    for expected in expected_codes:
-        normalized_expected = normalize_code(expected)
-        if not normalized_expected:
-            continue
-        if normalized_expected in value_codes:
-            return True
-        compact_expected = normalized_expected.replace(".", "")
-        if compact_expected and compact_expected in normalized_value.replace(".", ""):
-            return True
-    return False
-
-
 def _unexpected_national_regime_codes(
     fields: dict[str, str],
     expected_rows: list[dict[str, str]],
@@ -2496,7 +2502,7 @@ def _unexpected_national_regime_codes(
             if not normalized:
                 continue
             is_explained = any(
-                _national_regime_code_listed(code, row["code"], row["matched_code"])
+                national_regime_code_listed(code, row["code"], row["matched_code"])
                 for row in expected
             )
             if not is_explained:
@@ -3255,7 +3261,10 @@ def external_manual_checks_with_replacements(
     replacements: list[CheckResult],
 ) -> list[CheckResult]:
     by_id = {item.check_id: item for item in replacements}
-    return [by_id.get(item.check_id, item) for item in _external_manual_checks(package)]
+    results = []
+    for item in _external_manual_checks(package):
+        results.append(by_id.get(item.check_id, item))
+    return results
 
 
 def _item_label(item: PurchaseItem | NmckItem) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -216,6 +217,11 @@ def _merge_with_deterministic_guard(
         _prefer_list(merged, deterministic_schema, "items")
         _prefer_stages(merged, deterministic_schema)
         _prefer_scalar(merged, deterministic_schema, "purchase_subject")
+        _prefer_list(
+            merged,
+            deterministic_schema,
+            "additional_characteristics_justifications",
+        )
         _preserve_scalar(
             merged,
             deterministic_schema,
@@ -582,6 +588,16 @@ def _preserve_embedded_description(
     _prefer_scalar(target_embedded, source_embedded, "purchase_subject")
     _prefer_list(target_embedded, source_embedded, "items")
     _prefer_list(target_embedded, source_embedded, "stages")
+    _prefer_list(
+        target_embedded,
+        source_embedded,
+        "additional_characteristics_justifications",
+    )
+    _prefer_scalar(
+        target_embedded,
+        source_embedded,
+        "additional_characteristics_justification_text",
+    )
     source_items = getattr(source_embedded, "items", []) or []
     target_items = getattr(target_embedded, "items", []) if target_embedded is not None else []
     if source_items and len(target_items) < len(source_items):
@@ -602,11 +618,35 @@ def _postprocess_document_schema(
     _clear_empty_money_fields(target)
     _fill_term_text(target, "delivery_term_text", "delivery_term")
     _fill_term_text(target, "contract_execution_term_text", "contract_execution_term")
+    if document_type == DocumentType.CONTRACT:
+        _fill_contract_smp_percent(target)
     if document_type == DocumentType.REQUEST and hasattr(target, "purchase_subject"):
         subject = getattr(target, "purchase_subject", None)
         cleaned = _clean_purchase_subject(subject)
         if cleaned:
             setattr(target, "purchase_subject", cleaned)
+
+
+def _fill_contract_smp_percent(target: BaseModel) -> None:
+    if getattr(target, "subcontract_smp_sonko_percent", None) is not None:
+        return
+    raw = (
+        getattr(target, "subcontract_smp_sonko_percent_raw", None)
+        or getattr(target, "subcontract_smp_sonko_required_raw", None)
+    )
+    if not isinstance(raw, str):
+        return
+    match = re.search(
+        r"(\d+(?:[,.]\d+)?)\s*(?:\([^)]*\)\s*)?(?:%|процент)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return
+    try:
+        target.subcontract_smp_sonko_percent = Decimal(match.group(1).replace(",", "."))
+    except InvalidOperation:
+        return
 
 
 def _fill_missing_text(target: BaseModel, source: BaseModel, field_name: str) -> None:

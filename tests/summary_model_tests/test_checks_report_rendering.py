@@ -161,29 +161,29 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
         _check_result(
             "manual.ktru.additional",
             "Дополнительные характеристики КТРУ",
-            "failed",
+            "warning",
             "Найдены дополнительные характеристики.",
             details={
-                "additional_rows": [
+                "ooz_justification_state": {"found": True, "quote": "Совместимость"},
+                "contract_justification_state": {"found": True},
+                "assessments": [
                     {
-                        "item_name": "Сервер",
+                        "item": "Сервер",
                         "ktru_code": "26.20.14.000-00000189",
-                        "rule_okpd2_code": "26.20.14.000",
-                        "rule_okpd2_source": "префикс КТРУ",
-                        "characteristic_name": "RAID",
-                        "value": "0",
-                        "status": "failed",
-                        "rule_reason": "Дополнительные характеристики запрещены.",
+                        "characteristic": "RAID 0",
+                        "okpd_rule": {"code": "26.20.14.000"},
+                        "plan_regime": {"field_code": "17.2", "status": "confirmed"},
+                        "justification": {"status": "found", "source": "ooz"},
+                        "decision": "restricted",
                     },
                     {
-                        "item_name": "Сервер",
+                        "item": "Сервер",
                         "ktru_code": "26.20.14.000-00000189",
-                        "rule_okpd2_code": "26.20.14.000",
-                        "rule_okpd2_source": "префикс КТРУ",
-                        "characteristic_name": "RAID",
-                        "value": "1",
-                        "status": "failed",
-                        "rule_reason": "Дополнительные характеристики запрещены.",
+                        "characteristic": "RAID 1",
+                        "okpd_rule": {"code": "26.20.14.000"},
+                        "plan_regime": {"field_code": "17.2", "status": "confirmed"},
+                        "justification": {"status": "found", "source": "ooz"},
+                        "decision": "restricted",
                     },
                 ]
             },
@@ -196,10 +196,9 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     assert "Не указаны в документе либо не распознаны:" in text
     assert "КП №1: поставщик, ИНН, срок, место, НДС." in text
     assert "Распознаны товарные знаки: DEPO, YADRO." in text
-    assert "26.20.14.000 (префикс КТРУ)" in text
     assert "| Сервер / 26.20.14.000-00000189 |" in text
-    assert "| RAID | 0; 1 | ОШИБКА |" in text
-    assert text.count("Дополнительные характеристики запрещены.") == 1
+    assert "| 17.2: confirmed | 2 | найдено в ООЗ | ПРЕДУПРЕЖДЕНИЕ |" in text
+    assert "Краткая цитата обоснования: Совместимость" in text
 
 
 def test_report_renders_commercial_offer_comparison_as_one_compact_table():
@@ -287,3 +286,46 @@ def test_report_renders_offer_arithmetic_and_compacts_vlm_warnings():
     assert "Агрегатная итоговая строка" in text
     assert "НДС по строкам смешанный" in text
     assert "Место поставки/оказания услуг в документе не указано" not in text
+
+
+def test_report_keeps_allowed_ktru_rows_detailed_beside_restricted_summary():
+    report = _report(
+        _check_result(
+            "manual.ktru.additional",
+            "Дополнительные характеристики КТРУ",
+            "warning",
+            "Часть характеристик подпадает под подтверждённое ограничение.",
+            details={
+                "ooz_justification_state": {"found": True, "quote": "Обоснование применения дополнительных характеристик"},
+                "assessments": [
+                    {
+                        "item": "Сервер",
+                        "ktru_code": "26.20.14.000-00000189",
+                        "characteristic": "RAID 0",
+                        "okpd_rule": {"code": "26.20.14.120"},
+                        "plan_regime": {"field_code": "17.2", "status": "confirmed"},
+                        "justification": {"status": "found", "source": "ooz"},
+                        "decision": "restricted",
+                    },
+                    {
+                        "item": "Программное обеспечение",
+                        "ktru_code": "58.29.11.000-00000003",
+                        "characteristic": "Централизованное управление",
+                        "okpd_rule": {"code": "58.29.31.000"},
+                        "plan_regime": {"status": "not_required"},
+                        "justification": {"status": "found", "source": "ooz"},
+                        "decision": "allowed",
+                    },
+                ],
+                "additional_rows": [
+                    {"value": "Да", "unit": None},
+                    {"value": "Наличие", "unit": "логическое"},
+                ],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "| Сервер / 26.20.14.000-00000189 | 26.20.14.120 | 17.2: confirmed | 1 |" in text
+    assert "| Программное обеспечение / 58.29.11.000-00000003 | Централизованное управление | Наличие | логическое | найдено в ООЗ | ОК |" in text

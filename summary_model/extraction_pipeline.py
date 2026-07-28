@@ -10,6 +10,7 @@ from typing import Callable
 
 from summary_model.classification import DocumentClassifier
 from summary_model.domain.models import DocumentIR, DocumentType, InputDocument
+from summary_model.extraction.additional_justifications import collect_additional_justifications
 from summary_model.extraction_models import (
     CommercialOfferItem,
     CommercialOfferSchema,
@@ -650,10 +651,41 @@ def _security_value(text: str | None) -> SecurityValue | None:
 
 def _contract_smp_sonko_clause(text: str) -> str | None:
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    numbered_clauses = _numbered_contract_clauses(lines)
+    best_clause = _best_smp_sonko_clause(numbered_clauses)
+    if best_clause:
+        return best_clause
+
+    # Older templates may not use numbered paragraphs. Keep the previous
+    # short-window search as a fallback for those documents.
+    windows = [" ".join(lines[index : index + 4]) for index in range(len(lines))]
+    best_window = _best_smp_sonko_clause(windows)
+    return best_window[:1200] if best_window else None
+
+
+def _numbered_contract_clauses(lines: list[str]) -> list[str]:
+    clauses: list[str] = []
+    current: list[str] = []
+    marker = re.compile(
+        r"^(?:\d+(?:\.\d+)+\.?|\d+[.)])\s+",
+        flags=re.IGNORECASE,
+    )
+    for line in lines:
+        if marker.match(line):
+            if current:
+                clauses.append(" ".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        clauses.append(" ".join(current))
+    return clauses
+
+
+def _best_smp_sonko_clause(candidates: list[str]) -> str | None:
     best_window: str | None = None
     best_score = -1
-    for index, line in enumerate(lines):
-        window = " ".join(lines[index : index + 4])
+    for window in candidates:
         lowered = window.casefold()
         has_smp = (
             "смп" in lowered
@@ -677,12 +709,10 @@ def _contract_smp_sonko_clause(text: str) -> str | None:
             score += 2
         if _percent_from_text(window) is not None:
             score += 3
-        if re.search(r"\b5\.\d+", window):
-            score += 1
         if score > best_score:
             best_score = score
             best_window = window
-    return best_window[:1200] if best_window else None
+    return best_window
 
 
 def _contract_smp_sonko_required(text: str | None) -> bool | None:
@@ -1685,6 +1715,12 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
     subject_codes = _subject_codes_from_document_text(text, evidence="ooz_text:codes")
     items = _purchase_items_from_tables(tables)
     _link_codes_to_items_from_text(items, subject_codes)
+    justifications, justification_text = collect_additional_justifications(
+        ir,
+        DocumentType.OOZ,
+        tables,
+        text,
+    )
     return PurchaseDescriptionSchema(
         document_title=_title(ir),
         purchase_subject=(
@@ -1700,19 +1736,9 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
         stages=stages,
         items=items,
         warranty_requirements_text=_line_after_marker(text, "гаранти"),
-        additional_characteristics_justification_text=_additional_characteristics_justification(text),
+        additional_characteristics_justification_text=justification_text,
+        additional_characteristics_justifications=justifications,
     )
-
-
-def _additional_characteristics_justification(text: str) -> str | None:
-    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    for index, line in enumerate(lines):
-        lowered = line.casefold()
-        if "обоснован" not in lowered:
-            continue
-        if any(marker in lowered for marker in ("дополнитель", "характерист")):
-            return " ".join(lines[index : index + 4])[:1600]
-    return None
 
 
 def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftSchema:
@@ -1732,10 +1758,18 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
     embedded_subject = _purchase_subject_from_ooz_section(text)
+    embedded_justifications, embedded_justification_text = collect_additional_justifications(
+        ir,
+        DocumentType.CONTRACT,
+        tables,
+        text,
+    )
     embedded = PurchaseDescriptionSchema(
         purchase_subject=embedded_subject,
         stages=stages,
         items=description_items,
+        additional_characteristics_justification_text=embedded_justification_text,
+        additional_characteristics_justifications=embedded_justifications,
         parser_warnings=["Embedded purchase description inferred from contract tables."],
     )
     return ContractDraftSchema(
@@ -1766,7 +1800,12 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         referenced_attachments=referenced_attachments,
         actual_attachments=table_attachments,
         embedded_purchase_description=(
-            embedded if embedded.purchase_subject or embedded.items or embedded.stages else None
+            embedded
+            if embedded.purchase_subject
+            or embedded.items
+            or embedded.stages
+            or embedded.additional_characteristics_justifications
+            else None
         ),
         items=description_items,
         specification_items=specification_items,

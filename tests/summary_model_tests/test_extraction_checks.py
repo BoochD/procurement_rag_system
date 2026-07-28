@@ -12,6 +12,7 @@ from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.report import build_checks_report_text, build_commercial_offer_report_text
 from summary_model.checks_cli import main as checks_cli_main
 from summary_model.extraction_models import (
+    AdditionalCharacteristicsJustification,
     CommercialOfferItem,
     CommercialOfferSchema,
     ContractDraftSchema,
@@ -377,6 +378,7 @@ def test_smp_sonko_plain_contract_clause_matches_plan_without_semantic_llm():
 
     contract_text = """
     5. Права и обязанности Сторон
+    5.4.8. Представлять сведения о привлекаемых им соисполнителях в установленный срок.
     5.4.11. Привлечь к исполнению Контракта соисполнителей из числа субъектов
     малого предпринимательства, социально ориентированных некоммерческих
     организаций в объеме 90 (девяноста) процентов от цены Контракта.
@@ -385,6 +387,8 @@ def test_smp_sonko_plain_contract_clause_matches_plan_without_semantic_llm():
     clause = _contract_smp_sonko_clause(contract_text)
 
     assert clause is not None
+    assert clause.startswith("5.4.11.")
+    assert "5.4.8" not in clause
     assert _contract_smp_sonko_required(clause) is True
     assert _percent_from_text(clause) == Decimal("90")
 
@@ -1283,7 +1287,7 @@ def test_ktru_adapter_checks_characteristics_without_docx_parsing():
 
     assert results["manual.ktru.characteristics"].status == "passed"
     assert results["manual.ktru.characteristics"].details["checked_characteristics"] == 2
-    assert results["manual.ktru.additional"].status == "warning"
+    assert results["manual.ktru.additional"].status == "failed"
     assert results["manual.ktru.additional"].details["extra_characteristics"]
     assert results["manual.ktru.characteristics"].details["characteristic_rows"]
     assert results["manual.ktru.additional"].details["additional_rows"]
@@ -1367,6 +1371,110 @@ def test_ktru_adapter_prefers_official_okpd2_from_card_for_rule():
     assert row["plan_okpd2_code"] == "26.20.14.120"
     assert row["rule_okpd2_code"] == "26.20.14.000"
     assert row["rule_okpd2_source"] == "карточка КТРУ"
+
+
+class SpecialPositionKtruRegistry(FakeKtruRegistry):
+    def get_ktru_common_info(self, ktru_code):
+        return {"okpd2_code": "26.20.14.000"}
+
+    def check_okpd2(self, okpd2):
+        return SimpleNamespace(
+            found=True,
+            table_id="table_02",
+            position="198",
+            matched_okpd2="26.20.14.000",
+            reference_name="Серверы",
+            row=None,
+        )
+
+
+def _additional_justification(source_type: str, text: str = "Требование обусловлено совместимостью"):
+    return AdditionalCharacteristicsJustification(
+        scope_text="Сервер",
+        characteristic_names=["Доп. параметр"],
+        justification_text=text,
+        evidence_text=text,
+        source_document_type=source_type,
+        source_table_id=f"{source_type}-table-2",
+        source_table_index=2,
+        extraction_method="vlm_table",
+    )
+
+
+def test_ktru_special_position_is_forbidden_only_when_plan_regime_is_confirmed():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.okpd2_code = "26.20.14.120"
+    item.ktru_code = "26.20.14.000-00000189"
+    item.characteristics = [PurchaseItemCharacteristic(name="Доп. параметр", value="Да")]
+    package.purchase_description.additional_characteristics_justifications = [
+        _additional_justification("purchase_description")
+    ]
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.2", value="Ограничение применяется: 26.20.14.120")
+    ]
+
+    confirmed = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=SpecialPositionKtruRegistry())
+    }
+    assert confirmed["manual.ktru.additional"].status == "warning"
+    assert confirmed["manual.ktru.additional"].details["assessments"][0]["decision"] == "restricted"
+    assert confirmed["manual.ktru.additional"].details["assessments"][0]["plan_regime"]["status"] == "confirmed"
+    assert confirmed["manual.ktru.additional"].details["additional_rows"][0]["plan_regime"]["field_match_aliases"] == ["26.20.14.120"]
+
+    package.schedule_application.national_regime_fields = []
+    missing = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=SpecialPositionKtruRegistry())
+    }
+    assert missing["manual.ktru.additional"].status == "manual_review"
+
+
+def test_ktru_uses_ooz_justification_without_contract_table_comparison():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    package.purchase_description.items[0].characteristics = [
+        PurchaseItemCharacteristic(name="Доп. параметр", value="Да")
+    ]
+    package.purchase_description.additional_characteristics_justifications = [
+        _additional_justification("purchase_description")
+    ]
+    results = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=FakeKtruRegistry())
+    }
+
+    assert results["manual.ktru.additional"].status == "passed"
+    assert "strict.ktru.additional_justification_tables" not in results
+    assert results["manual.ktru.additional"].details["assessments"][0]["decision"] == "allowed"
+
+
+def test_ktru_partial_justification_table_degrades_to_manual_review():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    package.purchase_description.items[0].characteristics = [
+        PurchaseItemCharacteristic(name="Доп. параметр", value="Да")
+    ]
+    package.purchase_description.additional_characteristics_justifications = [
+        AdditionalCharacteristicsJustification(
+            source_table_id="ooz-table-2",
+            extraction_method="table_candidate",
+            parser_warnings=["contents_not_extracted"],
+        )
+    ]
+
+    results = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=FakeKtruRegistry())
+    }
+
+    assert results["manual.ktru.additional"].status == "manual_review"
+    assert "strict.ktru.additional_justification_tables" not in results
 
 
 def test_checks_cli_with_mocked_ktru_replaces_only_ktru_manual_items(monkeypatch):
@@ -1888,3 +1996,21 @@ def test_commercial_offer_text_layer_restores_requisites_and_leaf_items():
     assert [item.row_number for item in offer.items] == ["1.1", "1.2"]
     assert offer.items[1].quantity == Decimal("4")
     assert offer.items[1].unit_price == Decimal("10300000.00")
+
+
+def test_justification_state_prefers_explicit_justification_heading():
+    from summary_model.checks.additional_characteristics import justification_state
+
+    state = justification_state([
+        AdditionalCharacteristicsJustification(
+            justification_text="Лицензии необходимы для оказания услуг.",
+        ),
+        AdditionalCharacteristicsJustification(
+            justification_text=(
+                "Обоснование применения дополнительных характеристик: "
+                "централизованное управление обусловлено существующей инфраструктурой."
+            ),
+        ),
+    ])
+
+    assert state["quote"].startswith("Обоснование применения дополнительных характеристик")

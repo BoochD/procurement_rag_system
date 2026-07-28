@@ -171,7 +171,7 @@ def raw_payload_from_message(raw: Any) -> dict[str, Any] | None:
 
     content = getattr(raw, "content", None)
     if isinstance(content, str):
-        payload = _json_object(content)
+        payload = parse_json_object(content)
         if payload is not None:
             return payload
 
@@ -337,6 +337,17 @@ def _unwrap_fact_value(
                         "текстовые факты из списка LLM объединены в строку",
                     )
                 ]
+        elif expected_model is not None and expected_model.__name__ == "TermValue":
+            candidates = [item for item in value if isinstance(item, dict)]
+            if candidates:
+                value = candidates[0]
+                issues.append(
+                    RecoveryIssue(
+                        _format_path(path),
+                        "из нескольких вариантов срока выбран первый структурированный факт",
+                        lossy=True,
+                    )
+                )
 
     if not isinstance(value, dict) or not ({"raw_value", "normalized_value"} & value.keys()):
         return value, issues
@@ -535,7 +546,11 @@ def _payload_from_calls(calls: Any) -> dict[str, Any] | None:
     return None
 
 
-def _json_object(value: str) -> dict[str, Any] | None:
+def parse_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
     text = value.strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced:
@@ -543,8 +558,48 @@ def _json_object(value: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        repaired = _close_truncated_json(text)
+        if repaired is None:
+            return None
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _json_object(value: str) -> dict[str, Any] | None:
+    return parse_json_object(value)
+
+
+def _close_truncated_json(text: str) -> str | None:
+    if not text.startswith("{"):
+        return None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    pairs = {"}": "{", "]": "["}
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or stack[-1] != pairs[char]:
+                return None
+            stack.pop()
+    if in_string or not stack:
+        return None
+    closing = {"{": "}", "[": "]"}
+    return text + "".join(closing[char] for char in reversed(stack))
 
 
 def _without_none(annotation: Any) -> Any:

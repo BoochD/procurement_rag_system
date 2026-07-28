@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from summary_model.checks import run_checks
 from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks, run_pp1875_checks
+from summary_model.checks.commercial_offer_llm import run_commercial_offer_matching_llm
 from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.penalty_llm import run_penalty_llm_checks
 from summary_model.checks.report import build_checks_report_text
@@ -165,6 +166,7 @@ async def _aprocess_uploaded_documents(
     semantic_results = None
     stage_results = None
     penalty_results = None
+    commercial_offer_match_results = None
     if options.with_semantic_llm:
         try:
             semantic_results, semantic_metrics = run_semantic_llm_checks(package)
@@ -187,6 +189,18 @@ async def _aprocess_uploaded_documents(
         except Exception as error:
             warnings.append(_pipeline_warning("penalty LLM", error))
             metrics["penalty_llm"] = {"error": _error_summary(error)}
+        try:
+            commercial_offer_match_results, offer_match_metrics = (
+                run_commercial_offer_matching_llm(package)
+            )
+            metrics["commercial_offer_match_llm"] = offer_match_metrics
+            if offer_match_metrics.get("error"):
+                warnings.append(
+                    "commercial offer matching LLM: " + str(offer_match_metrics["error"])
+                )
+        except Exception as error:
+            warnings.append(_pipeline_warning("commercial offer matching LLM", error))
+            metrics["commercial_offer_match_llm"] = {"error": _error_summary(error)}
 
     external_results = None
     if options.with_ktru:
@@ -206,6 +220,7 @@ async def _aprocess_uploaded_documents(
         stage_results=stage_results,
         penalty_results=penalty_results,
         external_results=external_results,
+        commercial_offer_match_results=commercial_offer_match_results,
     )
     return WebPipelineResult(
         report_text=build_checks_report_text(checks_report),

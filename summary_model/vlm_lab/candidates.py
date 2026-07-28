@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import re
 
+from summary_model.domain.models import TableIR
 from summary_model.tables.models import ParsedTable
 from summary_model.tables.utils import clean_text
 from summary_model.vlm_lab.models import VlmTableCandidate, VlmTableRole
 
 
 def table_role(table: ParsedTable) -> VlmTableRole:
+    if table.table_type == "additional_characteristics_justification_table":
+        return "additional_characteristics_justification"
     if table.table_type == "ooz_items_table":
         return "purchase_description"
     if table.table_type == "contract_stages_table":
@@ -135,6 +138,8 @@ def _infer_role_from_content(table: ParsedTable) -> VlmTableRole | None:
     ).casefold()
     if not text:
         return None
+    if justification_candidate_reasons(table):
+        return "additional_characteristics_justification"
     has_price = any(marker in text for marker in ("цена", "стоимость", "сумма", "ндс"))
     if "приложени" in text and any(
         marker in text
@@ -187,6 +192,42 @@ def _infer_role_from_content(table: ParsedTable) -> VlmTableRole | None:
     ):
         return "purchase_description"
     return None
+
+
+def justification_candidate_reasons(
+    table: ParsedTable,
+    source: TableIR | None = None,
+) -> list[str]:
+    title_context = " ".join(
+        part
+        for part in (
+            clean_text(table.title),
+            " ".join(source.context_before[-4:]) if source is not None else "",
+        )
+        if part
+    ).casefold()
+    headers = " ".join(
+        source.header_labels() if source is not None else [
+            " ".join(path.parts) for path in table.header_paths
+        ]
+    ).casefold()
+    body = table.compact_markdown[:8000].casefold()
+
+    subject_markers = ("дополнительн", "характеристик", "потребительск", "свойств")
+    reasons: list[str] = []
+    if "обоснован" in title_context and any(marker in title_context for marker in subject_markers):
+        reasons.append("title/context identifies additional-characteristic justification")
+    if (
+        "обоснован" in headers
+        and any(marker in headers for marker in subject_markers)
+    ):
+        reasons.append("header pair contains characteristic and justification columns")
+    if re.search(
+        r"обоснован\w*\s+(?:применения|включения|необходимости)\s+дополнительн\w*\s+характеристик",
+        f"{title_context} {headers} {body}",
+    ):
+        reasons.append("explicit additional-characteristic justification phrase")
+    return list(dict.fromkeys(reasons))
 
 
 def _has_suspicious_items(compact: dict) -> bool:

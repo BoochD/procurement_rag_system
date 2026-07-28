@@ -9,11 +9,20 @@ from typing import Any
 
 from shared_modules.llm_models import OPENAI_VLM_MODEL, get_chatGPT_client
 from summary_model.domain.models import DocumentIR, DocumentType, TableIR
-from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
+from summary_model.extraction.structured_recovery import (
+    StructuredRecovery,
+    parse_json_object,
+    recover_model,
+)
 from summary_model.tables.models import ParsedTable
 from summary_model.tables.table_compactor import build_compact_markdown
 from summary_model.tables.utils import clean_text
-from summary_model.vlm_lab.candidates import rank_table_candidates, table_complexity_score, table_role
+from summary_model.vlm_lab.candidates import (
+    justification_candidate_reasons,
+    rank_table_candidates,
+    table_complexity_score,
+    table_role,
+)
 from summary_model.vlm_lab.models import VlmTableExtraction, VlmTableRole
 from summary_model.vlm_lab.prompts import VLM_TABLE_PROMPT_VERSION, vlm_table_prompt, vlm_user_context
 from summary_model.vlm_lab.table_image import render_table_image
@@ -59,22 +68,50 @@ class VlmFallbackRepairer:
             return tables
         started = time.perf_counter()
         self.metrics["enabled"] = True
-        candidates = [
+        by_id = {table.table_id: table for table in tables}
+        source_by_id = _source_tables(ir)
+        supports_justifications = document_type == DocumentType.OOZ
+        ranked = [
             candidate
             for candidate in rank_table_candidates(tables)
+            if supports_justifications
+            or candidate.role != "additional_characteristics_justification"
+        ]
+        forced = []
+        forced_ids: set[str] = set()
+        for candidate in (ranked if supports_justifications else []):
+            reasons = justification_candidate_reasons(
+                by_id[candidate.table_id],
+                source_by_id.get(candidate.table_id),
+            )
+            if not reasons:
+                continue
+            forced_ids.add(candidate.table_id)
+            forced.append(
+                candidate.model_copy(
+                    update={
+                        "role": "additional_characteristics_justification",
+                        "confidence": max(candidate.confidence, 0.95),
+                        "reasons": list(dict.fromkeys([*candidate.reasons, *reasons])),
+                    }
+                )
+            )
+        regular = [
+            candidate
+            for candidate in ranked
+            if candidate.table_id not in forced_ids
             if _should_send_to_vlm(
-                next(table for table in tables if table.table_id == candidate.table_id),
+                by_id[candidate.table_id],
                 candidate.role,
                 min_complexity_score=self.options.min_complexity_score,
             )
         ][: self.options.max_tables_per_document]
+        candidates = [*forced, *regular]
         self.metrics["tables_considered"] = int(self.metrics["tables_considered"]) + len(candidates)
         if not candidates:
             self.metrics["duration_seconds"] = round(float(self.metrics["duration_seconds"]) + time.perf_counter() - started, 3)
             return tables
 
-        by_id = {table.table_id: table for table in tables}
-        source_by_id = _source_tables(ir)
         repaired_by_id: dict[str, ParsedTable] = {}
         for candidate in candidates:
             table = by_id[candidate.table_id]
@@ -91,6 +128,10 @@ class VlmFallbackRepairer:
             if repaired is not None:
                 self._cache[table.table_id] = repaired
                 repaired_by_id[table.table_id] = repaired
+            elif candidate.role == "additional_characteristics_justification":
+                fallback = _unextracted_justification_table(table)
+                self._cache[table.table_id] = fallback
+                repaired_by_id[table.table_id] = fallback
 
         self.metrics["duration_seconds"] = round(float(self.metrics["duration_seconds"]) + time.perf_counter() - started, 3)
         return [repaired_by_id.get(table.table_id, table) for table in tables]
@@ -168,6 +209,17 @@ class VlmFallbackRepairer:
             return None
 
         compact_json = _compact_json_from_vlm(extraction, document_type)
+        if (
+            extraction.table_role == "additional_characteristics_justification"
+            and recovery.lossy_warnings
+        ):
+            compact_json["justification_extraction"] = {
+                "status": "partial",
+                "warnings": list(dict.fromkeys([
+                    *(compact_json.get("justification_extraction", {}).get("warnings") or []),
+                    *recovery.lossy_warnings,
+                ])),
+            }
         if not _has_useful_result(extraction, compact_json):
             message = _empty_result_warning(ir.file_name, table.table_index, extraction)
             self._warn(message)
@@ -228,6 +280,8 @@ def _role_payload_empty(table: ParsedTable, role: VlmTableRole) -> bool:
         return not compact.get("stages")
     if role == "nmck_calculation":
         return not compact.get("items") or not compact.get("price_sources")
+    if role == "additional_characteristics_justification":
+        return not compact.get("additional_characteristics_justifications")
     if role == "attachments":
         return not compact.get("attachments")
     return False
@@ -287,6 +341,8 @@ def _payload(
             "col_count": table.col_count,
             "header_rows": table.header_rows,
             "headers": source.header_labels(),
+            "context_before": source.context_before[-4:],
+            "context_after": source.context_after[:2],
             "parser_warnings": table.parser_warnings,
             "compact_json": table.compact_json,
         },
@@ -336,7 +392,9 @@ def _parse_response(
     table_title: str | None,
 ) -> tuple[VlmTableExtraction, StructuredRecovery]:
     content = response["choices"][0]["message"]["content"]
-    data = json.loads(content)
+    data = parse_json_object(content)
+    if data is None:
+        raise ValueError("ответ VLM не содержит корректный JSON-объект")
     if isinstance(data, dict):
         data.setdefault("table_role", role)
         if table_title:
@@ -384,6 +442,24 @@ def _compact_json_from_vlm(
             "items": [_specification_item_payload(item) for item in extraction.items],
             "totals": [{"raw_text": total} for total in extraction.totals],
         }
+    if role == "additional_characteristics_justification":
+        return {
+            "additional_characteristics_justifications": [
+                {
+                    "scope_text": item.scope_text,
+                    "characteristic_names": item.characteristic_names,
+                    "justification_text": item.justification_text,
+                    "evidence_text": item.evidence_text,
+                    "parser_warnings": item.warnings,
+                }
+                for item in extraction.justifications
+                if clean_text(item.justification_text) or clean_text(item.evidence_text)
+            ],
+            "justification_extraction": {
+                "status": "complete",
+                "warnings": extraction.warnings,
+            },
+        }
     if role == "attachments":
         return {
             "attachments": [
@@ -404,6 +480,11 @@ def _empty_result_warning(
         return (
             f"{file_name}, table {table_index}: спецификация распознана как пустая "
             "или шаблонная; заполненные позиции спецификации не найдены."
+        )
+    if extraction.table_role == "additional_characteristics_justification":
+        return (
+            f"{file_name}, table {table_index}: таблица обоснований найдена, "
+            "но явные обоснования из неё не извлечены."
         )
     return f"{file_name}, table {table_index}: VLM не вернула полезные структурированные строки."
 
@@ -519,6 +600,8 @@ def _table_type_from_role(
         return "nmck_calculation_table"
     if role == "contract_specification":
         return "contract_specification_table"
+    if role == "additional_characteristics_justification":
+        return "additional_characteristics_justification_table"
     if role == "attachments":
         return "contract_attachments_table" if document_type == DocumentType.CONTRACT else "request_attachments_table"
     return "generic_table"
@@ -535,9 +618,29 @@ def _has_useful_result(
         return bool(compact_json.get("stages"))
     if role == "nmck_calculation":
         return bool(compact_json.get("items"))
+    if role == "additional_characteristics_justification":
+        return bool(compact_json.get("additional_characteristics_justifications"))
     if role == "attachments":
         return bool(compact_json.get("attachments"))
     return bool(compact_json.get("rows"))
+
+
+def _unextracted_justification_table(table: ParsedTable) -> ParsedTable:
+    result = table.model_copy(deep=True)
+    result.table_type = "additional_characteristics_justification_table"
+    result.compact_json = {
+        **result.compact_json,
+        "additional_characteristics_justifications": [],
+        "justification_extraction": {
+            "status": "contents_not_extracted",
+            "warnings": ["contents_not_extracted"],
+        },
+    }
+    result.parser_warnings = list(dict.fromkeys([
+        *result.parser_warnings,
+        "contents_not_extracted",
+    ]))
+    return result
 
 
 def _write_json(path: Path, value: Any) -> None:

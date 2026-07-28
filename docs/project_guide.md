@@ -144,10 +144,14 @@ Independent typed extraction pipeline:
 
 Commercial-offer VLM lab:
 
-- `python -m summary_model.commercial_offer_lab.run --input <offer_1.pdf> <offer_2.pdf> <offer_3.pdf> --model <model>`
+- `python -m summary_model.commercial_offer_lab.run --input <offer_1.pdf> <offer_2.pdf> <offer_3.pdf> --model <vlm_model>`
 - Uses the production visual VLM path for every PDF and writes per-model
   `commercial_offers.json`, `checks.json`, `report.txt`, and `run.json` under
   `runtime/commercial_offer_lab/<model>/` by default.
+- To exercise the same commercial-offer matcher and ONMCK comparison as the full
+  pipeline, add `--package <extraction_result.json> --matcher-model <text_model>`.
+  The lab then writes `matcher_payload.json`, raw/normalized matcher responses,
+  accepted decisions, metrics, and the rendered commercial-offer report.
 - Text structured extraction uses `OPENAI_MODEL` (`gpt-5-mini` by default).
   Visual document/table extraction uses the separate `OPENAI_VLM_MODEL`
   (`gpt-5.4-mini` by default). Lab `--model` remains an explicit per-run
@@ -228,6 +232,16 @@ OOZ/contract tables cannot be replaced by empty or conflicting LLM values. The
 LLM fills fields that deterministic parsing did not find, primarily prose facts
 such as delivery terms, addresses, warranties, and contract clauses.
 
+ONMCK calculation tables, items, price sources, supplier prices and stages are
+not sent to the general document-level LLM after deterministic/VLM parsing.
+That pass may fill only missing prose/scalar fields; merge always restores the
+authoritative parsed calculation data.
+
+Contract SMP/SONKO subcontracting is selected from a complete numbered clause,
+without relying on a fixed clause number. If the LLM fills a previously missing
+raw clause but omits its normalized percentage, postprocessing extracts an
+explicit form such as `90 (девяноста) процентов` locally before checks run.
+
 The complete deterministic contract responsibility section is authoritative.
 The general document-level LLM neither rewrites that section nor extracts
 penalty/peni clauses. A dedicated penalty LLM receives the complete section,
@@ -264,6 +278,40 @@ Commercial-offer minimum-price checks never declare a selected minimum wrong
 from an incomplete set of matched offers. If one offer row cannot be mapped to
 the ONMCK position, the row remains manual review until the mapping is
 unambiguous.
+
+Unmatched commercial-offer rows may use one package-level text-only fallback
+with `OPENAI_FAST_MODEL` (default `gemini-3.1-flash-lite`). The call receives
+only compact ONMCK rows and already extracted offer positions. It cannot revise
+deterministic matches and cannot confirm a match from price alone. Ambiguous,
+invalid, or unavailable model output leaves the row at `manual_review`. The
+matcher locally accepts a fenced JSON array and known field aliases only when
+the source and offer row can be recovered unambiguously; checks still receive a
+strict validated response.
+
+Standalone OOZ tables that explicitly justify additional characteristics have the dedicated
+VLM role `additional_characteristics_justification`. A strong title/context
+signal or the column pair `дополнительная информация/характеристика` and
+`обоснование` sends the complete physical table as one long PNG to the normal
+VLM table path, independently of the regular complex-table limit. Weak words
+such as `необходимость` or `совместимость` alone do not select a table. Failed
+VLM extraction preserves a table-candidate record with a warning rather than
+discarding the source.
+
+The standalone OOZ stores justification records in
+`purchase_description.additional_characteristics_justifications` and is the
+only source used by the KTRU check. Contract fields remain readable for schema
+compatibility, but contract justification tables are not sent to this VLM role
+and are not compared with the OOZ. Checks do not judge legal persuasiveness;
+they verify explicit presence in the OOZ. Complete rows and decision cards stay
+in `checks.json`; the public report shows one compact row per item/KTRU.
+
+PP No. 1875 plan-field resolution is shared by the early plan check and the
+KTRU additional-characteristic check. A special position (25, 26 or 32 of
+appendix 1; 191-361 of appendix 2) forbids additional characteristics only when
+the corresponding regime is confirmed in plan field 17.1 or 17.2. Missing or
+ambiguous plan evidence is `manual_review`. Procurement from a single supplier
+is retained as evidence but never automatically permits or forbids additional
+characteristics.
 
 Provider-specific fact wrappers such as `{raw_value, normalized_value,
 confidence, evidence}` and a one-element list around a scalar fact are unwrapped

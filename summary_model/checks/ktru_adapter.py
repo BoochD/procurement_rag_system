@@ -5,7 +5,15 @@ from pathlib import Path
 from typing import Any
 
 from services.procurement_reference_registry import ProcurementReferenceRegistry
+from summary_model.checks.additional_characteristics import (
+    build_assessments,
+    first_justification,
+    justification_records,
+    justification_state,
+    result_status,
+)
 from summary_model.checks.models import CheckResult
+from summary_model.checks.national_regime import resolve_plan_national_regime
 from summary_model.checks.normalization import normalize_code, normalize_text
 from summary_model.extraction_models import ProcurementPackageExtraction, PurchaseItem
 
@@ -69,6 +77,8 @@ def run_ktru_characteristic_checks(
 
     method_label = _procurement_method_label(package)
     method_kind = _resolve_procurement_method(method_label)
+    ooz_justifications = justification_records(package.purchase_description)
+    ooz_justification_state = justification_state(ooz_justifications)
     legal_cache: dict[str, dict[str, dict[str, Any]]] = {}
     common_cache: dict[str, dict[str, Any] | None] = {}
     item_names_by_ktru: dict[str, list[str]] = {}
@@ -104,6 +114,7 @@ def run_ktru_characteristic_checks(
         )
         extra_allowed = _can_add_extra_characteristics(
             registry=registry,
+            schedule=package.schedule_application,
             common_info=common_info,
             item_okpd2_code=rule_okpd2_code,
             item_okpd2_source=rule_okpd2_source,
@@ -140,6 +151,7 @@ def run_ktru_characteristic_checks(
                             else "passed"
                         ),
                         "rule_reason": extra_allowed["reason"],
+                        "plan_regime": extra_allowed.get("plan_regime"),
                     }
                 )
                 if extra_allowed["can_add_extra_characteristics"] is False:
@@ -199,32 +211,12 @@ def run_ktru_characteristic_checks(
         characteristic_status = "failed"
         characteristic_message = "Найдены ошибки в значениях или обязательных характеристиках КТРУ."
 
-    additional_status = "passed"
-    additional_message = "Дополнительные характеристики КТРУ допустимы или не обнаружены."
-    justification_text = (
-        package.purchase_description.additional_characteristics_justification_text
-        if package.purchase_description
-        else None
+    assessments = build_assessments(
+        additional_rows,
+        ooz_state=ooz_justification_state,
     )
-    if forbidden_extra:
-        additional_status = "failed"
-        additional_message = (
-            "Найдены дополнительные характеристики, запрещённые текущим правилом. "
-            + (
-                "Обоснование в ООЗ найдено, но само по себе не снимает установленный запрет."
-                if justification_text
-                else "Обоснование включения в ООЗ не найдено."
-            )
-        )
-    elif unavailable:
-        additional_status = "manual_review"
-        additional_message = "Карточки КТРУ недоступны, проверка дополнительных характеристик неполная."
-    elif extra_characteristics and any("не удалось" in reason.casefold() for reason in extra_reasons):
-        additional_status = "manual_review"
-        additional_message = "Дополнительные характеристики найдены, но правило допустимости определено не полностью."
-    elif extra_characteristics and not justification_text:
-        additional_status = "warning"
-        additional_message = "Дополнительные характеристики допустимы, но обоснование включения не найдено."
+    additional_status, additional_message = result_status(assessments, unavailable)
+    justification_text = first_justification(ooz_justifications)
 
     return [
         _result(
@@ -258,9 +250,15 @@ def run_ktru_characteristic_checks(
             {
                 "extra_characteristics": extra_characteristics,
                 "additional_rows": additional_rows,
+                "assessments": assessments,
                 "forbidden_extra": forbidden_extra,
                 "reasons": extra_reasons,
                 "justification_text": justification_text,
+                "ooz_justification_state": ooz_justification_state,
+                "procurement_method": {
+                    "kind": method_kind,
+                    "evidence": method_label,
+                },
                 "summary_lines": [
                     f"дополнительных характеристик: {len(extra_characteristics)}",
                     *(
@@ -643,6 +641,7 @@ def _purchase_name_tokens(value: str | None) -> set[str]:
 def _can_add_extra_characteristics(
     *,
     registry: Any,
+    schedule: Any | None,
     common_info: dict[str, Any] | None,
     item_okpd2_code: str | None,
     item_okpd2_source: str | None,
@@ -651,26 +650,13 @@ def _can_add_extra_characteristics(
     method_label: str,
     has_ktru_characteristics: bool,
 ) -> dict[str, Any]:
-    if method_kind == "part_12_article_93":
-        return {
-            "can_add_extra_characteristics": False,
-            "reason": "Для закупки по ч. 12 ст. 93 дополнительные характеристики не допускаются.",
-            "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
-            "okpd2_source": item_okpd2_source or "префикс КТРУ",
-        }
-    if method_kind == "single_supplier":
-        return {
-            "can_add_extra_characteristics": True,
-            "reason": "Для закупки у единственного поставщика дополнительные характеристики допустимы.",
-            "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
-            "okpd2_source": item_okpd2_source or "префикс КТРУ",
-        }
     if not has_ktru_characteristics:
         return {
             "can_add_extra_characteristics": True,
             "reason": "В карточке КТРУ отсутствуют характеристики; дополнительные характеристики допустимы.",
             "okpd2_code": item_okpd2_code or _okpd2_from_ktru(ktru_code),
             "okpd2_source": item_okpd2_source or "префикс КТРУ",
+            "plan_regime": None,
         }
 
     official_candidates = _official_okpd_candidates(common_info)
@@ -687,6 +673,7 @@ def _can_add_extra_characteristics(
             ),
             "okpd2_code": None,
             "okpd2_source": None,
+            "plan_regime": None,
         }
     
     code_diff_note = ""
@@ -703,9 +690,14 @@ def _can_add_extra_characteristics(
             "официальный ОКПД2 карточки не извлечён, использован код позиции."
         )
 
-    try:
-        okpd_result = registry.check_okpd2(primary_okpd)
-    except Exception:
+    resolution = resolve_plan_national_regime(
+        schedule,
+        registry,
+        codes=[primary_okpd],
+        aliases_by_code={primary_okpd: [item_okpd2_code] if item_okpd2_code else []},
+    )
+    plan_regime = resolution["rows"][0] if resolution.get("rows") else None
+    if resolution.get("errors") or not plan_regime:
         return {
             "can_add_extra_characteristics": None,
             "reason": (
@@ -714,8 +706,20 @@ def _can_add_extra_characteristics(
             ),
             "okpd2_code": primary_okpd,
             "okpd2_source": okpd2_source,
+            "plan_regime": plan_regime,
         }
-    if not getattr(okpd_result, "found", False):
+    if plan_regime.get("status") == "registry_unavailable":
+        return {
+            "can_add_extra_characteristics": None,
+            "reason": (
+                f"Локальный реестр ПП №1875 недоступен для ОКПД2 {primary_okpd}; "
+                "требуется ручная проверка."
+            ),
+            "okpd2_code": primary_okpd,
+            "okpd2_source": okpd2_source,
+            "plan_regime": plan_regime,
+        }
+    if plan_regime.get("status") == "not_listed":
         return {
             "can_add_extra_characteristics": True,
             "reason": (
@@ -724,19 +728,34 @@ def _can_add_extra_characteristics(
             ),
             "okpd2_code": primary_okpd,
             "okpd2_source": okpd2_source,
+            "plan_regime": plan_regime,
         }
-    if _is_special_pp1875_position(okpd_result):
-        registry_note = _pp1875_match_note(okpd_result)
+    if _is_special_pp1875_position(plan_regime):
+        registry_note = _pp1875_match_note(plan_regime)
+        if plan_regime.get("status") != "confirmed":
+            return {
+                "can_add_extra_characteristics": None,
+                "reason": (
+                    f"ОКПД2 {primary_okpd} относится к специальной позиции ПП №1875, "
+                    f"но режим не подтверждён в поле ПГ {plan_regime.get('field_code') or '17.1/17.2'}. "
+                    f"{registry_note}{code_diff_note}"
+                ),
+                "okpd2_code": primary_okpd,
+                "okpd2_source": okpd2_source,
+                "plan_regime": plan_regime,
+            }
         return {
             "can_add_extra_characteristics": False,
             "reason": (
-                f"По коду ОКПД2 {primary_okpd} действует запрет на дополнительные характеристики. "
+                f"По коду ОКПД2 {primary_okpd} специальный режим подтверждён в ПГ; "
+                "дополнительные характеристики запрещены. "
                 f"{registry_note}{code_diff_note}"
             ),
             "okpd2_code": primary_okpd,
             "okpd2_source": okpd2_source,
+            "plan_regime": plan_regime,
         }
-    registry_note = _pp1875_match_note(okpd_result)
+    registry_note = _pp1875_match_note(plan_regime)
     return {
         "can_add_extra_characteristics": True,
         "reason": (
@@ -745,6 +764,7 @@ def _can_add_extra_characteristics(
         ),
         "okpd2_code": primary_okpd,
         "okpd2_source": okpd2_source,
+        "plan_regime": plan_regime,
     }
 
 
@@ -777,11 +797,11 @@ def _official_okpd_candidates(common_info: dict[str, Any] | None) -> list[str]:
 
 
 def _pp1875_match_note(okpd_result: Any) -> str:
-    table_id = getattr(okpd_result, "table_id", None)
+    table_id = _result_value(okpd_result, "table_id")
     appendix = "Приложение №1" if table_id == "table_01" else "Приложение №2" if table_id == "table_02" else "приложение не определено"
-    position = getattr(okpd_result, "position", None) or "не определена"
-    matched_code = getattr(okpd_result, "matched_okpd2", None) or "не определён"
-    reference_name = getattr(okpd_result, "reference_name", None) or "наименование не найдено"
+    position = _result_value(okpd_result, "position") or "не определена"
+    matched_code = _result_value(okpd_result, "matched_okpd2") or "не определён"
+    reference_name = _result_value(okpd_result, "reference_name") or "наименование не найдено"
     return (
         f"Основание: {appendix} к ПП №1875, позиция {position}, код перечня {matched_code}, "
         f"«{reference_name}»."
@@ -847,10 +867,11 @@ def _split_value(value: Any) -> list[str]:
 
 
 def _is_special_pp1875_position(okpd_result: Any) -> bool:
-    table_id = getattr(okpd_result, "table_id", None)
-    position = getattr(okpd_result, "position", None)
-    if position is None and getattr(okpd_result, "row", None):
-        position = okpd_result.row.get("position")
+    table_id = _result_value(okpd_result, "table_id")
+    position = _result_value(okpd_result, "position")
+    row = _result_value(okpd_result, "row")
+    if position is None and isinstance(row, dict):
+        position = row.get("position")
     match = re.search(r"\d+", str(position or ""))
     if not match:
         return False
@@ -860,6 +881,12 @@ def _is_special_pp1875_position(okpd_result: Any) -> bool:
     if table_id == "table_02":
         return 191 <= position_number <= 361
     return False
+
+
+def _result_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
 
 
 def _number(value: Any) -> float | None:

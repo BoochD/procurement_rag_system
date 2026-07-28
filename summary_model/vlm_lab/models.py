@@ -12,6 +12,7 @@ VlmTableRole = Literal[
     "contract_stages",
     "nmck_calculation",
     "contract_specification",
+    "additional_characteristics_justification",
     "attachments",
     "generic",
     "unknown",
@@ -107,6 +108,19 @@ class VlmNmckItem(BaseModel):
         return _stringify_loose_values(value)
 
 
+class VlmAdditionalJustification(BaseModel):
+    scope_text: str | None = None
+    characteristic_names: list[str] = Field(default_factory=list)
+    justification_text: str | None = None
+    evidence_text: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("characteristic_names", "warnings", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: Any) -> list[str]:
+        return _stringify_loose_values(value)
+
+
 class VlmTableExtraction(BaseModel):
     schema_version: str = "vlm-table-extraction-0.1.0"
     table_role: VlmTableRole
@@ -115,6 +129,7 @@ class VlmTableExtraction(BaseModel):
     items: list[VlmPurchaseItem] = Field(default_factory=list)
     stages: list[VlmStage] = Field(default_factory=list)
     nmck_items: list[VlmNmckItem] = Field(default_factory=list)
+    justifications: list[VlmAdditionalJustification] = Field(default_factory=list)
     totals: list[str] = Field(default_factory=list)
     attachments: list[str] = Field(default_factory=list)
     unparsed_rows: list[str] = Field(default_factory=list)

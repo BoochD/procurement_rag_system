@@ -13,6 +13,7 @@ ParsedTableType = Literal[
     "ooz_items_table",
     "contract_specification_table",
     "contract_stages_table",
+    "additional_characteristics_justification_table",
     "contract_attachments_table",
     "signature_table",
     "ignored_table",

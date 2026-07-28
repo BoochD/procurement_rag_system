@@ -9,6 +9,7 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.hydraai.ru/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 OPENAI_NANO_MODEL = os.getenv("OPENAI_NANO_MODEL", "gpt-5-mini")
 OPENAI_VLM_MODEL = os.getenv("OPENAI_VLM_MODEL", "gpt-5.4-mini")
+OPENAI_FAST_MODEL = os.getenv("OPENAI_FAST_MODEL", "gemini-3.1-flash-lite")
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from summary_model.domain.models import DocumentType, InputDocument
+from summary_model.domain.models import DocumentIR, DocumentType, InputDocument
 from summary_model import web_service
 from summary_model.extraction.llm_document_extractor import (
     SCHEMA_BY_DOCUMENT_TYPE,
@@ -21,23 +21,27 @@ from summary_model.extraction_pipeline import (
     extract_package,
 )
 from summary_model.extraction_models import (
+    AdditionalCharacteristicsJustification,
     ContractDraftSchema,
     DocumentEnvelope,
     ExplanatoryNoteSchema,
     MoneyValue,
+    NmckItem,
     NmckJustificationSchema,
+    PriceSource,
     PenaltyClause,
     ProcurementStage,
     ProcurementPackageExtraction,
     PurchaseDescriptionSchema,
     PurchaseItem,
+    PurchaseItemCharacteristic,
     PurchaseRequestSchema,
     RawField,
     ScheduleApplicationSchema,
     SecurityValue,
 )
 from summary_model.ingestion import read_docx
-from summary_model.tables import extract_tables
+from summary_model.tables import ParsedTable, extract_tables
 
 from tests.summary_model_tests.test_extraction_layer import _save_plan
 
@@ -140,6 +144,41 @@ def test_llm_payload_contains_text_tables_and_known_extracted(tmp_path):
     assert all(table["table_type"] not in {"signature_table", "ignored_table"} for table in payload["tables"])
 
 
+def test_ooz_llm_payload_does_not_repeat_characteristics_or_justification_table():
+    schema = PurchaseDescriptionSchema(
+        items=[PurchaseItem(
+            name="Сервер",
+            characteristics=[PurchaseItemCharacteristic(name="RAID", value="0, 1")],
+        )],
+        additional_characteristics_justifications=[
+            AdditionalCharacteristicsJustification(
+                justification_text="Обоснование применения дополнительных характеристик",
+                extraction_method="vlm_table",
+            )
+        ],
+    )
+    table = ParsedTable(
+        table_id="table-2",
+        block_id="block-2",
+        table_index=2,
+        table_type="additional_characteristics_justification_table",
+        row_count=2,
+        col_count=2,
+        compact_json={"justifications": [{"justification_text": "текст"}]},
+    )
+
+    payload = build_document_llm_payload(
+        ir=DocumentIR(document_id="ooz", file_name="ooz.docx", media_type="docx"),
+        document_type=DocumentType.OOZ,
+        tables=[table],
+        deterministic_schema=schema,
+    )
+
+    assert payload["tables"] == []
+    assert "characteristics" not in payload["known_extracted"]["items"][0]
+    assert "additional_characteristics_justifications" not in payload["known_extracted"]
+
+
 def test_llm_result_restores_lost_deterministic_fields(tmp_path):
     path = tmp_path / "plan.docx"
     _save_plan(path)
@@ -201,6 +240,7 @@ def test_async_llm_result_restores_lost_deterministic_fields():
 def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
     deterministic = NmckJustificationSchema(
         total_amount=MoneyValue(raw="106 312 006,00", amount=Decimal("106312006.00")),
+        price_sources=[PriceSource(source_id="supplier_1", raw_header="Поставщик 1")],
         items=[],
         stages=[
             ProcurementStage(
@@ -215,6 +255,7 @@ def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
         def extract(self, schema, system_prompt, payload):
             return schema(
                 total_amount=None,
+                price_sources=[PriceSource(source_id="wrong", raw_header="Повреждено")],
                 stages=[
                     ProcurementStage(
                         stage_number="1",
@@ -233,7 +274,64 @@ def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
 
     assert error is None
     assert result.total_amount.amount == Decimal("106312006.00")
+    assert result.price_sources == deterministic.price_sources
     assert result.stages[0].price.amount == Decimal("40000.00")
+
+
+def test_onmck_llm_payload_excludes_parsed_calculation_tables():
+    deterministic = NmckJustificationSchema(
+        price_sources=[],
+        items=[NmckItem(name="Сервер")],
+        stages=[ProcurementStage(stage_number="1")],
+    )
+    table = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_calculation_table",
+        row_count=2,
+        col_count=3,
+        compact_json={"items": [{"name": "Сервер"}]},
+    )
+
+    payload = build_document_llm_payload(
+        ir=DocumentIR(document_id="onmck", file_name="onmck.docx", media_type="docx"),
+        document_type=DocumentType.ONMCK,
+        tables=[table],
+        deterministic_schema=deterministic,
+    )
+
+    assert payload["tables"] == []
+    assert "items" not in payload["known_extracted"]
+    assert "price_sources" not in payload["known_extracted"]
+    assert "stages" not in payload["known_extracted"]
+
+
+def test_contract_llm_raw_clause_fills_missing_smp_percent_after_merge():
+    deterministic = ContractDraftSchema()
+
+    class ContractLLMClient:
+        def extract(self, schema, system_prompt, payload):
+            clause = (
+                "8.3. Привлечь соисполнителей из числа субъектов малого предпринимательства "
+                "в объеме 90 (девяноста) процентов от цены Контракта."
+            )
+            return schema(
+                subcontract_smp_sonko_required_raw=clause,
+                subcontract_smp_sonko_required=True,
+                subcontract_smp_sonko_percent_raw=clause,
+                subcontract_smp_sonko_percent=None,
+            ), None
+
+    result, error = extract_document_schema_with_llm(
+        payload={"known_extracted": {}},
+        document_type=DocumentType.CONTRACT,
+        deterministic_schema=deterministic,
+        llm_client=ContractLLMClient(),
+    )
+
+    assert error is None
+    assert result.subcontract_smp_sonko_percent == Decimal("90")
 
 
 def test_contract_responsibility_section_is_not_replaced_by_llm_placeholder():

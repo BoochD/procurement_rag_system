@@ -21,7 +21,11 @@ STRUCTURED_TABLE_TYPES = {
     "contract_attachments_table",
 }
 
-IGNORED_TABLE_TYPES = {"signature_table", "ignored_table"}
+IGNORED_TABLE_TYPES = {
+    "signature_table",
+    "ignored_table",
+    "additional_characteristics_justification_table",
+}
 
 
 def build_document_llm_payload(
@@ -56,7 +60,12 @@ def build_document_llm_payload(
         "tables": [
             _table_payload(table, known_extracted)
             for table in tables
-            if _include_table(table, known_extracted)
+            if _include_table(
+                table,
+                known_extracted,
+                document_type=document_type,
+                known_extracted_full=known_extracted_full,
+            )
         ],
         "known_extracted": known_extracted,
     }
@@ -65,8 +74,17 @@ def build_document_llm_payload(
 def _include_table(
     table: ParsedTable,
     known_extracted: dict[str, Any] | None,
+    *,
+    document_type: DocumentType,
+    known_extracted_full: dict[str, Any] | None,
 ) -> bool:
     if table.table_type in IGNORED_TABLE_TYPES:
+        return False
+    if (
+        document_type == DocumentType.ONMCK
+        and table.table_type in {"nmck_calculation_table", "nmck_staged_calculation_table"}
+        and _table_is_covered_by_known_extracted(table, known_extracted_full or {})
+    ):
         return False
     if table.table_type not in STRUCTURED_TABLE_TYPES:
         return bool(table.parser_warnings)
@@ -181,11 +199,19 @@ def _known_extracted_for_llm(
 ) -> dict[str, Any] | None:
     if value is None:
         return None
-    if document_type != DocumentType.CONTRACT:
+    if document_type == DocumentType.ONMCK:
+        compact = dict(value)
+        for field_name in ("items", "price_sources", "stages"):
+            compact.pop(field_name, None)
+        return compact
+    if document_type not in {DocumentType.OOZ, DocumentType.CONTRACT}:
         return value
     compact = dict(value)
-    if "embedded_purchase_description" in compact:
+    if document_type == DocumentType.CONTRACT:
         compact.pop("embedded_purchase_description", None)
+    else:
+        compact.pop("additional_characteristics_justifications", None)
+        compact.pop("additional_characteristics_justification_text", None)
     for field_name in ("items", "specification_items"):
         compact[field_name] = [
             _compact_item_for_llm(item)

@@ -56,13 +56,17 @@ Use parsed attachment tables when available.
 """.strip(),
     DocumentType.ONMCK: """
 Build NmckJustificationSchema.
-Preserve parsed price_sources, items, supplier_prices, selected minimum price
-and calculated fields. Use paragraph text only for method, subject, total amount
-text, variation coefficient and stage descriptions when missing.
+The calculation tables are already owned by the deterministic/VLM parser and
+are intentionally absent from this payload. Return items=[], price_sources=[]
+and stages=[]; do not recreate supplier prices, selected minimum prices or
+calculated rows from paragraph text. Use paragraph text only for missing scalar
+fields such as method, subject, total amount text and variation coefficient.
 """.strip(),
     DocumentType.OOZ: """
 Build PurchaseDescriptionSchema.
-Preserve parsed purchase items and characteristics. Use paragraph text for
+Purchase items and characteristics are owned by the deterministic/VLM table
+parser and merged after this call. Return items=[]; do not transcribe or wrap
+characteristics again. Use paragraph text for
 purchase subject, delivery place, delivery term and warranty requirements.
 For purchase_subject, prefer the exact name inside the section headed
 "Описание объекта закупки". It may follow labels such as "Наименование
@@ -72,8 +76,8 @@ present in known_extracted.
 Preserve okpd2_codes/ktru_codes and subject_codes from known_extracted.
 Preserve parsed stages when an OOZ stage table is present.
 Do not invent missing KTRU/OKPD2 codes.
-If the text contains justification for additional characteristics not present in
-KTRU, copy the exact justification into additional_characteristics_justification_text.
+Do not create or rewrite additional_characteristics_justifications. Table VLM
+and deterministic extraction own these fields. Preserve known_extracted values.
 If a trademark is specified with a reason, copy the reason into
 trademark_justification_text. If the procurement includes transfer of exclusive
 or non-exclusive rights, describe it in rights_transfer_text and list explicitly

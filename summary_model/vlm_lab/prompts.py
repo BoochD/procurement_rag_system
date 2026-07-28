@@ -29,6 +29,16 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
         "Extract specification items with name, unit, quantity, unit price, "
         "total price, and totals. Ignore empty template rows."
     ),
+    "additional_characteristics_justification": (
+        "Extract only explicit justifications from the selected justification table or block. "
+        "For this role, explanatory reasons belong in justifications, not item notes. "
+        "Put the visible table title or application area into scope_text. Create one "
+        "justification for each visible row or bullet, preserve the full reason in "
+        "justification_text, linked visible characteristic names in characteristic_names, "
+        "and a short exact quote in evidence_text. Exclude normative preambles, PP 145 "
+        "references and text outside the selected justification block. Do not evaluate "
+        "whether the reason is legally sufficient."
+    ),
     "attachments": "Extract attachment numbers and titles.",
     "generic": "Extract rows only if a clear procurement structure is visible.",
     "unknown": "Describe what the table contains and keep uncertain rows unparsed.",
@@ -51,6 +61,7 @@ Rules:
   contract_stages -> stages;
   nmck_calculation -> nmck_items and totals;
   contract_specification -> items and totals;
+  additional_characteristics_justification -> justifications;
   attachments -> attachments;
   generic/unknown -> unparsed_rows and warnings unless a clear structure is visible.
 - Do not invent values that are not visible in the image or textual context.
@@ -58,8 +69,10 @@ Rules:
 - Preserve OKPD2 and KTRU codes exactly.
 - Preserve quantities, units, prices, dates, and stage numbers as raw text.
 - If a row continues the previous item, attach it to the previous item instead of creating a fake item.
-- If a paragraph inside a table explains additional characteristics, store it as notes/warnings, not as a product item.
-- Formal explanatory rows are not items: phrases like "предоставляемые лицензии необходимы",
+- If the target role is additional_characteristics_justification, store explicit
+  reasons in justifications. For other roles, explanatory text is not a product item.
+- Except for the additional_characteristics_justification role, formal explanatory rows are not items:
+  phrases like "предоставляемые лицензии необходимы",
   "расширение функциональности", "полностью совместимо", "на основании информационного письма",
   "обоснование применения дополнительных характеристик", and references to legal rules should go
   into item notes or table warnings only.

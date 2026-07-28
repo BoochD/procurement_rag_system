@@ -367,7 +367,7 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
             rendered = _render_ktru_characteristic_rows(characteristics)
             lines.extend(rendered if rendered else _render_result(characteristics))
     additional = by_id.get("manual.ktru.additional")
-    if additional is not None and additional.status != "passed":
+    if additional is not None:
         lines.append("")
         rendered = _render_ktru_additional_rows(additional)
         if rendered:
@@ -839,51 +839,103 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
 
 def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
     details = result.details or {}
-    rows = details.get("additional_rows")
-    if not isinstance(rows, list) or not rows:
+    assessments = details.get("assessments")
+    if not isinstance(assessments, list) or not assessments:
         return []
     lines = [f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. {_human_text(result.report_text)}"]
-    justification = details.get("justification_text")
-    lines.append(
-        f"  - Обоснование включения дополнительных характеристик: "
-        f"{justification if justification else 'не найдено'}"
-    )
-    grouped: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
-    rule_reasons: dict[tuple[str, str, str, str], str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        key = (
-            str(row.get("item_name") or "позиция"),
-            str(row.get("ktru_code") or "не найден"),
-            str(row.get("rule_okpd2_code") or row.get("okpd2_code") or "не найден"),
-            str(row.get("characteristic_name") or "характеристика"),
-            str(row.get("status") or "manual_review"),
-        )
-        current = grouped.setdefault(key, {"values": [], "reason": row.get("rule_reason"), "source": row.get("rule_okpd2_source")})
-        if row.get("value") and row["value"] not in current["values"]:
-            current["values"].append(row["value"])
-        reason_key = (key[0], key[1], key[2], key[4])
-        if row.get("rule_reason"):
-            rule_reasons.setdefault(reason_key, str(row["rule_reason"]))
-    lines.extend([
-        "", "| Позиция / КТРУ | ОКПД2 для правила | Дополнительная характеристика | Значение ООЗ | Статус |",
-        "| :--- | :--- | :--- | :--- | :---: |",
-    ])
-    for (item_name, ktru_code, okpd2_code, char_name, status_key), item in grouped.items():
-        source = item.get("source")
-        code_text = f"{okpd2_code}" + (f" ({source})" if source else "")
-        lines.append(
-            f"| {_table_cell(item_name)} / {ktru_code} | {_table_cell(code_text)} | "
-            f"{_table_cell(char_name)} | {_table_cell('; '.join(str(value) for value in item['values']))} | "
-            f"{STATUS_LABELS.get(status_key, status_key)} |"
-        )
-    if rule_reasons:
-        lines.extend(["", "<b>Основания применённых правил:</b>"])
-        for (item_name, ktru_code, okpd2_code, _status), reason in rule_reasons.items():
-            lines.append(
-                f"- {item_name}; КТРУ {ktru_code}; ОКПД2 {okpd2_code}: {_human_text(reason)}"
+    ooz_state = details.get("ooz_justification_state") if isinstance(details.get("ooz_justification_state"), dict) else {}
+    decision_labels = {
+        "allowed": "ОК",
+        "restricted": "ПРЕДУПРЕЖДЕНИЕ",
+        "missing_justification": "ОШИБКА",
+        "manual_review": "ТРЕБУЕТ ПРОВЕРКИ",
+    }
+
+    rows = details.get("additional_rows")
+    rows = rows if isinstance(rows, list) else []
+    indexed_assessments = [
+        (assessment, rows[index] if index < len(rows) and isinstance(rows[index], dict) else {})
+        for index, assessment in enumerate(assessments)
+        if isinstance(assessment, dict)
+    ]
+    detailed_assessments = [
+        pair for pair in indexed_assessments if pair[0].get("decision") != "restricted"
+    ]
+    restricted_assessments = [
+        assessment for assessment, _row in indexed_assessments
+        if assessment.get("decision") == "restricted"
+    ]
+
+    if detailed_assessments:
+        lines.extend([
+            "", "| Позиция / КТРУ | Дополнительная характеристика | Значение | Единица | Обоснование | Итог |",
+            "| :--- | :--- | :--- | :---: | :--- | :---: |",
+        ])
+        for assessment, row in detailed_assessments:
+            justification = assessment.get("justification") if isinstance(assessment.get("justification"), dict) else {}
+            source = justification.get("source")
+            justification_label = (
+                "найдено в ООЗ" if source == "ooz"
+                else "извлечено частично" if justification.get("status") == "partial"
+                else "не найдено"
             )
+            lines.append(
+                f"| {_table_cell(assessment.get('item') or 'позиция')} / "
+                f"{_table_cell(assessment.get('ktru_code') or 'не найден')} | "
+                f"{_table_cell(assessment.get('characteristic') or 'характеристика')} | "
+                f"{_table_cell(row.get('value') or 'не указано')} | "
+                f"{_table_cell(row.get('unit') or 'не указана')} | "
+                f"{_table_cell(justification_label)} | "
+                f"{decision_labels.get(str(assessment.get('decision')), 'ТРЕБУЕТ ПРОВЕРКИ')} |"
+            )
+    if restricted_assessments:
+        grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+        for assessment in restricted_assessments:
+            okpd_rule = assessment.get("okpd_rule") if isinstance(assessment.get("okpd_rule"), dict) else {}
+            plan_regime = assessment.get("plan_regime") if isinstance(assessment.get("plan_regime"), dict) else {}
+            justification = assessment.get("justification") if isinstance(assessment.get("justification"), dict) else {}
+            key = (
+                str(assessment.get("item") or "позиция"),
+                str(assessment.get("ktru_code") or "не найден"),
+                str(okpd_rule.get("code") or "не найден"),
+            )
+            current = grouped.setdefault(key, {
+                "count": 0,
+                "decision": assessment.get("decision"),
+                "field_code": plan_regime.get("field_code"),
+                "regime_status": plan_regime.get("status"),
+                "justification_status": justification.get("status"),
+                "justification_source": justification.get("source"),
+            })
+            current["count"] = int(current["count"]) + 1
+            if assessment.get("decision") == "restricted":
+                current["decision"] = "restricted"
+            elif assessment.get("decision") == "manual_review" and current["decision"] != "restricted":
+                current["decision"] = "manual_review"
+        lines.extend([
+            "", "| Позиция / КТРУ | ОКПД2 | Режим ПГ | Доп. характеристик | Обоснование | Итог |",
+            "| :--- | :--- | :--- | :---: | :--- | :---: |",
+        ])
+        for (item_name, ktru_code, okpd2_code), item in grouped.items():
+            regime = item.get("field_code") or "не требуется"
+            if item.get("regime_status"):
+                regime = f"{regime}: {item['regime_status']}"
+            source = item.get("justification_source")
+            justification_source = (
+                "найдено в ООЗ" if source == "ooz"
+                else "извлечено частично" if item.get("justification_status") == "partial"
+                else "не найдено"
+            )
+            lines.append(
+                f"| {_table_cell(item_name)} / {ktru_code} | {_table_cell(okpd2_code)} | "
+                f"{_table_cell(regime)} | {_table_cell(item['count'])} | "
+                f"{_table_cell(justification_source)} | "
+                f"{decision_labels.get(str(item['decision']), 'ТРЕБУЕТ ПРОВЕРКИ')} |"
+            )
+    quotes = [str(ooz_state["quote"])] if ooz_state.get("quote") else []
+    if quotes:
+        lines.append("")
+        lines.append(f"  - Краткая цитата обоснования: {_human_text(quotes[0][:240])}")
     return lines
 
 

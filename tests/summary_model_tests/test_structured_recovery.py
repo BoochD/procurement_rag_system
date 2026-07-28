@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction.structured_recovery import (
+    parse_json_object,
     raw_payload_from_message,
     recover_model,
 )
@@ -194,6 +195,35 @@ def test_fact_wrappers_and_single_fact_lists_are_recovered_without_data_loss():
     assert contract_recovery.lossy_warnings == []
     assert contract_recovery.value.delivery_place == "г. Новосибирск"
     assert contract_recovery.value.delivery_term.end_event == "2026-08-21"
+
+
+def test_multiple_term_facts_keep_first_structured_term():
+    recovery = recover_model(
+        ContractDraftSchema,
+        {
+            "delivery_term": [
+                {
+                    "raw_value": "с даты заключения по 21.08.2026",
+                    "normalized_value": {"raw": "с даты заключения по 21.08.2026"},
+                },
+                {
+                    "raw_value": "второй этап по 10.08.2026",
+                    "normalized_value": {"raw": "второй этап по 10.08.2026"},
+                },
+            ]
+        },
+    )
+
+    assert recovery.value.delivery_term.raw == "с даты заключения по 21.08.2026"
+    assert any("выбран первый" in warning for warning in recovery.lossy_warnings)
+
+
+def test_json_object_accepts_fence_and_closes_only_truncated_suffix():
+    assert parse_json_object('```json\n{"status":"ok"}\n```') == {"status": "ok"}
+    assert parse_json_object('{"items":[{"name":"Сервер"}') == {
+        "items": [{"name": "Сервер"}]
+    }
+    assert parse_json_object('{"items":[,]}') is None
 
 
 def test_onmck_fact_wrappers_do_not_drop_items_or_stage_dates():
