@@ -1523,9 +1523,56 @@ def _contract_warranty_text(text: str) -> str | None:
     return None
 
 
-def _purchase_description_warranty_text(text: str) -> str | None:
-    """Collect explicit OOZ warranty terms instead of the first warranty mention."""
+def _warranty_requirements_section(text: str) -> str | None:
+    """Return the complete numbered section about warranty obligations."""
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    heading_re = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+(.+)$")
+    for index, line in enumerate(lines):
+        match = heading_re.match(line)
+        heading_text = match.group(2) if match else line
+        lowered = heading_text.casefold()
+        if "гарантийн" not in lowered or "обязательств" not in lowered:
+            continue
+        if "обеспечен" in lowered:
+            continue
+        if len(heading_text) > 160 or _is_warranty_reference_only(heading_text):
+            continue
+
+        heading_level = len(match.group(1).rstrip(".").split(".")) if match else 1
+        section_lines = [line]
+        for next_line in lines[index + 1 :]:
+            next_heading = heading_re.match(next_line)
+            if next_heading:
+                next_level = len(next_heading.group(1).rstrip(".").split("."))
+                if next_level <= heading_level:
+                    break
+            section_lines.append(next_line)
+            if sum(len(value) + 1 for value in section_lines) >= 12000:
+                break
+        return "\n".join(section_lines)[:12000]
+    return None
+
+
+def _is_warranty_reference_only(text: str) -> bool:
+    lowered = clean_text(text).casefold()
+    refers_to_appendix = (
+        "указан" in lowered
+        and ("описани" in lowered or "приложени" in lowered)
+    )
+    has_explicit_term = bool(
+        re.search(r"\b\d+\s*(?:\([^)]*\)\s*)?(?:месяц|год|лет)", lowered)
+        or re.search(r"\bдо\s+\d{1,2}[./]\d{1,2}[./]\d{2,4}", lowered)
+    )
+    return refers_to_appendix and not has_explicit_term
+
+
+def _purchase_description_warranty_text(
+    text: str,
+    warranty_section: str | None = None,
+) -> str | None:
+    """Collect explicit OOZ warranty terms instead of the first warranty mention."""
+    source_text = warranty_section or text
+    lines = [clean_text(line) for line in source_text.splitlines() if clean_text(line)]
     start = next(
         (
             index
@@ -1546,13 +1593,15 @@ def _purchase_description_warranty_text(text: str) -> str | None:
             )
         ):
             continue
-        if not re.search(r"\d", line):
+        if _is_warranty_reference_only(line):
             continue
         candidates.append(line)
         if len(candidates) == 6:
             break
     if candidates:
         return "; ".join(candidates)[:3000]
+    if warranty_section is not None:
+        return None
     return _contract_warranty_text(text)
 
 
@@ -1763,6 +1812,7 @@ def _calculate_nmck_item(item: NmckItem) -> None:
 
 def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseDescriptionSchema:
     text = _document_text(ir)
+    warranty_section = _warranty_requirements_section(text)
     delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
     stages = _stages_from_tables(tables)
     subject_codes = _subject_codes_from_document_text(text, evidence="ooz_text:codes")
@@ -1789,9 +1839,10 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
         stages=stages,
         items=items,
         warranty_requirements_text=(
-            _purchase_description_warranty_text(text)
+            _purchase_description_warranty_text(text, warranty_section)
             or _line_after_marker(text, "гаранти")
         ),
+        warranty_section_text=warranty_section,
         additional_characteristics_justification_text=justification_text,
         additional_characteristics_justifications=justifications,
     )
@@ -1799,6 +1850,7 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
 
 def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftSchema:
     text = _document_text(ir)
+    embedded_warranty_section = _warranty_requirements_section(text)
     delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
     contract_execution_text = _line_value_after_marker(text, "срок исполнения контракта")
     contract_security_text = _contract_security_text(text)
@@ -1819,6 +1871,11 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         ktru_codes=sorted({item.ktru_code for item in embedded_items if item.ktru_code}),
         items=embedded_items,
         stages=stages,
+        warranty_requirements_text=_purchase_description_warranty_text(
+            text,
+            embedded_warranty_section,
+        ),
+        warranty_section_text=embedded_warranty_section,
         parser_warnings=["Embedded purchase description inferred from contract text."],
     )
     return ContractDraftSchema(
@@ -1853,6 +1910,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
             if embedded.purchase_subject
             or embedded.items
             or embedded.stages
+            or embedded.warranty_requirements_text
             else None
         ),
         items=[],

@@ -217,6 +217,8 @@ def _merge_with_deterministic_guard(
         _prefer_list(merged, deterministic_schema, "items")
         _prefer_stages(merged, deterministic_schema)
         _prefer_scalar(merged, deterministic_schema, "purchase_subject")
+        _prefer_scalar(merged, deterministic_schema, "warranty_requirements_text")
+        _prefer_scalar(merged, deterministic_schema, "warranty_section_text")
         _prefer_list(
             merged,
             deterministic_schema,
@@ -586,6 +588,8 @@ def _preserve_embedded_description(
         setattr(target, "embedded_purchase_description", source_embedded.model_copy(deep=True))
         return
     _prefer_scalar(target_embedded, source_embedded, "purchase_subject")
+    _prefer_scalar(target_embedded, source_embedded, "warranty_requirements_text")
+    _prefer_scalar(target_embedded, source_embedded, "warranty_section_text")
     _prefer_list(target_embedded, source_embedded, "items")
     _prefer_list(target_embedded, source_embedded, "stages")
     _prefer_list(

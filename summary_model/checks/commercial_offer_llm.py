@@ -11,6 +11,7 @@ from summary_model.checks.normalization import normalize_decimal, normalize_text
 from summary_model.checks.runner import (
     _match_offer_items,
     _match_offers_to_price_sources,
+    _nmck_supplier_source_ids,
     _offer_marker_support,
     _offer_names_support,
 )
@@ -238,9 +239,17 @@ def _build_payload(package: ProcurementPackageExtraction) -> dict[str, Any]:
     offers = list(package.commercial_offers or [])
     if onmck is None or not offers:
         return {"unmatched_rows": [], "offers": []}
-    offer_by_source, _warnings = _match_offers_to_price_sources(offers, onmck.price_sources)
+    offer_by_source, _warnings = _match_offers_to_price_sources(
+        offers,
+        onmck.price_sources,
+        required_source_ids=_nmck_supplier_source_ids(onmck.items),
+    )
     matches_by_source = {
-        source_id: _match_offer_items(onmck.items, offer.items)[0]
+        source_id: _match_offer_items(
+            onmck.items,
+            offer.items,
+            source_id=source_id,
+        )[0]
         for source_id, offer in offer_by_source.items()
     }
     unmatched_rows: list[dict[str, Any]] = []
@@ -308,7 +317,11 @@ def _validate_decisions(
     offers = list(package.commercial_offers or [])
     if onmck is None:
         return []
-    offer_by_source, _warnings = _match_offers_to_price_sources(offers, onmck.price_sources)
+    offer_by_source, _warnings = _match_offers_to_price_sources(
+        offers,
+        onmck.price_sources,
+        required_source_ids=_nmck_supplier_source_ids(onmck.items),
+    )
     requested = {
         (row["nmck_item_index"], str(row["source_id"]))
         for row in payload["unmatched_rows"]

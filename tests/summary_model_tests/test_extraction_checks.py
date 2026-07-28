@@ -145,7 +145,10 @@ def _base_package() -> ProcurementPackageExtraction:
             ],
             items=[nmck_item],
         ),
-        purchase_description=PurchaseDescriptionSchema(items=[item]),
+        purchase_description=PurchaseDescriptionSchema(
+            purchase_subject="Картридж",
+            items=[item],
+        ),
         contract_draft=ContractDraftSchema(
             price=MoneyValue(amount=Decimal("200")),
             funding_source="Источник финансирования: средства областного бюджета",
@@ -266,6 +269,8 @@ def test_trademarks_are_reported_without_affecting_check_statuses():
 
     assert checks["manual.ktru.trademarks"].status == "passed"
     assert "Товарные знаки и их обоснование" in text
+    assert text.index("6) Коммерческие предложения:") < text.index("Товарные знаки и их обоснование")
+    assert text.index("Товарные знаки и их обоснование") < text.index("7) Сравнение характеристик")
     assert "| Test Mark | найдено |" in text
 
 
@@ -689,6 +694,49 @@ def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
     assert any("100000 рублей" in line for line in results[0].details["summary_lines"])
 
 
+def test_penalty_result_is_passed_when_every_expected_finding_passed():
+    from summary_model.checks.penalty_llm import (
+        ContractPenaltyLLMResult,
+        PenaltyCheckFinding,
+        _to_check_result,
+    )
+
+    labels = [
+        "Штраф заказчика",
+        "Штраф поставщика за стоимостное обязательство",
+        "Штраф поставщика за нестоимостное обязательство",
+        "Пеня за просрочку",
+        "Штраф за непривлечение СМП/СОНКО",
+    ]
+    result = ContractPenaltyLLMResult(
+        status="manual_review",
+        message="Требуется проверка.",
+        findings=[
+            PenaltyCheckFinding(
+                label=label,
+                status="passed",
+                message="Условие найдено.",
+                evidence=f"п. 7.{index}",
+                quote="Условие соответствует ожидаемому значению.",
+            )
+            for index, label in enumerate(labels, start=3)
+        ],
+    )
+    payload = {
+        "nmck": "106312006.01",
+        "expected": {
+            "fixed_fine_amount": "100000.00",
+            "supplier_value_obligation_percent": "0.5",
+            "smp_sonko_fine_percent": "5",
+        },
+    }
+
+    check = _to_check_result(result, payload)
+
+    assert check.status == "passed"
+    assert "соответствуют" in check.report_text
+
+
 def test_penalty_llm_is_not_called_without_usable_responsibility_section():
     from summary_model.checks.penalty_llm import run_penalty_llm_checks
 
@@ -771,6 +819,79 @@ def test_purchase_description_warranty_text_collects_explicit_terms():
     assert "36 месяцев" in result
     assert "22.10.2028" in result
     assert "Пуско-наладка серверов" not in result
+
+
+def test_warranty_section_is_extracted_by_heading_and_stops_at_next_section():
+    from summary_model.extraction_pipeline import (
+        _purchase_description_warranty_text,
+        _warranty_requirements_section,
+    )
+
+    text = """
+    1.4. Предоставить обеспечение гарантийных обязательств в установленных случаях.
+    2.5. Требования к поставке
+    Общие условия.
+    2.6. Требования к оборудованию и гарантийным обязательствам
+    2.6.1. Гарантийный срок на пусконаладочные работы составляет 12 месяцев.
+    На серверы установлена гарантия Производителя и Исполнителя - 36 месяцев.
+    На систему хранения данных установлена гарантия до 22.10.2028 г.
+    2.7. Требования к приемке
+    Этот текст не относится к гарантии.
+    """
+
+    section = _warranty_requirements_section(text)
+    warranty = _purchase_description_warranty_text(text, section)
+
+    assert section is not None
+    assert section.startswith("2.6. Требования к оборудованию")
+    assert "2.6.1." in section
+    assert "2.7." not in section
+    assert warranty is not None
+    assert "12 месяцев" in warranty
+    assert "36 месяцев" in warranty
+    assert "22.10.2028" in warranty
+
+
+def test_warranty_semantic_payload_prefers_embedded_contract_terms():
+    from summary_model.checks.semantic_llm import _semantic_payload, _semantic_summary_lines
+
+    package = _base_package()
+    package.purchase_description.warranty_requirements_text = "ПНР: 12 месяцев."
+    package.purchase_description.warranty_section_text = "2.6. Гарантийные обязательства\nПНР: 12 месяцев."
+    package.contract_draft.warranty_text = (
+        "6.2. Гарантийные требования указаны в ООЗ (Приложение № 1)."
+    )
+    package.contract_draft.embedded_purchase_description = PurchaseDescriptionSchema(
+        warranty_requirements_text="ПНР: 12 месяцев.",
+        warranty_section_text="2.6. Гарантийные обязательства\nПНР: 12 месяцев.",
+    )
+
+    payload = _semantic_payload(package)
+    summary = _semantic_summary_lines(package, "semantic.warranty")
+
+    assert payload["contract_draft"]["warranty_text"] == "ПНР: 12 месяцев."
+    assert "2.6. Гарантийные обязательства" in payload["contract_draft"]["warranty_section_text"]
+    assert "Проект контракта: ПНР: 12 месяцев." in summary
+
+
+def test_warranty_guard_rejects_passed_result_based_only_on_reference():
+    from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_warranty_guard
+
+    package = _base_package()
+    package.contract_draft.warranty_text = (
+        "6.2. Гарантийные требования указаны в ООЗ (Приложение № 1)."
+    )
+    package.contract_draft.embedded_purchase_description = None
+    finding = SemanticCheckFinding(
+        check_id="semantic.warranty",
+        status="passed",
+        message="Ссылка подтверждает совпадение.",
+    )
+
+    result = _apply_warranty_guard(package, finding)
+
+    assert result.status == "manual_review"
+    assert "только ссылка" in result.message
 
 
 def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data():
@@ -890,6 +1011,7 @@ def _commercial_offer(
 ) -> CommercialOfferSchema:
     return CommercialOfferSchema(
         supplier_name=supplier_name,
+        purchase_subject="Картридж",
         inn="5400000000",
         outgoing_number=f"{supplier_name}-1",
         offer_date="2026-01-01",
@@ -927,6 +1049,26 @@ def test_commercial_offers_count_and_onmck_match_pass_with_three_offers():
     assert checks["manual.commercial_offers.content"].status == "passed"
     assert checks["manual.commercial_offers.onmck"].status == "passed"
     assert any("коэффициент вариации" in line for line in checks["manual.commercial_offers.onmck"].details["summary_lines"])
+    assert {row["status"] for row in checks["manual.commercial_offers.onmck"].details["criteria"]} == {"passed"}
+    assert checks["manual.commercial_offers.content"].details["total_criterion"]["status"] == "passed"
+
+
+def test_commercial_offer_subject_is_compared_with_ooz():
+    package = _base_package()
+    package.commercial_offers_found_count = 3
+    package.commercial_offers = [
+        _commercial_offer(supplier_name="Поставщик 1", unit_price=Decimal("100")),
+        _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
+        _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110")),
+    ]
+    package.commercial_offers[1].purchase_subject = "Поставка автомобильных шин"
+
+    result = _by_id(run_checks(package))["manual.commercial_offers.onmck"]
+    subject = next(row for row in result.details["criteria"] if row["key"] == "subject")
+
+    assert result.status == "failed"
+    assert subject["status"] == "failed"
+    assert any("не соответствует ООЗ" in issue for issue in subject["issues"])
 
 
 def test_commercial_offers_onmck_match_fails_on_price_quantity_or_unit_mismatch():
@@ -1710,6 +1852,35 @@ def test_procurement_method_translation_and_auction_guard():
     assert "обоснование ЕП не требуется" in guarded.message
     assert "auction" not in guarded.compared_values[0]
     assert "Электронный аукцион" in guarded.compared_values[0]
+
+
+def test_procurement_method_guard_rejects_plan_tender_against_auction():
+    from summary_model.checks.semantic_llm import _apply_procurement_method_guard, SemanticCheckFinding
+    from summary_model.extraction_models import (
+        ExplanatoryNoteSchema,
+        ProcurementPackageExtraction,
+        PurchaseRequestSchema,
+        ScheduleApplicationSchema,
+    )
+
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(procurement_method_raw="Конкурс"),
+        purchase_request=PurchaseRequestSchema(procurement_method_raw="Электронный аукцион"),
+        explanatory_note=ExplanatoryNoteSchema(procurement_method_raw="электронный аукцион"),
+    )
+    finding = SemanticCheckFinding(
+        check_id="semantic.procurement_method",
+        status="passed",
+        message="Обоснование единственного поставщика не требуется.",
+        compared_values=[],
+    )
+
+    guarded = _apply_procurement_method_guard(package, finding)
+
+    assert guarded.status == "failed"
+    assert "различается между документами" in guarded.message
+    assert "Конкурс" in guarded.message
+    assert "Электронный аукцион" in guarded.message
 
 
 def test_smp_preference_guard_does_not_mix_subcontracting_requirement():

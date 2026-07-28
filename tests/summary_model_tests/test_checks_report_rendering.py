@@ -404,6 +404,7 @@ def test_report_renders_onmck_minimum_prices_as_readable_blocks():
                             {"label": "Исполнитель 2", "price": "10470000"},
                             {"label": "Исполнитель 3", "price": "10245000"},
                         ],
+                        "variation_coefficient": "1.13%",
                         "status": "passed",
                     }
                 ]
@@ -418,7 +419,9 @@ def test_report_renders_onmck_minimum_prices_as_readable_blocks():
     assert "- Исполнитель 1: <b>10 300 000,00 руб.</b>" in text
     assert "- Исполнитель 2: <b>10 470 000,00 руб.</b>" in text
     assert "- Исполнитель 3: <b>10 245 000,00 руб.</b>" in text
+    assert "Коэффициент вариации: <b>1.13%</b>" in text
     assert "Итог: <b>ОК</b>" in text
+    assert "8) Сравнение цен услуг поставщиков в ОНМЦК:" not in text
 
 
 def test_report_renders_onmck_arithmetic_with_formula_and_kopecks():
@@ -454,3 +457,86 @@ def test_report_renders_onmck_arithmetic_with_formula_and_kopecks():
     assert "Расчёт: <b>10 245 000,00 руб.</b> × <b>4</b> = <b>40 980 000,00 руб.</b>" in text
     assert "Стоимость в ОНМЦК: <b>40 980 000,00 руб.</b>" in text
     assert "Сумма строк: <b>40 980 000,00 руб.</b>" in text
+
+
+def test_report_prefers_successful_semantic_checks_over_duplicate_strict_rows():
+    report = _report(
+        _check_result(
+            "strict.plan.subject",
+            "Предмет закупки",
+            "warning",
+            "Строгое текстовое сравнение требует проверки.",
+        ),
+        _check_result(
+            "semantic.subject",
+            "Предмет закупки",
+            "failed",
+            "Смысловое расхождение подтверждено.",
+        ),
+        _check_result(
+            "strict.plan.warranty",
+            "Гарантийные требования",
+            "warning",
+            "Формулировки гарантий отличаются.",
+        ),
+        _check_result(
+            "semantic.warranty",
+            "Гарантии",
+            "passed",
+            "Ссылка контракта на ООЗ подтверждает совпадение.",
+        ),
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Строгое текстовое сравнение" not in text
+    assert "Формулировки гарантий отличаются" not in text
+    assert "Смысловое расхождение подтверждено" in text
+    assert "Ссылка контракта на ООЗ подтверждает совпадение" in text
+    assert "Ошибок: 1. Предупреждений: 0." in text
+
+
+def test_report_prefers_meaningful_manual_semantic_result_over_duplicate_strict_row():
+    report = _report(
+        _check_result(
+            "strict.plan.warranty",
+            "Гарантийные требования",
+            "warning",
+            "Строгое сравнение гарантий требует проверки.",
+        ),
+        _check_result(
+            "semantic.warranty",
+            "Гарантии",
+            "manual_review",
+            "В проекте контракта найдена только ссылка на ООЗ.",
+        ),
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Строгое сравнение гарантий" not in text
+    assert text.count("В проекте контракта найдена только ссылка на ООЗ") == 1
+    assert "Предупреждений: 0. Требуют проверки: 1." in text
+
+
+def test_report_keeps_strict_result_when_semantic_call_is_unavailable():
+    report = _report(
+        _check_result(
+            "strict.plan.warranty",
+            "Гарантийные требования",
+            "warning",
+            "Строгое сравнение гарантий требует проверки.",
+        ),
+        _check_result(
+            "semantic.warranty",
+            "Гарантии",
+            "manual_review",
+            "Semantic LLM check не выполнен: Connection error.",
+        ),
+    )
+
+    text = build_checks_report_text(report)
+
+    assert text.count("Строгое сравнение гарантий требует проверки") == 1
+    assert "Semantic LLM check не выполнен" not in text
+    assert "Предупреждений: 1. Требуют проверки: 0." in text

@@ -301,6 +301,18 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                 "arithmetic_rows": arithmetic_rows,
                 "arithmetic_failures": arithmetic_failures,
                 "arithmetic_manual_review": arithmetic_manual,
+                "total_criterion": {
+                    "key": "total",
+                    "label": "Итоговая стоимость КП",
+                    "status": (
+                        "failed"
+                        if arithmetic_failures
+                        else "manual_review"
+                        if arithmetic_manual
+                        else "passed"
+                    ),
+                    "issues": [*arithmetic_failures, *arithmetic_manual],
+                },
             },
         )
     ]
@@ -415,18 +427,49 @@ def _check_commercial_offers_against_onmck(
             )
         ]
 
-    offer_by_source, source_warnings = _match_offers_to_price_sources(offers, onmck.price_sources)
+    source_ids = _nmck_supplier_source_ids(onmck.items)
+    offer_by_source, source_warnings = _match_offers_to_price_sources(
+        offers,
+        onmck.price_sources,
+        required_source_ids=source_ids,
+    )
     item_matches: dict[str, dict[int, int]] = {}
     item_match_reasons: dict[str, dict[int, str]] = {}
     for source_id, offer in offer_by_source.items():
-        matches, reasons = _match_offer_items(onmck.items, offer.items)
+        matches, reasons = _match_offer_items(
+            onmck.items,
+            offer.items,
+            source_id=source_id,
+        )
         item_matches[source_id] = matches
         item_match_reasons[source_id] = reasons
     ooz_items = list(package.purchase_description.items if package.purchase_description else [])
     summary_lines = list(source_warnings)
     failures: list[str] = []
     manual: list[str] = []
+    criterion_failures: dict[str, list[str]] = defaultdict(list)
+    criterion_manual: dict[str, list[str]] = defaultdict(list)
     comparison_rows: list[dict[str, Any]] = []
+
+    ooz_subject = getattr(package.purchase_description, "purchase_subject", None)
+    for offer in offers:
+        offer_name = _commercial_offer_name(offer)
+        if not ooz_subject:
+            message = "В ООЗ не распознан предмет закупки для сверки с КП"
+            manual.append(message)
+            criterion_manual["subject"].append(message)
+            break
+        if not offer.purchase_subject:
+            message = f"{offer_name}: предмет закупки в КП не распознан"
+            manual.append(message)
+            criterion_manual["subject"].append(message)
+        elif not _offer_names_support(ooz_subject, offer.purchase_subject):
+            message = (
+                f"{offer_name}: предмет закупки '{offer.purchase_subject}' "
+                f"не соответствует ООЗ '{ooz_subject}'"
+            )
+            failures.append(message)
+            criterion_failures["subject"].append(message)
 
     for nmck_item_index, nmck_item in enumerate(onmck.items):
         item_label = _item_label(nmck_item)
@@ -437,7 +480,10 @@ def _check_commercial_offers_against_onmck(
             offer = offer_by_source.get(supplier_price.source_id)
             source_label = _supplier_label(supplier_price.source_id)
             if offer is None:
-                manual.append(f"{item_label}: для {source_label} не найдено соответствующее КП")
+                message = f"{item_label}: для {source_label} не найдено соответствующее КП"
+                manual.append(message)
+                for criterion in ("quantity", "unit_price", "unit"):
+                    criterion_manual[criterion].append(message)
                 continue
             offer_item_index = item_matches.get(supplier_price.source_id, {}).get(nmck_item_index)
             offer_item = (
@@ -463,18 +509,28 @@ def _check_commercial_offers_against_onmck(
                     )
                 if offer_item is None:
                     llm_reason = decision.get("reason") if decision else None
-                    manual.append(
-                        f"{item_label}: {_commercial_offer_name(offer)} - {llm_reason or reason}"
-                    )
+                    message = f"{item_label}: {_commercial_offer_name(offer)} - {llm_reason or reason}"
+                    manual.append(message)
+                    for criterion in ("quantity", "unit_price", "unit"):
+                        criterion_manual[criterion].append(message)
                     continue
             offer_unit_price = _money(offer_item.unit_price)
             nmck_unit_price = _money(supplier_price.unit_price)
             if offer_unit_price is not None:
                 offer_prices.append((supplier_price.source_id, offer_unit_price))
-            if offer_unit_price is not None and nmck_unit_price is not None and offer_unit_price != nmck_unit_price:
-                failures.append(
+            if offer_unit_price is None or nmck_unit_price is None:
+                message = (
+                    f"{item_label}: {_commercial_offer_name(offer)} цена за единицу "
+                    "не распознана в КП или ОНМЦК"
+                )
+                manual.append(message)
+                criterion_manual["unit_price"].append(message)
+            elif offer_unit_price != nmck_unit_price:
+                message = (
                     f"{item_label}: {_commercial_offer_name(offer)} цена за единицу {_format_money(offer_unit_price)} не совпадает с ОНМЦК {_format_money(nmck_unit_price)}"
                 )
+                failures.append(message)
+                criterion_failures["unit_price"].append(message)
             _compare_offer_item_to_reference(
                 item_label=item_label,
                 offer=offer,
@@ -483,6 +539,8 @@ def _check_commercial_offers_against_onmck(
                 ooz_items=ooz_items,
                 failures=failures,
                 manual=manual,
+                criterion_failures=criterion_failures,
+                criterion_manual=criterion_manual,
             )
             _check_offer_row_total(item_label, offer, offer_item, failures, manual)
 
@@ -565,6 +623,10 @@ def _check_commercial_offers_against_onmck(
                 "failures": failures,
                 "manual_review": manual,
                 "llm_matches": llm_matches or [],
+                "criteria": _commercial_offer_criteria(
+                    criterion_failures,
+                    criterion_manual,
+                ),
             },
         )
     ]
@@ -959,6 +1021,11 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
                     for source_id, price in source_prices
                     if price is not None
                 ],
+                "variation_coefficient": (
+                    f"{coefficient:.2f}%"
+                    if (coefficient := _variation_coefficient(prices)) is not None
+                    else None
+                ),
                 "status": "passed" if selected == minimum else "failed",
             }
         )
@@ -1306,11 +1373,25 @@ def _vat_summary(offer: Any) -> str:
 def _match_offers_to_price_sources(
     offers: list[Any],
     sources: list[PriceSource],
+    *,
+    required_source_ids: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     by_source: dict[str, Any] = {}
     warnings: list[str] = []
     unmatched = list(offers)
-    for source in sources:
+    all_sources = list(sources)
+    known_source_ids = {str(source.source_id) for source in all_sources}
+    for source_id in required_source_ids or []:
+        if str(source_id) not in known_source_ids:
+            all_sources.append(
+                PriceSource(
+                    source_id=str(source_id),
+                    raw_header=_supplier_label(str(source_id)),
+                )
+            )
+            known_source_ids.add(str(source_id))
+    all_sources.sort(key=lambda source: _source_index(source.source_id) or 10**9)
+    for source in all_sources:
         source_number = normalize_text(source.outgoing_letter_number)
         source_date = source.outgoing_letter_date
         matched = None
@@ -1327,13 +1408,28 @@ def _match_offers_to_price_sources(
                 matched = candidates[0]
             elif len(candidates) > 1:
                 warnings.append(f"{_supplier_label(source.source_id)}: несколько КП совпали по исходящему номеру/дате")
-        if matched is None and not (source_number or source_date):
+        if matched is None:
             index = _source_index(source.source_id)
             if index is not None and 0 <= index - 1 < len(offers):
-                matched = offers[index - 1]
-                warnings.append(
-                    f"{_supplier_label(source.source_id)}: в ОНМЦК нет однозначного исходящего номера/даты, КП сопоставлено по порядку загрузки"
+                positional_offer = offers[index - 1]
+                requisites_allow_order = not (source_number or source_date) or (
+                    _source_requisites_partially_match(
+                        positional_offer,
+                        source_number=source_number,
+                        source_date=source_date,
+                    )
                 )
+                if positional_offer in unmatched and requisites_allow_order:
+                    matched = positional_offer
+                    reason = (
+                        "реквизиты ОНМЦК не дали точного совпадения"
+                        if source_number or source_date
+                        else "в ОНМЦК нет однозначного исходящего номера/даты"
+                    )
+                    warnings.append(
+                        f"{_supplier_label(source.source_id)}: {reason}, "
+                        "КП сопоставлено по порядку загрузки"
+                    )
         if matched is not None:
             by_source[source.source_id] = matched
             if matched in unmatched:
@@ -1341,6 +1437,42 @@ def _match_offers_to_price_sources(
         else:
             warnings.append(f"{_supplier_label(source.source_id)}: соответствующее КП не найдено")
     return by_source, warnings
+
+
+def _source_requisites_partially_match(
+    offer: Any,
+    *,
+    source_number: str,
+    source_date: Any,
+) -> bool:
+    offer_number = normalize_text(getattr(offer, "outgoing_number", None))
+    if source_number:
+        compact_source = source_number.replace(" ", "")
+        compact_offer = offer_number.replace(" ", "")
+        number_matches = (
+            len(compact_source) >= 3
+            and len(compact_offer) >= 3
+            and (
+                compact_offer.startswith(compact_source)
+                or compact_source.startswith(compact_offer)
+            )
+        )
+        if not number_matches:
+            return False
+    offer_date = getattr(offer, "outgoing_date", None) or getattr(offer, "offer_date", None)
+    if source_date and offer_date != source_date:
+        return False
+    return bool(source_number or source_date)
+
+
+def _nmck_supplier_source_ids(items: list[NmckItem]) -> list[str]:
+    source_ids = {
+        str(price.source_id)
+        for item in items
+        for price in item.supplier_prices
+        if price.source_id
+    }
+    return sorted(source_ids, key=lambda source_id: _source_index(source_id) or 10**9)
 
 
 def _source_index(source_id: str | None) -> int | None:
@@ -1372,6 +1504,8 @@ def _match_offer_item(
 def _match_offer_items(
     nmck_items: list[NmckItem],
     offer_items: list[CommercialOfferItem],
+    *,
+    source_id: str | None = None,
 ) -> tuple[dict[int, int], dict[int, str]]:
     """Build a one-to-one deterministic map before asking the LLM."""
     matches: dict[int, int] = {}
@@ -1445,6 +1579,26 @@ def _match_offer_items(
                 matches[nmck_indexes[0]] = offer_indexes[0]
                 used_offer_indexes.add(offer_indexes[0])
 
+    remaining_nmck = [index for index in range(len(nmck_items)) if index not in matches]
+    remaining_offers = [index for index in range(len(offer_items)) if index not in used_offer_indexes]
+    if (
+        source_id
+        and len(remaining_nmck) == len(remaining_offers)
+        and len(remaining_nmck) >= 2
+    ):
+        ordered_pairs = list(zip(remaining_nmck, remaining_offers))
+        if all(
+            _ordered_offer_pair_matches(
+                nmck_items[nmck_index],
+                offer_items[offer_index],
+                source_id,
+            )
+            for nmck_index, offer_index in ordered_pairs
+        ):
+            for nmck_index, offer_index in ordered_pairs:
+                matches[nmck_index] = offer_index
+                used_offer_indexes.add(offer_index)
+
     reasons = {}
     for nmck_index, nmck_item in enumerate(nmck_items):
         if nmck_index in matches:
@@ -1452,6 +1606,32 @@ def _match_offer_items(
         else:
             _item, reasons[nmck_index] = _match_offer_item(nmck_item, offer_items)
     return matches, reasons
+
+
+def _ordered_offer_pair_matches(
+    nmck_item: NmckItem,
+    offer_item: CommercialOfferItem,
+    source_id: str,
+) -> bool:
+    supplier_prices = [
+        price
+        for price in nmck_item.supplier_prices
+        if str(price.source_id) == str(source_id)
+    ]
+    if len(supplier_prices) != 1:
+        return False
+    nmck_price = normalize_decimal(supplier_prices[0].unit_price)
+    offer_price = normalize_decimal(offer_item.unit_price)
+    if nmck_price is None or offer_price is None or nmck_price != offer_price:
+        return False
+
+    nmck_quantity = _item_quantity(nmck_item)
+    offer_quantity = _item_quantity(offer_item)
+    if nmck_quantity is None or offer_quantity is None or nmck_quantity != offer_quantity:
+        return False
+    nmck_unit = normalize_unit(nmck_item.unit)
+    offer_unit = normalize_unit(offer_item.unit)
+    return not (nmck_unit and offer_unit and nmck_unit != offer_unit)
 
 
 def _item_quantity(item: Any) -> Decimal | None:
@@ -1534,29 +1714,87 @@ def _compare_offer_item_to_reference(
     ooz_items: list[PurchaseItem],
     failures: list[str],
     manual: list[str],
+    criterion_failures: dict[str, list[str]],
+    criterion_manual: dict[str, list[str]],
 ) -> None:
     if offer_item.quantity is None:
-        manual.append(f"{item_label}: {_commercial_offer_name(offer)} количество в КП не распознано")
+        message = f"{item_label}: {_commercial_offer_name(offer)} количество в КП не распознано"
+        manual.append(message)
+        criterion_manual["quantity"].append(message)
+    elif nmck_item.quantity is None:
+        message = f"{item_label}: количество в ОНМЦК не распознано"
+        manual.append(message)
+        criterion_manual["quantity"].append(message)
     elif nmck_item.quantity is not None and normalize_decimal(offer_item.quantity) != normalize_decimal(nmck_item.quantity):
-        failures.append(
+        message = (
             f"{item_label}: {_commercial_offer_name(offer)} количество {offer_item.quantity} не совпадает с ОНМЦК {nmck_item.quantity}"
         )
+        failures.append(message)
+        criterion_failures["quantity"].append(message)
     if not offer_item.unit:
-        manual.append(f"{item_label}: {_commercial_offer_name(offer)} единица измерения в КП не распознана")
+        message = f"{item_label}: {_commercial_offer_name(offer)} единица измерения в КП не распознана"
+        manual.append(message)
+        criterion_manual["unit"].append(message)
+    elif not nmck_item.unit:
+        message = f"{item_label}: единица измерения в ОНМЦК не распознана"
+        manual.append(message)
+        criterion_manual["unit"].append(message)
     elif nmck_item.unit and normalize_unit(offer_item.unit) != normalize_unit(nmck_item.unit):
-        failures.append(
+        message = (
             f"{item_label}: {_commercial_offer_name(offer)} единица '{offer_item.unit}' не совпадает с ОНМЦК '{nmck_item.unit}'"
         )
+        failures.append(message)
+        criterion_failures["unit"].append(message)
     ooz_item = _match_reference_purchase_item(nmck_item, ooz_items)
-    if ooz_item is not None:
-        if offer_item.unit and ooz_item.unit and normalize_unit(offer_item.unit) != normalize_unit(ooz_item.unit):
-            failures.append(
+    if ooz_item is None:
+        message = f"{item_label}: позиция ООЗ не сопоставлена для проверки количества и единицы"
+        manual.append(message)
+        criterion_manual["quantity"].append(message)
+        criterion_manual["unit"].append(message)
+    else:
+        if offer_item.unit and not ooz_item.unit:
+            message = f"{item_label}: единица измерения в ООЗ не распознана"
+            manual.append(message)
+            criterion_manual["unit"].append(message)
+        elif offer_item.unit and ooz_item.unit and normalize_unit(offer_item.unit) != normalize_unit(ooz_item.unit):
+            message = (
                 f"{item_label}: {_commercial_offer_name(offer)} единица '{offer_item.unit}' не совпадает с ООЗ '{ooz_item.unit}'"
             )
-        if offer_item.quantity is not None and ooz_item.quantity is not None and normalize_decimal(offer_item.quantity) != normalize_decimal(ooz_item.quantity):
-            failures.append(
+            failures.append(message)
+            criterion_failures["unit"].append(message)
+        if offer_item.quantity is not None and ooz_item.quantity is None:
+            message = f"{item_label}: количество в ООЗ не распознано"
+            manual.append(message)
+            criterion_manual["quantity"].append(message)
+        elif offer_item.quantity is not None and ooz_item.quantity is not None and normalize_decimal(offer_item.quantity) != normalize_decimal(ooz_item.quantity):
+            message = (
                 f"{item_label}: {_commercial_offer_name(offer)} количество {offer_item.quantity} не совпадает с ООЗ {ooz_item.quantity}"
             )
+            failures.append(message)
+            criterion_failures["quantity"].append(message)
+
+
+def _commercial_offer_criteria(
+    failures: dict[str, list[str]],
+    manual: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    labels = (
+        ("subject", "Соответствие предмета закупки ООЗ"),
+        ("quantity", "Количество ТРУ"),
+        ("unit_price", "Цена за единицу ТРУ"),
+        ("unit", "Единица измерения ТРУ"),
+    )
+    return [
+        {
+            "key": key,
+            "label": label,
+            "status": (
+                "failed" if failures.get(key) else "manual_review" if manual.get(key) else "passed"
+            ),
+            "issues": [*(failures.get(key) or []), *(manual.get(key) or [])],
+        }
+        for key, label in labels
+    ]
 
 
 def _check_offer_row_total(
@@ -2360,7 +2598,15 @@ def _short_report_text(value: str | None, *, limit: int) -> str:
 
 def _check_warranty_between_ooz_and_contract(package: ProcurementPackageExtraction) -> CheckResult:
     ooz_value = getattr(package.purchase_description, "warranty_requirements_text", None) if package.purchase_description else None
-    contract_value = getattr(package.contract_draft, "warranty_text", None) if package.contract_draft else None
+    embedded = (
+        package.contract_draft.embedded_purchase_description
+        if package.contract_draft and package.contract_draft.embedded_purchase_description
+        else None
+    )
+    contract_value = (
+        getattr(embedded, "warranty_requirements_text", None)
+        or (getattr(package.contract_draft, "warranty_text", None) if package.contract_draft else None)
+    )
     summary_lines = [
         f"ООЗ: {ooz_value or 'не найдено'}",
         f"Проект контракта: {contract_value or 'не найдено'}",

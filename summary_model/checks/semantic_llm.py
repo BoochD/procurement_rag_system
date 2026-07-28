@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -73,11 +74,22 @@ SEMANTIC_CHECKS_PROMPT = """
 источника, например "Заявка в план-график: ...", "ООЗ: ...",
 "Проект контракта: ...". Не используй общий префикс "Документ:".
 
-ДЛЯ semantic.warranty: Будь предельно лаконичен! Запрещено цитировать длинные многостраничные технические описания. Выделяй только ключевые цифры и обязательно сохраняй точные ссылки на пункты/разделы/таблицы документа (например: 'ООЗ (п. 1.5, Таб. 1): 12 мес. на ПНР, 36 мес. на серверы'). Не пиши стены текста!
+ДЛЯ semantic.warranty:
+- сравнивай фактические гарантийные сроки и условия из ООЗ и из секции ООЗ,
+  встроенной в проект контракта;
+- ссылка вида «требования указаны в ООЗ/Приложении» сама по себе НЕ подтверждает
+  совпадение: если фактические условия проекта контракта не извлечены, ставь manual_review;
+- passed допустим только когда в обоих документах найдены и согласованы сами сроки/условия;
+- пример: основной текст контракта ссылается на Приложение № 1, а в переданной
+  warranty_section_text этого приложения указаны «12 месяцев на ПНР» и
+  «36 месяцев на серверы» — сравни именно эти значения и приведи ссылку на секцию;
+- будь лаконичен: перечисляй ключевые цифры и точные ссылки на пункты/разделы/таблицы,
+  не цитируй секцию целиком и не пиши стены текста.
 """
 
 
 def _apply_warranty_guard(
+    package: ProcurementPackageExtraction,
     finding: SemanticCheckFinding,
 ) -> SemanticCheckFinding:
     if finding.check_id != "semantic.warranty":
@@ -94,10 +106,25 @@ def _apply_warranty_guard(
                 s_val = f"{s_val[:200]}..."
         cleaned_values.append(s_val)
 
+    status = finding.status
+    message = finding.message
+    contract = package.contract_draft
+    embedded = getattr(contract, "embedded_purchase_description", None) if contract else None
+    embedded_value = getattr(embedded, "warranty_requirements_text", None)
+    contract_value = getattr(contract, "warranty_text", None)
+    if status == "passed" and not embedded_value and (
+        not contract_value or _warranty_reference_only(contract_value)
+    ):
+        status = "manual_review"
+        message = (
+            "В проекте контракта найдена только ссылка на ООЗ; "
+            "фактические гарантийные сроки в приложении не извлечены."
+        )
+
     return SemanticCheckFinding(
         check_id=finding.check_id,
-        status=finding.status,
-        message=finding.message,
+        status=status,
+        message=message,
         compared_values=cleaned_values,
         evidence=finding.evidence,
     )
@@ -136,7 +163,7 @@ def run_semantic_llm_checks(
         finding = _apply_delivery_term_guard(package, finding)
         finding = _apply_procurement_method_guard(package, finding)
         finding = _apply_smp_preference_guard(package, finding)
-        finding = _apply_warranty_guard(finding)
+        finding = _apply_warranty_guard(package, finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
 
@@ -162,13 +189,40 @@ def _apply_procurement_method_guard(
         v = v.replace("auction", "Электронный аукцион").replace("tender", "Конкурс").replace("request_for_quotations", "Запрос котировок")
         cleaned_values.append(v)
 
-    method_raw = ""
-    if package.schedule_application and package.schedule_application.procurement_method_raw:
-        method_raw = package.schedule_application.procurement_method_raw.casefold()
+    method_values = [
+        (
+            "Заявка в план-график",
+            getattr(package.schedule_application, "procurement_method_raw", None)
+            or getattr(package.schedule_application, "procurement_method", None),
+        ),
+        (
+            "Обращение",
+            getattr(package.purchase_request, "procurement_method_raw", None)
+            or getattr(package.purchase_request, "procurement_method", None),
+        ),
+        (
+            "Пояснительная записка",
+            getattr(package.explanatory_note, "procurement_method_raw", None)
+            or getattr(package.explanatory_note, "procurement_method", None),
+        ),
+    ]
+    recognized = [
+        (label, value, kind)
+        for label, value in method_values
+        if value and (kind := _procurement_method_kind(value))
+    ]
+    kinds = {kind for _label, _value, kind in recognized}
+    if len(kinds) > 1:
+        values_text = "; ".join(f"{label}: {value}" for label, value, _kind in recognized)
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="failed",
+            message=f"Способ закупки различается между документами: {values_text}.",
+            compared_values=cleaned_values,
+            evidence=finding.evidence,
+        )
 
-    is_auction = "аукцион" in method_raw or "auction" in method_raw or any("аукцион" in v.casefold() for v in cleaned_values)
-
-    if is_auction:
+    if kinds == {"auction"}:
         return SemanticCheckFinding(
             check_id=finding.check_id,
             status="passed",
@@ -184,6 +238,19 @@ def _apply_procurement_method_guard(
         compared_values=cleaned_values,
         evidence=finding.evidence,
     )
+
+
+def _procurement_method_kind(value: object) -> str | None:
+    text = str(value or "").casefold().replace("ё", "е")
+    if "аукцион" in text or "auction" in text:
+        return "auction"
+    if "конкурс" in text or "tender" in text:
+        return "tender"
+    if "котиров" in text or "quotation" in text:
+        return "request_for_quotations"
+    if "единственн" in text or "single_supplier" in text:
+        return "single_supplier"
+    return None
 
 
 def _apply_smp_preference_guard(
@@ -264,6 +331,19 @@ def _semantic_normalize(value: object) -> str:
     return " ".join(str(value).replace("\xa0", " ").casefold().split())
 
 
+def _warranty_reference_only(value: object) -> bool:
+    text = _semantic_normalize(value)
+    refers_to_appendix = (
+        "указан" in text
+        and ("описани" in text or "приложени" in text)
+    )
+    has_explicit_term = bool(
+        re.search(r"\b\d+\s*(?:\([^)]*\)\s*)?(?:месяц|год|лет)", text)
+        or re.search(r"\bдо\s+\d{1,2}[./]\d{1,2}[./]\d{2,4}", text)
+    )
+    return refers_to_appendix and not has_explicit_term
+
+
 def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object]:
     schedule = package.schedule_application
     request = package.purchase_request
@@ -273,6 +353,16 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
         getattr(contract.embedded_purchase_description, "purchase_subject", None)
         if contract and contract.embedded_purchase_description
         else None
+    )
+    embedded_contract_ooz = (
+        contract.embedded_purchase_description
+        if contract and contract.embedded_purchase_description
+        else None
+    )
+    embedded_contract_warranty = getattr(
+        embedded_contract_ooz,
+        "warranty_requirements_text",
+        None,
     )
     note = package.explanatory_note
     payload = {
@@ -299,13 +389,16 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "delivery_place": getattr(ooz, "delivery_place", None),
             "delivery_term_text": getattr(ooz, "delivery_term_text", None),
             "warranty_requirements_text": getattr(ooz, "warranty_requirements_text", None),
+            "warranty_section_text": getattr(ooz, "warranty_section_text", None),
         },
         "contract_draft": {
             "subject": embedded_contract_subject or getattr(contract, "subject", None),
             "legal_subject": getattr(contract, "subject", None),
             "delivery_place": getattr(contract, "delivery_place", None),
             "delivery_term_text": getattr(contract, "delivery_term_text", None),
-            "warranty_text": getattr(contract, "warranty_text", None),
+            "warranty_text": embedded_contract_warranty or getattr(contract, "warranty_text", None),
+            "warranty_reference_text": getattr(contract, "warranty_text", None),
+            "warranty_section_text": getattr(embedded_contract_ooz, "warranty_section_text", None),
             "subcontract_smp_sonko_required_raw": getattr(contract, "subcontract_smp_sonko_required_raw", None),
             "subcontract_smp_sonko_required": getattr(contract, "subcontract_smp_sonko_required", None),
             "subcontract_smp_sonko_percent": getattr(contract, "subcontract_smp_sonko_percent", None),
@@ -338,6 +431,11 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
         if contract and contract.embedded_purchase_description
         else None
     )
+    embedded_contract_warranty = (
+        getattr(contract.embedded_purchase_description, "warranty_requirements_text", None)
+        if contract and contract.embedded_purchase_description
+        else None
+    )
     note = package.explanatory_note
 
     values_by_check = {
@@ -361,7 +459,7 @@ def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str
         ],
         "semantic.warranty": [
             ("ООЗ", getattr(ooz, "warranty_requirements_text", None)),
-            ("Проект контракта", getattr(contract, "warranty_text", None)),
+            ("Проект контракта", embedded_contract_warranty or getattr(contract, "warranty_text", None)),
         ],
         "semantic.procurement_method": [
             ("Заявка в план-график", getattr(schedule, "procurement_method_raw", None) or getattr(schedule, "procurement_method", None)),

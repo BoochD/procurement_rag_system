@@ -424,6 +424,7 @@ class PurchaseDescriptionSchema(BaseModel):
     stages: list[ProcurementStage] = Field(default_factory=list)
     items: list[PurchaseItem] = Field(default_factory=list)
     warranty_requirements_text: str | None = None
+    warranty_section_text: str | None = None
     additional_characteristics_justification_text: str | None = None
     additional_characteristics_justifications: list[AdditionalCharacteristicsJustification] = Field(
         default_factory=list

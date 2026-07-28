@@ -4,13 +4,14 @@ from types import SimpleNamespace
 
 from summary_model.checks import run_checks
 from summary_model.checks import commercial_offer_llm
-from summary_model.checks.runner import _match_offer_items
+from summary_model.checks.runner import _match_offer_items, _match_offers_to_price_sources
 from summary_model.checks.commercial_offer_llm import (
     CommercialOfferMatchDecision,
     _build_payload,
     _has_non_price_support,
     _validate_decisions,
 )
+from summary_model.commercial_offer_vlm import COMMERCIAL_OFFER_VLM_PROMPT
 from summary_model.commercial_offer_lab import run as commercial_offer_lab
 from summary_model.extraction_models import (
     CommercialOfferItem,
@@ -31,6 +32,13 @@ def _package(*, nmck_items, offer_items) -> ProcurementPackageExtraction:
         ),
         commercial_offers=[CommercialOfferSchema(supplier_name="ООО Тест", items=offer_items)],
     )
+
+
+def test_commercial_offer_vlm_prompt_requires_footer_term_and_vat_scan():
+    assert "отдельный проход по ВСЕМ страницам" in COMMERCIAL_OFFER_VLM_PROMPT
+    assert "Срок оказания Услуг: с даты заключения контракта по 21.08.2026" in COMMERCIAL_OFFER_VLM_PROMPT
+    assert "в том числе НДС 5%" in COMMERCIAL_OFFER_VLM_PROMPT
+    assert "смешанный режим" in COMMERCIAL_OFFER_VLM_PROMPT
 
 
 def test_payload_contains_offer_once_for_multiple_unmatched_rows():
@@ -110,6 +118,109 @@ def test_deterministic_matcher_does_not_guess_duplicate_shapes_by_position():
     matches, _reasons = _match_offer_items(nmck_items, offer_items)
 
     assert matches == {}
+
+
+def test_deterministic_matcher_uses_verified_supplier_order_for_full_offer():
+    nmck_items = [
+        NmckItem(
+            name="Программное обеспечение (тип №1)",
+            quantity=4,
+            unit="шт",
+            supplier_prices=[SupplierPrice(source_id="supplier_3", unit_price=Decimal("861360"))],
+        ),
+        NmckItem(
+            name="Программное обеспечение (тип №2)",
+            quantity=6,
+            unit="шт",
+            supplier_prices=[SupplierPrice(source_id="supplier_3", unit_price=Decimal("336270.60"))],
+        ),
+        NmckItem(
+            name="Программное обеспечение (тип №3)",
+            quantity=14,
+            unit="шт",
+            supplier_prices=[SupplierPrice(source_id="supplier_3", unit_price=Decimal("197781.60"))],
+        ),
+    ]
+    offer_items = [
+        CommercialOfferItem(name="zVirt", quantity=4, unit="шт", unit_price=Decimal("861360")),
+        CommercialOfferItem(name="Кибер Бэкап", quantity=6, unit="шт", unit_price=Decimal("336270.60")),
+        CommercialOfferItem(name="Кибер Бэкап", quantity=14, unit="шт", unit_price=Decimal("197781.60")),
+    ]
+
+    matches, reasons = _match_offer_items(
+        nmck_items,
+        offer_items,
+        source_id="supplier_3",
+    )
+
+    assert matches == {0: 0, 1: 1, 2: 2}
+    assert all(reasons[index] == "позиция найдена однозначно" for index in range(3))
+
+
+def test_verified_supplier_order_rejects_price_mismatch():
+    nmck_items = [
+        NmckItem(
+            name="Тип №1",
+            quantity=4,
+            unit="шт",
+            supplier_prices=[SupplierPrice(source_id="supplier_3", unit_price=Decimal("100"))],
+        )
+    ]
+    offer_items = [
+        CommercialOfferItem(name="Другое ПО", quantity=4, unit="шт", unit_price=Decimal("101"))
+    ]
+
+    matches, _reasons = _match_offer_items(
+        nmck_items,
+        offer_items,
+        source_id="supplier_3",
+    )
+
+    assert matches == {}
+
+
+def test_offer_source_mapping_recovers_source_missing_from_price_sources():
+    offers = [
+        CommercialOfferSchema(supplier_name="Поставщик 1"),
+        CommercialOfferSchema(supplier_name="Поставщик 2"),
+        CommercialOfferSchema(supplier_name="Поставщик 3"),
+    ]
+    price_sources = [
+        PriceSource(source_id="supplier_1", raw_header="Поставщик 1"),
+        PriceSource(source_id="supplier_2", raw_header="Поставщик 2"),
+    ]
+
+    matches, warnings = _match_offers_to_price_sources(
+        offers,
+        price_sources,
+        required_source_ids=["supplier_1", "supplier_2", "supplier_3"],
+    )
+
+    assert matches["supplier_3"] is offers[2]
+    assert any("Поставщик3" in warning and "по порядку загрузки" in warning for warning in warnings)
+
+
+def test_offer_source_mapping_falls_back_when_number_is_truncated():
+    offers = [
+        CommercialOfferSchema(supplier_name="Поставщик 1"),
+        CommercialOfferSchema(
+            supplier_name="Поставщик 2",
+            outgoing_number="КС-КП 26-140",
+        ),
+    ]
+    price_sources = [
+        PriceSource(source_id="supplier_1", raw_header="Поставщик 1"),
+        PriceSource(
+            source_id="supplier_2",
+            raw_header="Поставщик 2",
+            outgoing_letter_number="КС-КП",
+        ),
+    ]
+
+    matches, warnings = _match_offers_to_price_sources(offers, price_sources)
+
+    assert matches["supplier_2"] is offers[1]
+    assert any("реквизиты ОНМЦК не дали точного совпадения" in warning for warning in warnings)
 
 
 def test_non_price_support_accepts_codes_and_unique_quantity_unit():

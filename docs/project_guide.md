@@ -53,6 +53,9 @@ Key document entities:
   overviews of codes, items, quantities, NMCK, delivery terms, addresses, and
   supplier prices. `Finding` supplies errors and manual-review details rather
   than a flat list of every successful low-level rule.
+- Warranty comparison uses explicit terms from the OOZ warranty section,
+  including an OOZ embedded in the contract. A contract clause that only
+  refers to an appendix does not confirm that warranty terms match.
 - `latest_model/docs_parsing.py`: extracts plan, contract, OOZ, explanatory note, ONMCK, characteristics, and price information from documents.
 - `shared_modules/parser_functions.py`: low-level `.docx` parsing helpers, table normalization, OKPD/KTRU parsing, and ONMCK price extraction.
 - `latest_model/check_registry.py`: bridges parsed plan/OOZ data to registry checks and characteristic comparison.
@@ -174,6 +177,22 @@ Commercial-offer arithmetic:
   and quantities that can be confirmed from ONMCK supplier totals. The text LLM
   receives only pairs left unresolved by those rules and cannot replace an
   already established deterministic match.
+- The commercial-offer report explicitly summarizes five checks: purchase
+  subject against OOZ; quantity against OOZ and ONMCK; supplier unit price
+  against ONMCK; unit against OOZ and ONMCK; and row/offer totals when the VLM
+  extracted enough numeric data. Missing reference values produce manual
+  review rather than a silent pass. The trademark table is rendered in the
+  commercial-offer section and remains informational only.
+- Supplier IDs present in ONMCK price rows remain authoritative even when the
+  corresponding `price_sources` entry is missing or its letter number is
+  truncated. A positional offer fallback is allowed only for the expected,
+  unused offer and records a warning. Remaining item rows may be matched in
+  order only when at least two rows align on supplier price, quantity, and unit.
+- In the public report, semantic results replace duplicate strict text results
+  for subject, delivery term/place, and warranty when the semantic check ran
+  successfully. Strict results remain available in `checks.json` for diagnosis.
+- Procurement methods are compared across the plan, request, and explanatory
+  note before declaring that single-supplier justification is unnecessary.
 
 Structured-output recovery lab:
 

@@ -128,6 +128,24 @@ def _extract_check(client, schema, prompt: str, payload: str):
 def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object]) -> CheckResult:
     findings = result.findings
     status = _aggregate_status(result, findings)
+    expected_labels = {
+        "Штраф заказчика",
+        "Штраф поставщика за стоимостное обязательство",
+        "Штраф поставщика за нестоимостное обязательство",
+        "Пеня за просрочку",
+    }
+    expected = payload.get("expected")
+    if isinstance(expected, dict) and expected.get("smp_sonko_fine_percent"):
+        expected_labels.add("Штраф за непривлечение СМП/СОНКО")
+    passed_labels = {
+        _finding_label(finding.label)
+        for finding in findings
+        if finding.status == "passed"
+    }
+    if findings and expected_labels <= passed_labels and all(
+        finding.status == "passed" for finding in findings
+    ):
+        status = "passed"
     severity = {
         "passed": "info",
         "failed": "error",

@@ -61,6 +61,13 @@ SEMANTIC_CHECK_ORDER = [
     "semantic.smp_preferences",
 ]
 
+SEMANTIC_REPORT_REPLACEMENTS = {
+    "semantic.subject": "strict.plan.subject",
+    "semantic.delivery_term": "strict.plan.delivery_term",
+    "semantic.delivery_place": "strict.plan.delivery_place",
+    "semantic.warranty": "strict.plan.warranty",
+}
+
 COMMERCIAL_OFFER_CHECKS = {
     "manual.commercial_offers.count",
     "manual.commercial_offers.content",
@@ -198,15 +205,19 @@ RAW_DETAIL_KEYS = {
 
 def build_checks_report_text(report: ProcurementChecksReport) -> str:
     by_id = {result.check_id: result for result in report.results}
+    hidden_check_ids = _hidden_strict_check_ids(by_id)
+    visible_results = [
+        result for result in report.results if result.check_id not in hidden_check_ids
+    ]
     lines = [
         "Результат проверки документов",
         "",
         (
-            f"Ошибок: {report.errors_count}. "
-            f"Предупреждений: {report.warnings_count}. "
-            f"Требуют проверки: {report.manual_review_count}. "
-            f"Успешных: {report.passed_count}. "
-            f"Пропущено: {report.skipped_count}."
+            f"Ошибок: {sum(item.status == 'failed' for item in visible_results)}. "
+            f"Предупреждений: {sum(item.status == 'warning' for item in visible_results)}. "
+            f"Требуют проверки: {sum(item.status == 'manual_review' for item in visible_results)}. "
+            f"Успешных: {sum(item.status == 'passed' for item in visible_results)}. "
+            f"Пропущено: {sum(item.status == 'skipped' for item in visible_results)}."
         ),
         "",
         "0) Комплектность пакета",
@@ -221,15 +232,13 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
     lines.append("")
     lines.extend(_render_pp1875_section(by_id))
     lines.append("")
-    lines.extend(_render_internal_section(by_id))
+    lines.extend(_render_internal_section(by_id, hidden_check_ids=hidden_check_ids))
     lines.append("")
-    lines.extend(_render_semantic_section(by_id))
+    lines.extend(_render_semantic_section(by_id, hidden_check_ids=hidden_check_ids))
     lines.append("")
     lines.extend(_render_commercial_offer_section(by_id))
     lines.append("")
     lines.extend(_render_ktru_characteristics_section(by_id))
-    lines.append("")
-    lines.extend(_render_supplier_prices_section(by_id))
 
     leftovers = [result for result in report.results if result.check_id not in SPECIAL_CHECKS]
     if leftovers:
@@ -238,6 +247,29 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
         for result in leftovers:
             lines.extend(_render_result(result))
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _hidden_strict_check_ids(by_id: dict[str, CheckResult]) -> set[str]:
+    hidden = {"strict.onmck.supplier_prices"}
+    for semantic_id, strict_id in SEMANTIC_REPORT_REPLACEMENTS.items():
+        semantic = by_id.get(semantic_id)
+        strict = by_id.get(strict_id)
+        if semantic is None:
+            continue
+        if _semantic_result_unavailable(semantic):
+            if strict is not None:
+                hidden.add(semantic_id)
+        else:
+            hidden.add(strict_id)
+    return hidden
+
+
+def _semantic_result_unavailable(result: CheckResult) -> bool:
+    message = " ".join(str(result.message or result.report_text or "").casefold().split())
+    return (
+        "semantic llm check не выполнен" in message
+        or "llm не вернула результат" in message
+    )
 
 
 def build_commercial_offer_report_text(report: ProcurementChecksReport) -> str:
@@ -331,9 +363,15 @@ def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
     return lines
 
 
-def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
+def _render_internal_section(
+    by_id: dict[str, CheckResult],
+    *,
+    hidden_check_ids: set[str] | None = None,
+) -> list[str]:
     lines = ["4) Внутренний анализ перечня документов:"]
     for check_id in INTERNAL_CHECK_ORDER:
+        if check_id in (hidden_check_ids or set()):
+            continue
         result = by_id.get(check_id)
         if result is not None:
             lines.extend(_render_titled_result(result))
@@ -343,9 +381,15 @@ def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
     return lines
 
 
-def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
+def _render_semantic_section(
+    by_id: dict[str, CheckResult],
+    *,
+    hidden_check_ids: set[str] | None = None,
+) -> list[str]:
     lines = ["5) Смысловая и ручная проверка:"]
     for check_id in SEMANTIC_CHECK_ORDER:
+        if check_id in (hidden_check_ids or set()):
+            continue
         result = by_id.get(check_id)
         if result is not None:
             lines.extend(_render_semantic_result(result))
@@ -363,6 +407,7 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
         required = count.details.get("required") if count.details else None
         if found == 0:
             lines.append(f"- Коммерческие предложения не приложены. Требуется не менее {required or 3}.")
+            lines.extend(_render_trademark_table(by_id.get("manual.ktru.trademarks")))
             return lines
         else:
             lines.extend(_render_result(count))
@@ -370,8 +415,10 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
     if content is not None:
         lines.extend(_render_commercial_offer_content(content))
     comparison = by_id.get("manual.commercial_offers.onmck")
+    lines.extend(_render_commercial_offer_criteria(content, comparison))
     if comparison is not None:
         lines.extend(_render_commercial_offer_comparison(comparison))
+    lines.extend(_render_trademark_table(by_id.get("manual.ktru.trademarks")))
     return lines
 
 
@@ -390,26 +437,50 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
         rendered = _render_ktru_additional_rows(additional)
         if rendered:
             lines.extend(rendered)
-    trademarks = by_id.get("manual.ktru.trademarks")
-    if trademarks is not None:
-        rows = trademarks.details.get("trademarks") if trademarks.details else None
-        if isinstance(rows, list) and rows:
-            lines.append("")
-            lines.append("- <b>Товарные знаки и их обоснование</b> — без правовой оценки.")
-            lines.extend([
-                "",
-                "| Позиция | Товарный знак | Обоснование товарного знака |",
-                "| :--- | :--- | :---: |",
-            ])
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                justification = "найдено" if row.get("justification_found") else "не найдено"
-                item_name = row.get("item_name") or "позиция"
-                lines.append(
-                    f"| {_table_cell(_human_text(str(item_name)))} | "
-                    f"{_table_cell(_human_text(str(row.get('trademark'))))} | {justification} |"
-                )
+    return lines
+
+
+def _render_commercial_offer_criteria(
+    content: CheckResult | None,
+    comparison: CheckResult | None,
+) -> list[str]:
+    criteria = []
+    if comparison and isinstance(comparison.details.get("criteria"), list):
+        criteria.extend(comparison.details["criteria"])
+    if content and isinstance(content.details.get("total_criterion"), dict):
+        criteria.append(content.details["total_criterion"])
+    if not criteria:
+        return []
+    lines = ["", "- <b>Проверки КП по ООЗ и ОНМЦК:</b>"]
+    for criterion in criteria:
+        if not isinstance(criterion, dict):
+            continue
+        status = str(criterion.get("status") or "manual_review")
+        label = _human_text(str(criterion.get("label") or "Проверка"))
+        lines.append(f"  - {label} — <b>{STATUS_LABELS.get(status, status)}</b>.")
+    return lines
+
+
+def _render_trademark_table(result: CheckResult | None) -> list[str]:
+    rows = result.details.get("trademarks") if result and result.details else None
+    if not isinstance(rows, list) or not rows:
+        return []
+    lines = [
+        "",
+        "- <b>Товарные знаки и их обоснование</b> — без правовой оценки.",
+        "",
+        "| Позиция | Товарный знак | Обоснование товарного знака |",
+        "| :--- | :--- | :---: |",
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        justification = "найдено" if row.get("justification_found") else "не найдено"
+        item_name = row.get("item_name") or "позиция"
+        lines.append(
+            f"| {_table_cell(_human_text(str(item_name)))} | "
+            f"{_table_cell(_human_text(str(row.get('trademark'))))} | {justification} |"
+        )
     return lines
 
 
@@ -598,6 +669,11 @@ def _render_onmck_min_price(result: CheckResult) -> list[str]:
                 f"    - {_human_text(str(supplier.get('label') or 'Поставщик'))}: "
                 f"<b>{_report_money(supplier.get('price'))}</b>"
             )
+        coefficient = row.get("variation_coefficient")
+        lines.append(
+            "    Коэффициент вариации: "
+            f"<b>{_human_text(str(coefficient)) if coefficient else 'не рассчитан'}</b>"
+        )
         lines.append(
             "    Итог: "
             f"<b>{STATUS_LABELS.get(str(row.get('status')), 'ТРЕБУЕТ ПРОВЕРКИ')}</b>"
@@ -753,7 +829,7 @@ def _render_commercial_offer_content(result: CheckResult) -> list[str]:
                 lines.extend(f"  - {_human_text(issue)}" for issue in arithmetic_issues[:6])
                 if len(arithmetic_issues) > 6:
                     lines.append(
-                        f"  - ещё {len(arithmetic_issues) - 6}; полный список сохранён в checks.json."
+                        f"  - ещё {len(arithmetic_issues) - 6}; полный список сохранён в файле подробных результатов."
                     )
 
         warning_groups = result.details.get("parser_warning_groups") if result.details else None
@@ -765,7 +841,7 @@ def _render_commercial_offer_content(result: CheckResult) -> list[str]:
                 lines.append(f"  - <b>{_human_text(label)}</b>: <warn>{_human_text(warning_text)}</warn>")
             if total_warning_count > len(compact_warnings):
                 lines.append(
-                    f"  - показаны основные замечания; полный список ({total_warning_count}) сохранён в checks.json."
+                    f"  - показаны основные замечания; полный список ({total_warning_count}) сохранён в файле подробных результатов."
                 )
         trademarks = sorted({
             trademark
@@ -815,12 +891,12 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
     failures = details.get("failures") or []
     if isinstance(manual, list) and manual:
         manual_rows = [row for row in comparison_rows or [] if isinstance(row, dict) and row.get("status") == "manual_review"]
-        lines.append(f"  Требуют ручной сверки: {len(manual_rows)} позиций. Причины сохранены в checks.json.")
+        lines.append(f"  Требуют ручной сверки: {len(manual_rows)} позиций. Причины сохранены в файле подробных результатов.")
     if isinstance(failures, list) and failures:
         lines.append("  <error>Подтверждённые расхождения:</error>")
         lines.extend(f"  - {_human_text(value)}" for value in failures[:6])
         if len(failures) > 6:
-            lines.append(f"  - ещё {len(failures) - 6}; полный список сохранён в checks.json.")
+            lines.append(f"  - ещё {len(failures) - 6}; полный список сохранён в файле подробных результатов.")
     return lines
 
 
