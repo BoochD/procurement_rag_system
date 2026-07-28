@@ -8,7 +8,10 @@ VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.0"
 
 ROLE_NOTES: dict[VlmTableRole, str] = {
     "purchase_description": (
-        "Extract procurement items and characteristics. Do not turn explanatory "
+        "Extract procurement items, codes, characteristics, trademarks, and explicit "
+        "trademark justifications. Store a visible trademark separately in trademark "
+        "and its explicit justification in trademark_justification_text. Leave both "
+        "fields null when they are not visible. Do not turn explanatory "
         "justification paragraphs into separate items. If a row only justifies "
         "additional characteristics, put it into notes or warnings. Formal rows "
         "such as 'Предоставляемые лицензии ... необходимы ...', compatibility "
@@ -35,7 +38,11 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
         "Put the visible table title or application area into scope_text. Create one "
         "justification for each visible row or bullet, preserve the full reason in "
         "justification_text, linked visible characteristic names in characteristic_names, "
-        "and a short exact quote in evidence_text. Exclude normative preambles, PP 145 "
+        "and a short exact quote in evidence_text. Link each reason to a visible item "
+        "using item_name, item_row_number, item_okpd2_code and item_ktru_code. The payload "
+        "may contain known_items from other item tables in the same OOZ; use them only "
+        "when the link is explicit or uniquely determined. If several items are possible, "
+        "leave the item link empty and add a warning instead of guessing. Exclude normative preambles, PP 145 "
         "references and text outside the selected justification block. Do not evaluate "
         "whether the reason is legally sufficient."
     ),
@@ -53,9 +60,9 @@ Return strictly valid JSON matching the provided schema.
 Target table role: {role}
 
 Rules:
-- The target role is already selected by the deterministic pipeline. Do not
-  choose a different role unless the image clearly contradicts the metadata; in
-  that case keep table_role as the visible role and explain it in warnings.
+- The target role is already selected by the deterministic pipeline. Always
+  return that exact value in table_role. If the image contradicts the metadata,
+  keep the target role, leave role-specific arrays empty and explain it in warnings.
 - Fill only the fields relevant to the target role:
   purchase_description -> items with characteristics;
   contract_stages -> stages;

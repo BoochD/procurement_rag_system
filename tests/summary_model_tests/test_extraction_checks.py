@@ -244,12 +244,40 @@ def test_checks_pass_core_strict_rules_and_create_manual_reviews():
     assert checks["strict.codes.okpd2"].status == "passed"
     assert checks["strict.codes.ktru"].status == "passed"
     assert checks["strict.funding_source"].status == "passed"
-    assert checks["strict.securities"].status == "passed"
+    assert checks["strict.plan.contract_security_limits"].status == "passed"
+    assert "strict.securities" not in checks
+    assert "strict.warranty_security" not in checks
     assert checks["strict.contract.penalties"].status == "passed"
     assert checks["strict.smp_sonko_subcontract"].status == "passed"
     assert checks["strict.contract.attachments"].status == "passed"
     assert checks["manual.commercial_offers.count"].status == "manual_review"
     assert checks["manual.ktru.characteristics"].status == "manual_review"
+
+
+def test_trademarks_are_reported_without_affecting_check_statuses():
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.trademark = "Test Mark"
+    item.trademark_justification_text = "Обоснование совместимости."
+
+    report = run_checks(package)
+    checks = _by_id(report)
+    text = build_checks_report_text(report)
+
+    assert checks["manual.ktru.trademarks"].status == "passed"
+    assert "Товарные знаки и их обоснование" in text
+    assert "| Test Mark | найдено |" in text
+
+
+def test_trademark_is_reported_from_explicit_item_name_phrase():
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.name = "Комплект расширения, товарный знак: YADRO TATLIN*"
+    item.trademark = None
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["manual.ktru.trademarks"].details["trademarks"][0]["trademark"] == "YADRO TATLIN"
 
 
 def test_stage_check_keeps_report_ready_tables_without_json_dump():
@@ -456,6 +484,9 @@ def test_delivery_term_uses_matching_stages_only_when_direct_fields_are_missing(
     package.contract_draft.stages = [
         ProcurementStage(stage_number="1", service_term_text="по 13.07.2026")
     ]
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", service_term_text="по 13.07.2026")
+    ]
 
     checks = _by_id(run_checks(package))
 
@@ -620,40 +651,26 @@ def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
         def __init__(self):
             self.payload = None
 
-        def extract(self, schema, system_prompt, payload):
+        def extract_check(self, schema, system_prompt, payload):
             self.payload = json.loads(payload)
             return schema(
-                penalty_clauses=[
-                    PenaltyClause(
-                        party="customer",
-                        obligation_kind="value_obligation",
-                        raw_text="100000 рублей, если цена Контракта превышает 100 млн рублей.",
-                        amount=Decimal("100000"),
-                        evidence="п. 7.4",
-                    ),
-                    PenaltyClause(
-                        party="supplier",
-                        obligation_kind="non_value_obligation",
-                        raw_text="Штраф составляет 100000 рублей.",
-                        amount=Decimal("100000"),
-                        evidence="п. 7.6",
-                    ),
-                    PenaltyClause(
-                        party="supplier",
-                        obligation_kind="value_obligation",
-                        raw_text="Штраф составляет 0,5 процента.",
-                        percent=Decimal("0.5"),
-                        evidence="п. 7.7",
-                    ),
-                ],
-                peni_clauses=[
-                    PenaltyClause(
-                        party="supplier",
-                        obligation_kind="delay_peni",
-                        raw_text="Пеня начисляется как 1/300 действующей ключевой ставки.",
-                        basis="1/300 действующей ключевой ставки",
-                        evidence="п. 7.8",
-                    )
+                status="passed",
+                message="Штрафы и пени найдены в разделе ответственности.",
+                findings=[
+                    {
+                        "label": "Штраф заказчика",
+                        "status": "passed",
+                        "message": "Применимая ветка найдена.",
+                        "evidence": "п. 7.4",
+                        "quote": "100000 рублей, если цена Контракта превышает 100 млн рублей.",
+                    },
+                    {
+                        "label": "Пеня за просрочку",
+                        "status": "passed",
+                        "message": "Формула найдена.",
+                        "evidence": "п. 7.8",
+                        "quote": "1/300 действующей ключевой ставки",
+                    },
                 ],
             ), None
 
@@ -667,9 +684,9 @@ def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
     assert client.payload["nmck"] == "106312006.00"
     assert "7.4." in client.payload["responsibility_section_text"]
     assert results[0].status == "passed"
-    extraction = results[0].details["penalty_llm_extraction"]
-    assert extraction["penalty_clauses"][0]["amount"] == "100000"
-    assert extraction["penalty_clauses"][0]["evidence"] == "п. 7.4"
+    extraction = results[0].details["penalty_llm_check"]
+    assert extraction["findings"][0]["evidence"] == "п. 7.4"
+    assert any("100000 рублей" in line for line in results[0].details["summary_lines"])
 
 
 def test_penalty_llm_is_not_called_without_usable_responsibility_section():
@@ -681,7 +698,7 @@ def test_penalty_llm_is_not_called_without_usable_responsibility_section():
     package.contract_draft.responsibility_section_text = "7. Ответственность сторон."
 
     class UnexpectedClient:
-        def extract(self, *args, **kwargs):
+        def extract_check(self, *args, **kwargs):
             raise AssertionError("Penalty LLM must not be called")
 
     results, metrics = run_penalty_llm_checks(package, llm_client=UnexpectedClient())
@@ -689,6 +706,71 @@ def test_penalty_llm_is_not_called_without_usable_responsibility_section():
     assert metrics["calls"] == 0
     assert metrics["skipped_reason"] == "penalty_terms_not_found_in_section"
     assert results[0].status == "manual_review"
+
+
+def test_penalty_llm_public_result_uses_russian_labels_and_worst_status():
+    from summary_model.checks.penalty_llm import run_penalty_llm_checks
+
+    package = _base_package()
+    package.contract_draft.responsibility_section_text = (
+        "7. Ответственность сторон. 7.4. Штраф 100000 рублей. "
+        "7.5. Пеня составляет 1/300 ключевой ставки."
+    )
+
+    class EnglishPenaltyClient:
+        def extract_check(self, schema, system_prompt, payload):
+            return schema(
+                status="passed",
+                message="Responsibility section matches expected penalties.",
+                findings=[
+                    {
+                        "label": "fixed_fine_amount_customer",
+                        "status": "passed",
+                        "message": "Found fixed fine amount.",
+                        "evidence": "п. 7.4",
+                        "quote": "100000 рублей",
+                    },
+                    {
+                        "label": "smp_sonko_subcontract_percent",
+                        "status": "manual_review",
+                        "message": "Expected requirement was not found.",
+                        "evidence": None,
+                        "quote": None,
+                    },
+                ],
+            ), None
+
+        def metrics(self):
+            return {"calls": 1}
+
+    results, _metrics = run_penalty_llm_checks(package, llm_client=EnglishPenaltyClient())
+    result = results[0]
+
+    assert result.status == "manual_review"
+    assert result.report_text == "Часть условий о штрафах и пенях требует ручной проверки."
+    assert any(line.startswith("Штраф заказчика — ОК.") for line in result.details["summary_lines"])
+    assert any("Штраф за непривлечение СМП/СОНКО" in line for line in result.details["summary_lines"])
+    assert all("Found" not in line and "Expected" not in line for line in result.details["summary_lines"])
+
+
+def test_purchase_description_warranty_text_collects_explicit_terms():
+    from summary_model.extraction_pipeline import _purchase_description_warranty_text
+
+    text = """
+    Требования к оборудованию и гарантийным обязательствам
+    Пуско-наладка серверов
+    Гарантийный срок на пусконаладочные работы составляет 12 месяцев.
+    На серверы установлена гарантия Производителя и Исполнителя - 36 месяцев.
+    На комплект хранения данных установлена гарантия до 22.10.2028 г.
+    """
+
+    result = _purchase_description_warranty_text(text)
+
+    assert result is not None
+    assert "12 месяцев" in result
+    assert "36 месяцев" in result
+    assert "22.10.2028" in result
+    assert "Пуско-наладка серверов" not in result
 
 
 def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data():
@@ -702,7 +784,7 @@ def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data()
     )
 
     class FailedClient:
-        def extract(self, *args, **kwargs):
+        def extract_check(self, *args, **kwargs):
             return None, "provider unavailable"
 
         def metrics(self):
@@ -736,7 +818,7 @@ def test_stage_llm_runs_only_for_manual_review_and_excludes_prices():
         def __init__(self):
             self.payload = None
 
-        def extract(self, schema, system_prompt, payload):
+        def extract_check(self, schema, system_prompt, payload):
             self.payload = json.loads(payload)
             return schema(
                 status="manual_review",
@@ -891,10 +973,11 @@ def test_commercial_offer_minimum_is_manual_when_one_offer_item_is_unmatched():
 def test_code_mismatch_fails_and_missing_codes_manual_review():
     package = _base_package()
     package.contract_draft.items[0].okpd2_code = "99.99.99.999"
+    package.contract_draft.items[0].ktru_code = None
     checks = _by_id(run_checks(package))
     assert checks["strict.codes.okpd2"].status == "failed"
-    assert checks["strict.codes.okpd2"].details["missing_by_document"]["schedule_application"] == [
-        "99.99.99.999"
+    assert checks["strict.codes.okpd2"].details["missing_by_document"]["contract_draft"] == [
+        "20.59.12.120"
     ]
 
     package.schedule_application.okpd2_codes = []
@@ -917,7 +1000,8 @@ def test_okpd2_check_uses_ktru_prefix_when_explicit_okpd2_is_missing():
 
     checks = _by_id(run_checks(package))
 
-    assert checks["strict.codes.okpd2"].status == "passed"
+    assert checks["strict.codes.okpd2"].status == "warning"
+    assert checks["strict.codes.okpd2"].details["derived_only_by_document"]
 
 
 def test_contract_attachment_missing_tables_fails():
@@ -930,10 +1014,10 @@ def test_contract_attachment_missing_tables_fails():
     assert checks["strict.contract.attachments"].status == "failed"
 
 
-def test_securities_pass_when_not_required_and_manual_when_contract_missing_value():
+def test_security_checks_use_only_plan_values():
     package = _base_package()
     checks = _by_id(run_checks(package))
-    assert checks["strict.securities"].status == "passed"
+    assert checks["strict.plan.contract_security_limits"].status == "passed"
 
     package.schedule_application.contract_security = SecurityValue(
         raw="Обеспечение исполнения контракта 5%",
@@ -944,8 +1028,62 @@ def test_securities_pass_when_not_required_and_manual_when_contract_missing_valu
 
     checks = _by_id(run_checks(package))
 
-    assert checks["strict.securities"].status == "manual_review"
-    assert "в проекте контракта" in checks["strict.securities"].message
+    assert checks["strict.plan.contract_security_limits"].status == "passed"
+    assert "strict.securities" not in checks
+
+
+def test_not_required_plan_security_is_not_reported_as_a_missing_size():
+    package = _base_package()
+    package.schedule_application.application_security = SecurityValue(
+        raw="не предусмотрено",
+        is_not_required=True,
+    )
+    package.schedule_application.warranty_security = SecurityValue(
+        raw="не предусмотрено",
+        is_not_required=True,
+    )
+    package.contract_draft.contract_security = None
+    package.contract_draft.warranty_security = None
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.application_security"].status == "passed"
+    assert "не предусмотрено" in checks["strict.plan.contract_security_limits"].message
+    assert "не предусмотрено" in checks["strict.plan.warranty_security_limits"].message
+    assert "strict.securities" not in checks
+    assert "strict.warranty_security" not in checks
+
+
+def test_offer_source_matching_does_not_fall_back_to_order_when_requisites_exist():
+    from datetime import date
+
+    from summary_model.checks.runner import _match_offers_to_price_sources
+    from summary_model.extraction_models import CommercialOfferSchema, PriceSource
+
+    offers = [
+        CommercialOfferSchema(outgoing_number="002", outgoing_date=date(2026, 3, 20)),
+        CommercialOfferSchema(outgoing_number="003-01", outgoing_date=date(2026, 3, 20)),
+    ]
+    sources = [
+        PriceSource(
+            source_id="supplier_1",
+            raw_header="Поставщик 1 (письмо №б/н от 20.03.2026)",
+            outgoing_letter_number="б/н",
+            outgoing_letter_date=date(2026, 3, 20),
+        ),
+        PriceSource(
+            source_id="supplier_3",
+            raw_header="Поставщик 3 (письмо №002 от 20.03.2026)",
+            outgoing_letter_number="002",
+            outgoing_letter_date=date(2026, 3, 20),
+        ),
+    ]
+
+    matched, warnings = _match_offers_to_price_sources(offers, sources)
+
+    assert "supplier_1" not in matched
+    assert matched["supplier_3"].outgoing_number == "002"
+    assert not any("по порядку загрузки" in warning for warning in warnings)
 
 
 def test_security_sizes_are_reported_separately_and_structured_eis_value_is_manual():
@@ -969,15 +1107,13 @@ def test_security_sizes_are_reported_separately_and_structured_eis_value_is_manu
     assert checks["strict.application_security"].status == "passed"
     assert checks["strict.plan.contract_security_limits"].status == "passed"
     assert checks["strict.plan.warranty_security_limits"].status == "passed"
-    assert checks["strict.securities"].status == "manual_review"
-    assert checks["strict.warranty_security"].status == "manual_review"
-    assert "30%" in checks["strict.securities"].details["summary_lines"][0]
-    assert "1%" in checks["strict.warranty_security"].details["summary_lines"][0]
-    assert "см. п. 8.2" in checks["strict.securities"].details["summary_lines"][1]
-    assert "см. п. 8.11" in checks["strict.warranty_security"].details["summary_lines"][1]
+    assert "strict.securities" not in checks
+    assert "strict.warranty_security" not in checks
+    assert "30%" in checks["strict.plan.contract_security_limits"].details["summary_lines"][0]
+    assert "1%" in checks["strict.plan.warranty_security_limits"].details["summary_lines"][0]
 
     report_text = build_checks_report_text(run_checks(package))
-    assert "числовой размер указан в структурированной форме ЕИС (см. п. 8.2)" in report_text
+    assert "числовой размер указан в структурированной форме ЕИС" not in report_text
     assert "Размер обеспечения исполнения контракта указывается" not in report_text
 
 

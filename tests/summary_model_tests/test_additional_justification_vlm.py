@@ -21,6 +21,8 @@ from summary_model.vlm_fallback import (
     _unextracted_justification_table,
 )
 from summary_model.vlm_lab.candidates import justification_candidate_reasons
+from summary_model.checks.additional_characteristics import build_assessments, justification_state
+from summary_model.extraction_models import AdditionalCharacteristicsJustification
 
 
 def _table(title: str = "Обоснование дополнительных характеристик") -> tuple[ParsedTable, TableIR]:
@@ -164,6 +166,87 @@ def test_table_is_rendered_and_sent_to_vlm_once(monkeypatch):
     assert calls == {"render": 1, "vlm": 1}
 
 
+def test_mixed_item_and_justification_table_runs_both_roles_without_data_loss(
+    monkeypatch,
+):
+    import summary_model.vlm_fallback as fallback_module
+
+    parsed, source = _table("Таблица характеристик и обоснований")
+    parsed.table_type = "ooz_items_table"
+    parsed.compact_json = {
+        "items": [
+            {"row_number": "1", "name": "Программное обеспечение"},
+            {
+                "row_number": "2",
+                "name": "Программное обеспечение (тип №2)",
+                "okpd2_code": "58.29.32.000",
+                "ktru_code": "58.29.11.000-00000003",
+            },
+        ]
+    }
+    source.context_before = ["Обоснование применения дополнительных характеристик"]
+    ir = DocumentIR(
+        document_id="doc-mixed",
+        file_name="ooz-mixed.docx",
+        media_type="docx",
+        blocks=[DocumentBlockIR(block_id="block-1", order=1, type="table", table=source)],
+    )
+    roles = []
+
+    def fake_render(_table, output_path, **_kwargs):
+        Path(output_path).write_bytes(b"png")
+        return {"path": str(output_path), "width": 100, "height": 400, "rows": 2, "columns": 2}
+
+    def fake_call(**kwargs):
+        role = kwargs["role"]
+        roles.append(role)
+        if role == "purchase_description":
+            content = {
+                "table_role": role,
+                "items": [{
+                    "row_number": "1",
+                    "name": "Программное обеспечение",
+                    "ktru_code": "58.29.11.000-00000003",
+                    "trademark": "Example",
+                }],
+            }
+        else:
+            assert kwargs["payload"]["known_items"][0]["name"] == "Программное обеспечение"
+            content = {
+                "table_role": role,
+                "justifications": [{
+                    "item_name": "Программное обеспечение",
+                    "item_row_number": "1",
+                    "characteristic_names": ["Централизованное управление"],
+                    "justification_text": "Необходимо для управления кластером.",
+                }],
+            }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(fallback_module, "render_table_image", fake_render)
+    monkeypatch.setattr(fallback_module, "_call_vlm", fake_call)
+    output_dir = Path("runtime") / f"summary_model_vlm_mixed_{uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    try:
+        repairer = VlmFallbackRepairer(VlmFallbackOptions(enabled=True, output_dir=output_dir))
+        result = repairer.repair_document_tables(ir, DocumentType.OOZ, [parsed])[0]
+        artifact_dirs = {path.name for path in (output_dir / "ooz-mixed.docx").iterdir()}
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+    assert roles == ["purchase_description", "additional_characteristics_justification"]
+    assert result.table_type == "ooz_items_table"
+    assert result.compact_json["items"][0]["ktru_code"] == "58.29.11.000-00000003"
+    assert result.compact_json["items"][0]["trademark"] == "Example"
+    assert result.compact_json["items"][1]["name"] == "Программное обеспечение (тип №2)"
+    assert result.compact_json["items"][1]["okpd2_code"] == "58.29.32.000"
+    assert result.compact_json["additional_characteristics_justifications"][0]["item_row_number"] == "1"
+    assert artifact_dirs == {
+        "table_1_purchase_description",
+        "table_1_additional_characteristics_justification",
+    }
+
+
 def test_failed_vlm_preserves_justification_candidate():
     parsed, _source = _table()
     recovered = _unextracted_justification_table(parsed)
@@ -190,3 +273,36 @@ def test_non_ooz_tables_never_use_justification_vlm_role(monkeypatch):
         result = repairer.repair_document_tables(ir, document_type, [parsed])
         assert result[0].table_type == "generic_table"
     assert calls == []
+
+
+def test_justification_is_linked_to_matching_item_only():
+    records = [
+        AdditionalCharacteristicsJustification(
+            item_ktru_code="58.29.11.000-00000003",
+            characteristic_names=["Централизованное управление"],
+            justification_text="Необходимо для управления кластером.",
+        )
+    ]
+    rows = [
+        {
+            "item_name": "ПО",
+            "ktru_code": "58.29.11.000-00000003",
+            "characteristic_name": "Централизованное управление",
+            "status": "passed",
+        },
+        {
+            "item_name": "Сервер",
+            "ktru_code": "26.20.14.000-00000189",
+            "characteristic_name": "Количество портов",
+            "status": "passed",
+        },
+    ]
+
+    assessments = build_assessments(
+        rows,
+        ooz_state=justification_state(records),
+        records=records,
+    )
+
+    assert assessments[0]["justification"]["status"] == "found"
+    assert assessments[1]["justification"]["status"] == "missing"

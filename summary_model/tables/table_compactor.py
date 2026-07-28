@@ -126,6 +126,10 @@ def _items_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
                 "name": row.cells_by_header.get("name"),
                 "okpd2_code": row.cells_by_header.get("okpd2_code"),
                 "ktru_code": row.cells_by_header.get("ktru_code"),
+                "trademark": row.cells_by_header.get("trademark"),
+                "trademark_justification_text": row.cells_by_header.get(
+                    "trademark_justification_text"
+                ),
                 "unit": row.cells_by_header.get("unit"),
                 "quantity_raw": row.cells_by_header.get("quantity"),
                 "quantity": _decimal_json(row.cells_by_header.get("quantity")),

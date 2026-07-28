@@ -54,6 +54,8 @@ def normalize_header_name(path: list[str]) -> str | None:
         ("okpd2_ktru", ("окпд", "ктру")),
         ("okpd2_code", ("окпд",)),
         ("ktru_code", ("ктру",)),
+        ("trademark_justification", ("обоснование", "товарн", "знак")),
+        ("trademark", ("товарн", "знак")),
         ("quantity", ("количество",)),
         ("quantity", ("кол-во",)),
         ("quantity", ("кол во",)),
@@ -244,6 +246,8 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     char_value_index = mapping.get("characteristic_value")
     char_unit_index = mapping.get("characteristic_unit")
     row_number_index = mapping.get("row_number")
+    trademark_index = mapping.get("trademark")
+    trademark_justification_index = mapping.get("trademark_justification")
 
     logical: list[LogicalTableRow] = []
     current_parent_row: int | None = None
@@ -302,6 +306,10 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                             "name": dense_name,
                             "okpd2_code": okpd_match.group(0) if okpd_match else None,
                             "ktru_code": ktru_match.group(0) if ktru_match else None,
+                            "trademark": _value(row, trademark_index),
+                            "trademark_justification_text": _value(
+                                row, trademark_justification_index
+                            ),
                             "unit": _value(row, unit_index),
                             "quantity": quantity_value,
                         },

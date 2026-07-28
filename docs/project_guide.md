@@ -274,12 +274,12 @@ contain numbers, names, terms and quantities, but not prices; stage prices and
 arithmetic remain an ONMCK check. The general semantic LLM no longer emits a
 second `semantic.stages` result.
 
-Delivery-term comparison uses stage terms only as a narrow fallback: the
-top-level terms must be absent, and the stage numbers and terms in the plan,
-OOZ and contract must compare successfully. ONMCK stage availability does not
-control this delivery-term fallback. A contract value that only refers the
-funding source to the structured EIS form is manual review, not a confirmed
-mismatch with the plan.
+When the plan contains stages, the dedicated stage result is the only source
+for delivery timing. The short `Срок поставки` line mirrors that result and the
+general semantic LLM does not receive or emit a second delivery-term check. If
+the plan has no stages, ordinary top-level delivery terms are compared instead.
+A contract value that only refers the funding source to the structured EIS
+form is manual review, not a confirmed mismatch with the plan.
 
 Commercial-offer minimum-price checks never declare a selected minimum wrong
 from an incomplete set of matched offers. If one offer row cannot be mapped to
@@ -304,6 +304,14 @@ such as `необходимость` or `совместимость` alone do no
 VLM extraction preserves a table-candidate record with a warning rather than
 discarding the source.
 
+An OOZ table may simultaneously be an item table and a justification table.
+It is then processed once per role with separate `(table_id, role)` cache and
+debug artifacts. Item/code/characteristic output and justification output are
+merged into the same parsed table without either role replacing the other.
+Justifications carry optional item name, row number, OKPD2 and KTRU links. An
+unlinked justification may be applied automatically only when the target item
+is unique; otherwise the affected characteristic remains manual review.
+
 The standalone OOZ stores justification records in
 `purchase_description.additional_characteristics_justifications` and is the
 only source used by the KTRU check. Contract fields remain readable for schema
@@ -311,6 +319,23 @@ compatibility, but contract justification tables are not sent to this VLM role
 and are not compared with the OOZ. Checks do not judge legal persuasiveness;
 they verify explicit presence in the OOZ. Complete rows and decision cards stay
 in `checks.json`; the public report shows one compact row per item/KTRU.
+
+Product items also carry optional `trademark` and
+`trademark_justification_text` fields. They do not affect KTRU or other legal
+decisions. When present, the report lists the trademark and whether an explicit
+justification was extracted.
+
+Code completeness uses the plan as the required set and compares it with the
+standalone OOZ and the contract's embedded OOZ. ONMCK is not a required code
+source. KTRU roots are never inserted into the plan OKPD2 set; a code present
+only as a KTRU-derived root in another document is a warning rather than an
+exact OKPD2 match. Contract item tables are parsed for code completeness only;
+KTRU characteristics and additional-characteristic justifications remain owned
+by the standalone OOZ.
+
+Application, contract-performance and warranty-security legality are reported
+once from the plan and its NMCK. The report does not create duplicate numeric
+comparisons against contract text or structured-EIS placeholders.
 
 PP No. 1875 plan-field resolution is shared by the early plan check and the
 KTRU additional-characteristic check. A special position (25, 26 or 32 of

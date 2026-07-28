@@ -44,6 +44,7 @@ def justification_state(
             if record.source_document_title or record.source_document_type
         }),
         "quote": _record_text(preferred)[:240] if preferred else None,
+        "source_table_id": preferred.source_table_id if preferred else None,
         "warnings": warnings,
     }
 
@@ -59,10 +60,16 @@ def build_assessments(
     rows: list[dict[str, Any]],
     *,
     ooz_state: dict[str, Any],
+    records: list[AdditionalCharacteristicsJustification] | None = None,
 ) -> list[dict[str, Any]]:
     assessments = []
     for row in rows:
-        decision, reason = _decision(row.get("status"), ooz_state)
+        row_state = (
+            _justification_state_for_row(records, row, rows)
+            if records is not None
+            else ooz_state
+        )
+        decision, reason = _decision(row.get("status"), row_state)
         regime = row.get("plan_regime") or {}
         assessments.append({
             "item": row.get("item_name"),
@@ -79,7 +86,7 @@ def build_assessments(
                 for key in ("field_code", "field_value", "regime", "status")
                 if regime.get(key) is not None
             },
-            "justification": _justification_reference(ooz_state),
+            "justification": _justification_reference(row_state),
             "decision": decision,
             "reason": reason,
         })
@@ -121,12 +128,91 @@ def _decision(
 
 def _justification_reference(
     ooz_state: dict[str, Any],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if ooz_state["found"]:
-        return {"status": "found", "source": "ooz"}
+        return {
+            "status": "found",
+            "source": "ooz",
+            "quote": ooz_state.get("quote"),
+            "source_table_id": ooz_state.get("source_table_id"),
+        }
     if ooz_state["partial"]:
         return {"status": "partial", "source": "ooz"}
     return {"status": "missing", "source": "none"}
+
+
+def _justification_state_for_row(
+    records: list[AdditionalCharacteristicsJustification],
+    row: dict[str, Any],
+    all_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    linked = [record for record in records if _has_item_link(record)]
+    matching = [record for record in linked if _record_matches_row(record, row)]
+    characteristic_matches = [
+        record
+        for record in records
+        if not _has_item_link(record)
+        and _characteristic_matches(record, row.get("characteristic_name"))
+    ]
+    selected = [*matching, *characteristic_matches]
+    if not selected:
+        item_keys = {
+            (_clean(item.get("item_name")), _clean(item.get("ktru_code")))
+            for item in all_rows
+        }
+        unlinked = [record for record in records if not _has_item_link(record)]
+        if len(item_keys) == 1:
+            selected = unlinked
+        elif unlinked:
+            state = justification_state(unlinked)
+            state["found"] = False
+            state["partial"] = True
+            state["quote"] = None
+            state["warnings"] = list(dict.fromkeys([
+                *state.get("warnings", []),
+                "Обоснование не привязано к конкретной позиции ООЗ.",
+            ]))
+            return state
+    return justification_state(selected)
+
+
+def _has_item_link(record: AdditionalCharacteristicsJustification) -> bool:
+    return bool(
+        _clean(record.item_name)
+        or _clean(record.item_row_number)
+        or _clean(record.item_okpd2_code)
+        or _clean(record.item_ktru_code)
+    )
+
+
+def _record_matches_row(
+    record: AdditionalCharacteristicsJustification,
+    row: dict[str, Any],
+) -> bool:
+    pairs = (
+        (record.item_ktru_code, row.get("ktru_code")),
+        (record.item_okpd2_code, row.get("okpd2_code") or row.get("rule_okpd2_code")),
+        (record.item_row_number, row.get("item_row_number")),
+    )
+    if any(_clean(left) and _clean(left) == _clean(right) for left, right in pairs):
+        return True
+    record_name = _clean(record.item_name).casefold()
+    row_name = _clean(row.get("item_name")).casefold()
+    return bool(record_name and row_name and (record_name in row_name or row_name in record_name))
+
+
+def _characteristic_matches(
+    record: AdditionalCharacteristicsJustification,
+    characteristic_name: Any,
+) -> bool:
+    target = _clean(characteristic_name).casefold()
+    return bool(target and any(
+        target == _clean(name).casefold()
+        or target in _clean(name).casefold()
+        or _clean(name).casefold() in target
+        for name in record.characteristic_names
+        if _clean(name)
+    ))
 
 
 def _record_text(record: AdditionalCharacteristicsJustification) -> str:

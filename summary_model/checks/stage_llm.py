@@ -48,7 +48,7 @@ def run_stage_llm_checks(
 
     client = llm_client or StructuredLLMClient(model_name=OPENAI_NANO_MODEL)
     payload = json.dumps(_stage_payload(package), ensure_ascii=False, default=str)
-    result, error = client.extract(StageLLMResult, STAGE_CHECK_PROMPT, payload)
+    result, error = _extract_check(client, StageLLMResult, STAGE_CHECK_PROMPT, payload)
     metrics = client.metrics()
     if error or result is None:
         return None, metrics
@@ -89,6 +89,14 @@ def run_stage_llm_checks(
             },
         )
     ], metrics
+
+
+def _extract_check(client, schema, prompt: str, payload: str):
+    """Keep compatibility with small test doubles while production bypasses recovery."""
+    direct = getattr(client, "extract_check", None)
+    if callable(direct):
+        return direct(schema, prompt, payload)
+    return client.extract(schema, prompt, payload)
 
 
 def _stage_payload(package: ProcurementPackageExtraction) -> dict[str, object]:

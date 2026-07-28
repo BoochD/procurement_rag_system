@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 
 from summary_model.checks.models import CheckResult, ProcurementChecksReport
 
@@ -39,8 +40,6 @@ INTERNAL_CHECK_ORDER = [
     "strict.plan.stages",
     "strict.plan.warranty",
     "strict.funding_source",
-    "strict.securities",
-    "strict.warranty_security",
     "strict.contract.penalties",
     "strict.smp_sonko_subcontract",
     "strict.contract.attachments",
@@ -74,6 +73,7 @@ SPECIAL_CHECKS = set(DOCUMENT_CHECK_ORDER + PLAN_REGULATORY_CHECK_ORDER + INTERN
     "manual.commercial_offers.onmck",
     "manual.ktru.characteristics",
     "manual.ktru.additional",
+    "manual.ktru.trademarks",
     "manual.national_regime_1875",
     "strict.onmck.supplier_prices",
 }
@@ -164,6 +164,24 @@ ATTACHMENT_KIND_LABELS = {
     "explanatory_note": "Пояснительная записка",
     "other": "другое приложение",
     "unknown": "тип не определён",
+}
+
+TECHNICAL_TEXT_LABELS = {
+    "Semantic/manual review": "Смысловая и ручная проверка",
+    "OKPD2": "ОКПД2",
+    "KTRU": "КТРУ",
+    "table_01": "приложение №1",
+    "table_02": "приложение №2",
+    "confirmed": "подтверждено",
+    "ambiguous": "неоднозначно",
+    "manual_review": "требует проверки",
+    "auction": "электронный аукцион",
+    "checks.json": "файле подробных результатов",
+    "VLM": "модель визуального распознавания",
+    "LLM": "языковая модель",
+    "fallback": "резервный разбор",
+    "items": "позиции",
+    "item": "позиция",
 }
 
 RAW_DETAIL_KEYS = {
@@ -301,7 +319,7 @@ def _render_ktru_cards(result: CheckResult) -> list[str]:
 
 def _render_pp1875_section(by_id: dict[str, CheckResult]) -> list[str]:
     result = by_id.get("manual.national_regime_1875")
-    lines = ["3) Проверка ОКПД на вхождение в постановление 1875:"]
+    lines = ["3) Проверка ОКПД2 на вхождение в постановление 1875:"]
     if result is None:
         lines.append("- не выполнялась")
         return lines
@@ -326,7 +344,7 @@ def _render_internal_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 
 def _render_semantic_section(by_id: dict[str, CheckResult]) -> list[str]:
-    lines = ["5) Semantic/manual review"]
+    lines = ["5) Смысловая и ручная проверка:"]
     for check_id in SEMANTIC_CHECK_ORDER:
         result = by_id.get(check_id)
         if result is not None:
@@ -372,6 +390,26 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
         rendered = _render_ktru_additional_rows(additional)
         if rendered:
             lines.extend(rendered)
+    trademarks = by_id.get("manual.ktru.trademarks")
+    if trademarks is not None:
+        rows = trademarks.details.get("trademarks") if trademarks.details else None
+        if isinstance(rows, list) and rows:
+            lines.append("")
+            lines.append("- <b>Товарные знаки и их обоснование</b> — без правовой оценки.")
+            lines.extend([
+                "",
+                "| Позиция | Товарный знак | Обоснование товарного знака |",
+                "| :--- | :--- | :---: |",
+            ])
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                justification = "найдено" if row.get("justification_found") else "не найдено"
+                item_name = row.get("item_name") or "позиция"
+                lines.append(
+                    f"| {_table_cell(_human_text(str(item_name)))} | "
+                    f"{_table_cell(_human_text(str(row.get('trademark'))))} | {justification} |"
+                )
     return lines
 
 
@@ -402,12 +440,15 @@ def _render_pp1875_matches(result: CheckResult) -> list[str]:
             continue
         message = item.get("message")
         if message:
-            lines.extend(str(message).replace(".<ins>", ".\\n<ins>").splitlines())
+            lines.extend(_human_text(str(message)).replace(".<ins>", ".\\n<ins>").splitlines())
         else:
             lines.append(str(item.get("code") or item))
         lines.append("")
     while lines and lines[-1] == "":
         lines.pop()
+    return lines
+
+
 def _render_semantic_result(result: CheckResult) -> list[str]:
     return _render_titled_result(result)
 
@@ -505,6 +546,10 @@ def _wrap_doc_badges(text: str) -> str:
 def _render_titled_result(result: CheckResult) -> list[str]:
     if result.check_id == "strict.plan.stages":
         return _render_stage_table(result)
+    if result.check_id == "strict.onmck.min_price":
+        return _render_onmck_min_price(result)
+    if result.check_id == "strict.onmck.arithmetic":
+        return _render_onmck_arithmetic(result)
     label = STATUS_LABELS[result.status]
     lines = [f"- <b>{_human_text(result.title)}</b> - {label}. {_human_text(result.report_text)}"]
     summary_lines = result.details.get("summary_lines") if result.details else None
@@ -520,6 +565,110 @@ def _render_titled_result(result: CheckResult) -> list[str]:
     if result.check_id == "strict.contract.attachments" and result.details:
         lines.extend(_attachment_lines(result.details))
     return lines
+
+
+def _render_onmck_min_price(result: CheckResult) -> list[str]:
+    lines = [
+        f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. "
+        f"{_human_text(result.report_text)}"
+    ]
+    rows = result.details.get("price_rows") if result.details else None
+    if not isinstance(rows, list) or not rows:
+        return _render_titled_result_without_special_case(result)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        quantity = ""
+        if row.get("quantity"):
+            quantity = f"; количество <b>{row['quantity']}</b>"
+            if row.get("unit"):
+                quantity += f" {row['unit']}"
+        lines.append("")
+        lines.append(f"  - <b>{_human_text(str(row.get('item') or 'Позиция'))}</b>{quantity}")
+        lines.append(
+            "    Выбранная минимальная цена: "
+            f"<b>{_report_money(row.get('selected'))}</b> "
+            f"({_human_text(str(row.get('minimum_source') or 'поставщик не определён'))})"
+        )
+        lines.append("    Цены поставщиков:")
+        for supplier in row.get("suppliers") or []:
+            if not isinstance(supplier, dict):
+                continue
+            lines.append(
+                f"    - {_human_text(str(supplier.get('label') or 'Поставщик'))}: "
+                f"<b>{_report_money(supplier.get('price'))}</b>"
+            )
+        lines.append(
+            "    Итог: "
+            f"<b>{STATUS_LABELS.get(str(row.get('status')), 'ТРЕБУЕТ ПРОВЕРКИ')}</b>"
+        )
+    return lines
+
+
+def _render_onmck_arithmetic(result: CheckResult) -> list[str]:
+    lines = [
+        f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. "
+        f"{_human_text(result.report_text)}"
+    ]
+    details = result.details or {}
+    rows = details.get("arithmetic_rows")
+    if not isinstance(rows, list) or not rows:
+        return _render_titled_result_without_special_case(result)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        quantity = str(row.get("quantity") or "не найдено")
+        unit = f" {row['unit']}" if row.get("unit") else ""
+        unit_price = _report_money(row.get("unit_price"))
+        calculated = _report_money(row.get("calculated"))
+        declared = _report_money(row.get("declared"))
+        lines.append("")
+        lines.append(
+            f"  - <b>{_human_text(str(row.get('item') or 'Позиция'))}</b>, "
+            f"количество <b>{quantity}</b>{unit}"
+        )
+        lines.append(f"    Цена за единицу: <b>{unit_price}</b>")
+        if row.get("calculated") is not None:
+            lines.append(
+                f"    Расчёт: <b>{unit_price}</b> × <b>{quantity}</b> = "
+                f"<b>{calculated}</b>"
+            )
+        else:
+            lines.append("    Расчёт: не выполнен, недостаточно данных")
+        lines.append(f"    Стоимость в ОНМЦК: <b>{declared}</b>")
+        lines.append(
+            "    Итог: "
+            f"<b>{STATUS_LABELS.get(str(row.get('status')), 'ТРЕБУЕТ ПРОВЕРКИ')}</b>"
+        )
+    lines.extend([
+        "",
+        f"  Сумма строк: <b>{_report_money(details.get('row_sum'))}</b>",
+        f"  Итог ОНМЦК: <b>{_report_money(details.get('onmck_total'))}</b>",
+        f"  НМЦК в заявке: <b>{_report_money(details.get('plan_nmck'))}</b>",
+    ])
+    return lines
+
+
+def _render_titled_result_without_special_case(result: CheckResult) -> list[str]:
+    label = STATUS_LABELS[result.status]
+    lines = [f"- <b>{_human_text(result.title)}</b> - {label}. {_human_text(result.report_text)}"]
+    summary_lines = result.details.get("summary_lines") if result.details else None
+    if isinstance(summary_lines, list):
+        for item in summary_lines:
+            if item:
+                lines.append(f"  - {_wrap_doc_badges(_human_text(str(item)))}")
+    return lines
+
+
+def _report_money(value: object) -> str:
+    if value in (None, ""):
+        return "не найдено"
+    try:
+        amount = Decimal(str(value).replace(" ", "").replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return _human_text(str(value))
+    formatted = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+    return f"{formatted} руб."
 
 
 def _render_commercial_offer_content(result: CheckResult) -> list[str]:
@@ -859,7 +1008,10 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         if isinstance(assessment, dict)
     ]
     detailed_assessments = [
-        pair for pair in indexed_assessments if pair[0].get("decision") != "restricted"
+        pair
+        for pair in indexed_assessments
+        if pair[0].get("decision") != "restricted"
+        and _is_reportable_additional_characteristic(pair[0], pair[1])
     ]
     restricted_assessments = [
         assessment for assessment, _row in indexed_assessments
@@ -919,7 +1071,7 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         for (item_name, ktru_code, okpd2_code), item in grouped.items():
             regime = item.get("field_code") or "не требуется"
             if item.get("regime_status"):
-                regime = f"{regime}: {item['regime_status']}"
+                regime = _human_text(f"{regime}: {item['regime_status']}")
             source = item.get("justification_source")
             justification_source = (
                 "найдено в ООЗ" if source == "ooz"
@@ -932,11 +1084,35 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
                 f"{_table_cell(justification_source)} | "
                 f"{decision_labels.get(str(item['decision']), 'ТРЕБУЕТ ПРОВЕРКИ')} |"
             )
-    quotes = [str(ooz_state["quote"])] if ooz_state.get("quote") else []
+    quotes = list(dict.fromkeys(
+        str(justification["quote"])
+        for assessment, _row in indexed_assessments
+        if isinstance(assessment.get("justification"), dict)
+        for justification in [assessment["justification"]]
+        if justification.get("quote")
+    ))
+    if not quotes and ooz_state.get("quote"):
+        quotes = [str(ooz_state["quote"])]
     if quotes:
         lines.append("")
         lines.append(f"  - Краткая цитата обоснования: {_human_text(quotes[0][:240])}")
     return lines
+
+
+def _is_reportable_additional_characteristic(
+    assessment: dict[str, object],
+    row: dict[str, object],
+) -> bool:
+    """Do not render headings or justification prose as characteristics."""
+    name = " ".join(str(assessment.get("characteristic") or "").split())
+    value = " ".join(str(row.get("value") or "").split())
+    normalized = name.casefold().replace("ё", "е").strip(" *:.;")
+    value_normalized = value.casefold().replace("ё", "е").strip(" *:.;")
+    if normalized == "дополнительные характеристики" and value_normalized == normalized:
+        return False
+    if len(name) > 500 or "обоснование применения дополнительных характеристик" in normalized:
+        return False
+    return True
 
 
 def _security_lines(details: dict[str, object]) -> list[str]:
@@ -1031,7 +1207,17 @@ def _looks_like_raw_payload(value: dict[object, object]) -> bool:
 
 def _human_text(text: str) -> str:
     result = text
-    replacements = {**DOCUMENT_LABELS, **FIELD_LABELS, **ATTACHMENT_KIND_LABELS}
+    replacements = {
+        **DOCUMENT_LABELS,
+        **FIELD_LABELS,
+        **ATTACHMENT_KIND_LABELS,
+        **TECHNICAL_TEXT_LABELS,
+    }
     for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         result = re.sub(rf"(?<![\w]){re.escape(source)}(?![\w])", target, result)
+    result = re.sub(
+        r"(?i)товарный\s+знак\s+товарный\s+знак\s*:",
+        "товарный знак:",
+        result,
+    )
     return result

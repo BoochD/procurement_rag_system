@@ -33,6 +33,91 @@ class RequiredRows(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class CheckEnvelope(BaseModel):
+    status: str
+    message: str
+    findings: list[dict[str, str]] = Field(default_factory=list)
+
+
+def test_check_validation_bypasses_structured_recovery(monkeypatch):
+    class Runner:
+        def __init__(self):
+            self.prompt = ""
+
+        def invoke(self, _prompt):
+            self.prompt = _prompt
+            return {
+                "raw": SimpleNamespace(tool_calls=[], invalid_tool_calls=[], content="", additional_kwargs={}),
+                "parsed": {
+                    "status": "passed",
+                    "message": "Проверка выполнена.",
+                    "findings": [{"label": "Штраф", "quote": "1000 рублей"}],
+                },
+                "parsing_error": None,
+            }
+
+    class Model:
+        def __init__(self):
+            self.runner = Runner()
+
+        def with_structured_output(self, _schema, *, method, include_raw=False):
+            assert method == "function_calling"
+            assert include_raw is True
+            return self.runner
+
+    monkeypatch.setattr(
+        "summary_model.extraction.llm_client.recover_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("recovery must not run")),
+    )
+    model = Model()
+    result, error = StructuredLLMClient(model=model).extract_check(
+        CheckEnvelope,
+        "Check",
+        "payload",
+    )
+
+    assert error is None
+    assert result is not None
+    assert result.findings[0]["quote"] == "1000 рублей"
+    assert "CHECK DATA:" in model.runner.prompt
+    assert "Для каждого найденного значения" not in model.runner.prompt
+
+
+def test_check_validation_retries_connection_error_without_recovery():
+    class Runner:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, _prompt):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("provider unavailable")
+            return {
+                "raw": None,
+                "parsed": {"status": "passed", "message": "Проверка выполнена."},
+                "parsing_error": None,
+            }
+
+    class Model:
+        def __init__(self):
+            self.runner = Runner()
+
+        def with_structured_output(self, _schema, *, method, include_raw=False):
+            return self.runner
+
+    client = StructuredLLMClient(model=Model())
+    result, error = client.extract_check(CheckEnvelope, "Check", "payload")
+
+    assert error is None
+    assert result is not None
+    assert client.calls == 2
+    assert client.retries == 1
+
+
+class PenaltyRows(BaseModel):
+    clauses: list[PenaltyClause] = Field(default_factory=list)
+
+
 def test_empty_fact_wrapper_becomes_none_without_lossy_recovery():
     recovery = recover_model(
         NmckJustificationSchema,
@@ -290,6 +375,31 @@ def test_penalty_fraction_is_kept_as_basis_not_misread_as_percent():
     assert isinstance(recovery.value, PenaltyClause)
     assert recovery.value.percent is None
     assert recovery.value.basis == "1/300"
+
+
+def test_penalty_clause_with_provider_metadata_is_not_unwrapped_as_a_fact():
+    recovery = recover_model(
+        PenaltyRows,
+        {
+            "clauses": [
+                {
+                    "party": "customer",
+                    "obligation_kind": "non_value_obligation",
+                    "raw_text": "Штраф заказчика составляет 1000 рублей.",
+                    "amount": 1000,
+                    "evidence": "п. 7.2.2",
+                    "raw_value": "1000 рублей",
+                    "normalized_value": "1000",
+                    "confidence": 0.95,
+                }
+            ]
+        },
+    )
+
+    assert recovery.lossy_warnings == []
+    assert len(recovery.value.clauses) == 1
+    assert recovery.value.clauses[0].amount == Decimal("1000")
+    assert recovery.value.clauses[0].evidence == "п. 7.2.2"
 
 
 def test_invalid_required_field_drops_only_broken_nested_row():

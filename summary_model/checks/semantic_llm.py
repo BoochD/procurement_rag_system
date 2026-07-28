@@ -109,10 +109,17 @@ def run_semantic_llm_checks(
     llm_client: StructuredLLMClient | None = None,
 ) -> tuple[list[CheckResult], dict[str, object]]:
     client = llm_client or StructuredLLMClient(model_name=OPENAI_NANO_MODEL)
+    active_checks = dict(SEMANTIC_CHECK_IDS)
+    if _plan_has_stages(package):
+        active_checks.pop("semantic.delivery_term", None)
+    prompt = SEMANTIC_CHECKS_PROMPT
+    if "semantic.delivery_term" not in active_checks:
+        prompt += "\nВ ПГ есть этапы: semantic.delivery_term не возвращай, сроки проверяет отдельная проверка этапов."
     payload = json.dumps(_semantic_payload(package), ensure_ascii=False, default=str)
-    result, error = client.extract(
+    result, error = _extract_check(
+        client,
         SemanticChecksLLMResult,
-        SEMANTIC_CHECKS_PROMPT,
+        prompt,
         payload,
     )
     metrics = client.metrics()
@@ -121,7 +128,7 @@ def run_semantic_llm_checks(
 
     by_id = {item.check_id: item for item in result.findings}
     checks = []
-    for check_id, title in SEMANTIC_CHECK_IDS.items():
+    for check_id, title in active_checks.items():
         finding = by_id.get(check_id)
         if finding is None:
             checks.append(_manual_result(check_id, title, "LLM не вернула результат по этому пункту."))
@@ -132,6 +139,14 @@ def run_semantic_llm_checks(
         finding = _apply_warranty_guard(finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
+
+
+def _extract_check(client, schema, prompt: str, payload: str):
+    """Keep compatibility with small test doubles while production bypasses recovery."""
+    direct = getattr(client, "extract_check", None)
+    if callable(direct):
+        return direct(schema, prompt, payload)
+    return client.extract(schema, prompt, payload)
 
 
 def _apply_procurement_method_guard(
@@ -260,7 +275,7 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
         else None
     )
     note = package.explanatory_note
-    return {
+    payload = {
         "schedule_application": {
             "purchase_subject": getattr(schedule, "purchase_subject", None),
             "delivery_place": getattr(schedule, "delivery_place", None),
@@ -302,6 +317,15 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
             "justification_text": getattr(note, "justification_text", None),
         },
     }
+    if _plan_has_stages(package):
+        for document in ("schedule_application", "purchase_request", "purchase_description", "contract_draft"):
+            payload[document].pop("delivery_term_text", None)
+    return payload
+
+
+def _plan_has_stages(package: ProcurementPackageExtraction) -> bool:
+    schedule = package.schedule_application
+    return bool(schedule and (getattr(schedule, "stages", []) or getattr(schedule, "has_stages", False)))
 
 
 def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str) -> list[str]:

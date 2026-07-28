@@ -206,6 +206,10 @@ class PurchaseItemCharacteristic(BaseModel):
 
 
 class AdditionalCharacteristicsJustification(BaseModel):
+    item_name: str | None = None
+    item_row_number: int | str | None = None
+    item_okpd2_code: str | None = None
+    item_ktru_code: str | None = None
     scope_text: str | None = None
     characteristic_names: list[str] = Field(default_factory=list)
     justification_text: str | None = None
@@ -233,6 +237,8 @@ class PurchaseItem(BaseModel):
     name: str | None = None
     okpd2_code: str | None = None
     ktru_code: str | None = None
+    trademark: str | None = None
+    trademark_justification_text: str | None = None
     unit: str | None = None
     quantity: Decimal | None = None
     quantity_raw: str | None = None

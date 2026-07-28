@@ -25,6 +25,13 @@ from .table_projection import render_table_for_llm
 T = TypeVar("T", bound=BaseModel)
 
 
+COMMON_CHECK_PROMPT = """
+Верни только structured output, соответствующий переданной schema проверки.
+Не добавляй raw_value, normalized_value, confidence, технические wrapper-поля
+или Markdown. Не извлекай документ заново: оценивай только данные из payload.
+""".strip()
+
+
 class EmptyStructuredOutputError(RuntimeError):
     pass
 
@@ -221,6 +228,64 @@ class StructuredLLMClient:
         finally:
             self.duration_seconds += time.perf_counter() - started
 
+    def extract_check(
+        self,
+        schema: type[T],
+        system_prompt: str,
+        payload: str,
+    ) -> tuple[T | None, str | None]:
+        """Validate a compact LLM check result without structured recovery.
+
+        Check-only calls do not feed arithmetic or document schemas.  Applying
+        the extraction normalizer here can silently rewrite an otherwise useful
+        finding, so keep this path to direct Pydantic validation only.
+        """
+        structured = _structured_runnable(self.model, schema)
+        prompt = f"{COMMON_CHECK_PROMPT}\n\n{system_prompt}\n\nCHECK DATA:\n{payload}"
+        started = time.perf_counter()
+        first_error: Exception | None = None
+        try:
+            for attempt in range(2):
+                try:
+                    self.calls += 1
+                    self.input_characters += len(prompt)
+                    attempt_started = time.perf_counter()
+                    response = structured.invoke(prompt)
+                    validated, parsing_error, raw_text = _validate_check_response(schema, response)
+                    self._record_attempt(
+                        schema=schema,
+                        prompt=prompt,
+                        output=_model_output_text(validated),
+                        duration_seconds=time.perf_counter() - attempt_started,
+                        success=True,
+                        is_retry=bool(attempt),
+                        result_status="validated",
+                        parsing_error=parsing_error,
+                        raw_output=raw_text,
+                    )
+                    return validated, None
+                except Exception as error:
+                    self._record_attempt(
+                        schema=schema,
+                        prompt=prompt,
+                        duration_seconds=time.perf_counter() - started,
+                        success=False,
+                        error=error,
+                        is_retry=bool(attempt),
+                    )
+                    if _is_non_retryable(error) or attempt:
+                        message = f"LLM check output validation failed: {_structured_error_message(error)}"
+                        self.errors.append(message)
+                        return None, message
+                    first_error = error
+                    self.retries += 1
+                    self.retry_reasons.append(str(error)[:500])
+            message = f"LLM check output validation failed: {_structured_error_message(first_error or RuntimeError())}"
+            self.errors.append(message)
+            return None, message
+        finally:
+            self.duration_seconds += time.perf_counter() - started
+
     async def aextract(
         self,
         schema: type[T],
@@ -407,6 +472,28 @@ def _recover_response(schema: type[T], response) -> _RecoveredResponse:
         )
 
     return _RecoveredResponse(recovery=recover_model(schema, response))
+
+
+def _validate_check_response(schema: type[T], response) -> tuple[T, str | None, str]:
+    """Read a structured-response envelope without applying recover_model()."""
+    if response is None:
+        raise EmptyStructuredOutputError("LLM вернула пустой structured output (None).")
+    if isinstance(response, schema):
+        return response, None, ""
+    if isinstance(response, dict) and {"raw", "parsed", "parsing_error"}.issubset(response):
+        raw = response.get("raw")
+        parsed = response.get("parsed")
+        parsing_error = _optional_error_text(response.get("parsing_error"))
+        raw_text = raw_message_text(raw)
+        candidate = parsed if parsed is not None else raw_payload_from_message(raw)
+        if candidate is None:
+            raise EmptyStructuredOutputError(
+                "LLM structured output не содержит JSON для проверки."
+            )
+        if isinstance(candidate, schema):
+            return candidate, parsing_error, raw_text
+        return schema.model_validate(candidate), parsing_error, raw_text
+    return schema.model_validate(response), None, ""
 
 
 def _require_recovered_value(response: _RecoveredResponse) -> T:

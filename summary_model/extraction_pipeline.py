@@ -395,6 +395,18 @@ def _date_from_text(text: str | None) -> date | None:
         return None
 
 
+def _price_source_requisites(raw_header: str | None) -> tuple[str | None, date | None]:
+    text = clean_text(raw_header)
+    if not text:
+        return None, None
+    match = re.search(
+        r"письм\w*\s*(?:№\s*)?([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9./-]*)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return (clean_text(match.group(1)) if match else None), _date_from_text(text)
+
+
 def _explicit_stage_start_date(text: str | None) -> date | None:
     """A stage can start on contract signing, which is not a calendar date."""
     source = clean_text(text)
@@ -1511,6 +1523,39 @@ def _contract_warranty_text(text: str) -> str | None:
     return None
 
 
+def _purchase_description_warranty_text(text: str) -> str | None:
+    """Collect explicit OOZ warranty terms instead of the first warranty mention."""
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if "требования" in line.casefold() and "гарантийн" in line.casefold()
+        ),
+        0,
+    )
+    candidates: list[str] = []
+    for line in lines[start : start + 80]:
+        lowered = line.casefold()
+        if not any(
+            marker in lowered
+            for marker in (
+                "гарантийный срок",
+                "установлена гарантия",
+                "установлен гарантийный срок",
+            )
+        ):
+            continue
+        if not re.search(r"\d", line):
+            continue
+        candidates.append(line)
+        if len(candidates) == 6:
+            break
+    if candidates:
+        return "; ".join(candidates)[:3000]
+    return _contract_warranty_text(text)
+
+
 def _contract_responsibility_section(text: str) -> str | None:
     section = _section_after_heading(
         text,
@@ -1564,6 +1609,10 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
                     name=payload.get("name"),
                     okpd2_code=payload.get("okpd2_code"),
                     ktru_code=payload.get("ktru_code"),
+                    trademark=payload.get("trademark"),
+                    trademark_justification_text=payload.get(
+                        "trademark_justification_text"
+                    ),
                     unit=payload.get("unit"),
                     quantity=parse_decimal(payload.get("quantity_raw")),
                     quantity_raw=payload.get("quantity_raw"),
@@ -1625,10 +1674,13 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
             continue
         for source in table.compact_json.get("price_sources", []):
             raw_header = source.get("raw_header") or source["source_id"]
+            outgoing_letter_number, outgoing_letter_date = _price_source_requisites(raw_header)
             sources.append(
                 PriceSource(
                     source_id=source["source_id"],
                     supplier_name_raw=raw_header,
+                    outgoing_letter_number=outgoing_letter_number,
+                    outgoing_letter_date=outgoing_letter_date,
                     raw_header=raw_header,
                     evidence=table.table_id,
                 )
@@ -1736,7 +1788,10 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
         delivery_term=_term_value(delivery_text),
         stages=stages,
         items=items,
-        warranty_requirements_text=_line_after_marker(text, "гаранти"),
+        warranty_requirements_text=(
+            _purchase_description_warranty_text(text)
+            or _line_after_marker(text, "гаранти")
+        ),
         additional_characteristics_justification_text=justification_text,
         additional_characteristics_justifications=justifications,
     )
@@ -1757,8 +1812,12 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
     embedded_subject = _purchase_subject_from_ooz_section(text)
+    embedded_items = _purchase_items_from_tables(tables)
     embedded = PurchaseDescriptionSchema(
         purchase_subject=embedded_subject,
+        okpd2_codes=sorted({item.okpd2_code for item in embedded_items if item.okpd2_code}),
+        ktru_codes=sorted({item.ktru_code for item in embedded_items if item.ktru_code}),
+        items=embedded_items,
         stages=stages,
         parser_warnings=["Embedded purchase description inferred from contract text."],
     )
@@ -1792,6 +1851,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         embedded_purchase_description=(
             embedded
             if embedded.purchase_subject
+            or embedded.items
             or embedded.stages
             else None
         ),

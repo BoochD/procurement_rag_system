@@ -55,8 +55,8 @@ class VlmFallbackRepairer:
         "duration_seconds": 0.0,
         "usage": [],
     })
-    _cache: dict[str, ParsedTable] = field(default_factory=dict)
-    _failed_cache: set[str] = field(default_factory=set)
+    _cache: dict[tuple[str, str], ParsedTable] = field(default_factory=dict)
+    _failed_cache: set[tuple[str, str]] = field(default_factory=set)
 
     def repair_document_tables(
         self,
@@ -77,7 +77,7 @@ class VlmFallbackRepairer:
             if _role_allowed_for_document(document_type, candidate.role)
         ]
         forced = []
-        forced_ids: set[str] = set()
+        dual_base = []
         for candidate in (ranked if supports_justifications else []):
             reasons = justification_candidate_reasons(
                 by_id[candidate.table_id],
@@ -85,7 +85,8 @@ class VlmFallbackRepairer:
             )
             if not reasons:
                 continue
-            forced_ids.add(candidate.table_id)
+            if candidate.role == "purchase_description":
+                dual_base.append(candidate)
             forced.append(
                 candidate.model_copy(
                     update={
@@ -98,14 +99,13 @@ class VlmFallbackRepairer:
         regular = [
             candidate
             for candidate in ranked
-            if candidate.table_id not in forced_ids
             if _should_send_to_vlm(
                 by_id[candidate.table_id],
                 candidate.role,
                 min_complexity_score=self.options.min_complexity_score,
             )
         ][: self.options.max_tables_per_document]
-        candidates = [*forced, *regular]
+        candidates = _unique_candidates([*dual_base, *regular, *forced])
         self.metrics["tables_considered"] = int(self.metrics["tables_considered"]) + len(candidates)
         if not candidates:
             self.metrics["duration_seconds"] = round(float(self.metrics["duration_seconds"]) + time.perf_counter() - started, 3)
@@ -113,24 +113,37 @@ class VlmFallbackRepairer:
 
         repaired_by_id: dict[str, ParsedTable] = {}
         for candidate in candidates:
-            table = by_id[candidate.table_id]
-            if table.table_id in self._cache:
-                repaired_by_id[table.table_id] = self._cache[table.table_id]
+            original = by_id[candidate.table_id]
+            table = repaired_by_id.get(original.table_id, original)
+            cache_key = (original.table_id, candidate.role)
+            if cache_key in self._cache:
+                repaired_by_id[original.table_id] = _merge_role_result(
+                    table, self._cache[cache_key], candidate.role
+                )
                 continue
-            if table.table_id in self._failed_cache:
+            if cache_key in self._failed_cache:
                 continue
-            source = source_by_id.get(table.table_id)
+            source = source_by_id.get(original.table_id)
             if source is None:
                 self._warn(f"{ir.file_name}: исходная таблица {table.table_id} не найдена для VLM.")
                 continue
-            repaired = self._repair_one(ir, document_type, table, source, candidate.role)
+            known_items = _known_items_payload(
+                [repaired_by_id.get(item.table_id, item) for item in tables]
+            )
+            repaired = self._repair_one(
+                ir, document_type, original, source, candidate.role, known_items
+            )
             if repaired is not None:
-                self._cache[table.table_id] = repaired
-                repaired_by_id[table.table_id] = repaired
+                self._cache[cache_key] = repaired
+                repaired_by_id[original.table_id] = _merge_role_result(
+                    table, repaired, candidate.role
+                )
             elif candidate.role == "additional_characteristics_justification":
-                fallback = _unextracted_justification_table(table)
-                self._cache[table.table_id] = fallback
-                repaired_by_id[table.table_id] = fallback
+                fallback = _unextracted_justification_table(original)
+                self._cache[cache_key] = fallback
+                repaired_by_id[original.table_id] = _merge_role_result(
+                    table, fallback, candidate.role
+                )
 
         self.metrics["duration_seconds"] = round(float(self.metrics["duration_seconds"]) + time.perf_counter() - started, 3)
         return [repaired_by_id.get(table.table_id, table) for table in tables]
@@ -142,15 +155,18 @@ class VlmFallbackRepairer:
         table: ParsedTable,
         source: TableIR,
         role: VlmTableRole,
+        known_items: list[dict[str, Any]],
     ) -> ParsedTable | None:
-        output_dir = self._table_output_dir(ir, table)
+        output_dir = self._table_output_dir(ir, table, role)
         image_info = render_table_image(
             source,
             output_dir / f"table_{table.table_index}.png",
             max_width=self.options.max_width,
             font_size=self.options.font_size,
         )
-        payload = _payload(ir, document_type, table, source, image_info, role)
+        payload = _payload(
+            ir, document_type, table, source, image_info, role, known_items
+        )
         prompt = vlm_table_prompt(role)
         _write_json(output_dir / "payload.json", payload)
         (output_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -204,7 +220,7 @@ class VlmFallbackRepairer:
             message = f"{ir.file_name}, table {table.table_index}: VLM fallback failed: {error}"
             self._warn(message)
             self.metrics["errors"].append(message)
-            self._failed_cache.add(table.table_id)
+            self._failed_cache.add((table.table_id, role))
             return None
 
         compact_json = _compact_json_from_vlm(extraction, document_type)
@@ -222,7 +238,7 @@ class VlmFallbackRepairer:
         if not _has_useful_result(extraction, compact_json):
             message = _empty_result_warning(ir.file_name, table.table_index, extraction)
             self._warn(message)
-            self._failed_cache.add(table.table_id)
+            self._failed_cache.add((table.table_id, role))
             return None
         repaired = table.model_copy(deep=True)
         repaired.table_type = _table_type_from_role(extraction.table_role, document_type, compact_json)
@@ -236,10 +252,12 @@ class VlmFallbackRepairer:
         self.metrics["tables_repaired"] = int(self.metrics["tables_repaired"]) + 1
         return repaired
 
-    def _table_output_dir(self, ir: DocumentIR, table: ParsedTable) -> Path:
+    def _table_output_dir(
+        self, ir: DocumentIR, table: ParsedTable, role: VlmTableRole
+    ) -> Path:
         root = self.options.output_dir or Path("runtime/vlm_fallback")
         safe_file = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in ir.file_name)[:120]
-        path = root / safe_file / f"table_{table.table_index}"
+        path = root / safe_file / f"table_{table.table_index}_{role}"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -342,8 +360,9 @@ def _payload(
     source: TableIR,
     image_info: dict[str, int | str],
     role: VlmTableRole,
+    known_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": "vlm-fallback-payload-0.1.0",
         "prompt_version": VLM_TABLE_PROMPT_VERSION,
         "document": {
@@ -369,6 +388,9 @@ def _payload(
         },
         "image": image_info,
     }
+    if role == "additional_characteristics_justification":
+        payload["known_items"] = known_items
+    return payload
 
 
 def _call_vlm(
@@ -417,7 +439,7 @@ def _parse_response(
     if data is None:
         raise ValueError("ответ VLM не содержит корректный JSON-объект")
     if isinstance(data, dict):
-        data.setdefault("table_role", role)
+        data["table_role"] = role
         if table_title:
             data.setdefault("table_title", table_title)
     recovery = recover_model(VlmTableExtraction, data)
@@ -467,6 +489,10 @@ def _compact_json_from_vlm(
         return {
             "additional_characteristics_justifications": [
                 {
+                    "item_name": item.item_name,
+                    "item_row_number": item.item_row_number,
+                    "item_okpd2_code": item.item_okpd2_code,
+                    "item_ktru_code": item.item_ktru_code,
                     "scope_text": item.scope_text,
                     "characteristic_names": item.characteristic_names,
                     "justification_text": item.justification_text,
@@ -517,6 +543,8 @@ def _purchase_item_payload(item) -> dict[str, Any]:
         "name": item.name,
         "okpd2_code": item.okpd2_code,
         "ktru_code": item.ktru_code,
+        "trademark": item.trademark,
+        "trademark_justification_text": item.trademark_justification_text,
         "unit": item.unit,
         "quantity_raw": item.quantity_raw,
         "characteristics": [
@@ -648,7 +676,8 @@ def _has_useful_result(
 
 def _unextracted_justification_table(table: ParsedTable) -> ParsedTable:
     result = table.model_copy(deep=True)
-    result.table_type = "additional_characteristics_justification_table"
+    if result.table_type != "ooz_items_table":
+        result.table_type = "additional_characteristics_justification_table"
     result.compact_json = {
         **result.compact_json,
         "additional_characteristics_justifications": [],
@@ -661,6 +690,114 @@ def _unextracted_justification_table(table: ParsedTable) -> ParsedTable:
         *result.parser_warnings,
         "contents_not_extracted",
     ]))
+    return result
+
+
+def _unique_candidates(candidates: list[Any]) -> list[Any]:
+    result = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        key = (candidate.table_id, candidate.role)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
+
+
+def _merge_role_result(
+    base: ParsedTable,
+    role_result: ParsedTable,
+    role: VlmTableRole,
+) -> ParsedTable:
+    """Merge only the keys owned by one VLM role into the physical table."""
+    if role != "additional_characteristics_justification":
+        merged = role_result.model_copy(deep=True)
+        if role == "purchase_description" and base.table_type == "ooz_items_table":
+            merged.compact_json["items"] = _preserve_coded_items(
+                base.compact_json.get("items"),
+                merged.compact_json.get("items"),
+            )
+        for key in (
+            "additional_characteristics_justifications",
+            "justification_extraction",
+        ):
+            if key in base.compact_json:
+                merged.compact_json[key] = base.compact_json[key]
+        merged.parser_warnings = list(dict.fromkeys([
+            *base.parser_warnings,
+            *merged.parser_warnings,
+        ]))
+        merged.compact_markdown = build_compact_markdown(merged)
+        return merged
+
+    merged = base.model_copy(deep=True)
+    for key in (
+        "additional_characteristics_justifications",
+        "justification_extraction",
+    ):
+        if key in role_result.compact_json:
+            merged.compact_json[key] = role_result.compact_json[key]
+    if merged.table_type not in {"ooz_items_table"}:
+        merged.table_type = "additional_characteristics_justification_table"
+    merged.parser_warnings = list(dict.fromkeys([
+        *merged.parser_warnings,
+        *role_result.parser_warnings,
+    ]))
+    merged.compact_markdown = build_compact_markdown(merged)
+    return merged
+
+
+def _preserve_coded_items(base_items: object, repaired_items: object) -> list[dict[str, Any]]:
+    """A VLM repair may enrich coded OOZ rows, but must not delete them."""
+    result = [dict(item) for item in repaired_items or [] if isinstance(item, dict)]
+    for item in base_items or []:
+        if not isinstance(item, dict):
+            continue
+        if not clean_text(item.get("okpd2_code")) and not clean_text(item.get("ktru_code")):
+            continue
+        if any(_same_purchase_item(item, candidate) for candidate in result):
+            continue
+        result.append(dict(item))
+    return result
+
+
+def _same_purchase_item(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_row = clean_text(left.get("row_number")).casefold()
+    right_row = clean_text(right.get("row_number")).casefold()
+    if left_row and right_row and left_row == right_row:
+        return True
+    left_name = clean_text(left.get("name")).casefold()
+    right_name = clean_text(right.get("name")).casefold()
+    same_name = bool(left_name and right_name and (left_name in right_name or right_name in left_name))
+    if not same_name:
+        return False
+    return all(
+        clean_text(left.get(field)).casefold() == clean_text(right.get(field)).casefold()
+        for field in ("okpd2_code", "ktru_code")
+    )
+
+
+def _known_items_payload(tables: list[ParsedTable]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for table in tables:
+        for item in (table.compact_json or {}).get("items", []):
+            if not isinstance(item, dict):
+                continue
+            payload = {
+                "name": item.get("name"),
+                "row_number": item.get("row_number"),
+                "okpd2_code": item.get("okpd2_code"),
+                "ktru_code": item.get("ktru_code"),
+            }
+            key = tuple(clean_text(payload[field]).casefold() for field in (
+                "name", "row_number", "okpd2_code", "ktru_code"
+            ))
+            if key == ("", "", "", "") or key in seen:
+                continue
+            seen.add(key)
+            result.append(payload)
     return result
 
 

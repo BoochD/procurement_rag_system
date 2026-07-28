@@ -78,6 +78,7 @@ def run_checks(
     ))
     results.extend(_check_codes(package, "okpd2"))
     results.extend(_check_codes(package, "ktru"))
+    results.extend(_check_purchase_item_trademarks(package))
     results.extend(_check_plan_ground_truth(package, stage_results=stage_results))
     results.extend(_check_funding_source(package))
     results.extend(_check_securities(package))
@@ -85,7 +86,10 @@ def run_checks(
     results.extend(penalty_results if penalty_results is not None else _check_contract_penalties(package))
     results.extend(_check_smp_sonko_subcontract(package))
     results.extend(_check_contract_attachments(package))
-    results.extend(semantic_results if semantic_results is not None else _semantic_manual_checks(package))
+    semantic = semantic_results if semantic_results is not None else _semantic_manual_checks(package)
+    if _plan_has_stages(package):
+        semantic = [result for result in semantic if result.check_id != "semantic.delivery_term"]
+    results.extend(semantic)
     results.extend(external_results if external_results is not None else _external_manual_checks(package))
     return ProcurementChecksReport.from_results(
         package_id=package.package_id,
@@ -789,7 +793,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
         ]
     failed = []
     incomplete = []
-    item_calc_lines: list[str] = []
+    arithmetic_rows: list[dict[str, Any]] = []
     for item in onmck.items:
         quantity = normalize_decimal(item.quantity)
         unit_price = normalize_decimal(item.selected_min_unit_price)
@@ -802,19 +806,42 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
             unit_price = min(supplier_prices) if supplier_prices else None
         declared = normalize_decimal(item.row_total_declared)
         name = _item_label(item)
-        unit_str = f" {item.unit}" if item.unit else ""
         if quantity is not None and unit_price is not None:
             calculated = quantity * unit_price
-            calc_str = f"{name}: {quantity}{unit_str} × {_format_money(unit_price)} руб. = {_format_money(calculated)} руб."
+            row_status = "passed"
             if declared is not None and _money(calculated) != _money(declared):
-                calc_str += f" (в таблице указано: {_format_money(declared)} руб. — ОШИБКА)"
+                row_status = "failed"
                 failed.append({"item": name, "expected": _format_money(calculated), "actual": _format_money(declared)})
-            item_calc_lines.append(calc_str)
+            arithmetic_rows.append({
+                "item": name,
+                "quantity": str(quantity),
+                "unit": item.unit,
+                "unit_price": str(unit_price),
+                "calculated": str(calculated),
+                "declared": str(declared) if declared is not None else None,
+                "status": row_status if declared is not None else "manual_review",
+            })
         elif declared is not None:
-            item_calc_lines.append(f"{name}: итог строки {_format_money(declared)} руб. (цена за ед. не указана)")
+            arithmetic_rows.append({
+                "item": name,
+                "quantity": str(quantity) if quantity is not None else None,
+                "unit": item.unit,
+                "unit_price": str(unit_price) if unit_price is not None else None,
+                "calculated": None,
+                "declared": str(declared),
+                "status": "manual_review",
+            })
             incomplete.append(name)
         else:
-            item_calc_lines.append(f"{name}: данные для расчёта не извлечены")
+            arithmetic_rows.append({
+                "item": name,
+                "quantity": str(quantity) if quantity is not None else None,
+                "unit": item.unit,
+                "unit_price": str(unit_price) if unit_price is not None else None,
+                "calculated": None,
+                "declared": None,
+                "status": "manual_review",
+            })
             incomplete.append(name)
     row_sum = sum((_money(item.row_total_declared) or Decimal("0.00")) for item in onmck.items)
     total = _money_amount(onmck.total_amount)
@@ -851,6 +878,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "row_sum": str(row_sum),
                 "onmck_total": str(total) if total is not None else None,
                 "plan_nmck": str(plan_total) if plan_total is not None else None,
+                "arithmetic_rows": arithmetic_rows,
                 "summary_lines": [
                     f"строк ОНМЦК: {len(onmck.items)}",
                     f"сумма строк: {_format_money(row_sum)}",
@@ -878,6 +906,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
     failed = []
     incomplete = []
     item_summary_lines: list[str] = []
+    price_rows: list[dict[str, Any]] = []
     source_labels = {
         source.source_id: _supplier_label(source.supplier_name_raw or source.raw_header or source.source_id)
         for source in onmck.price_sources
@@ -915,6 +944,24 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
             f"({min_source_label}); цены поставщиков: {price_text}; "
             f"{'ОК' if selected == minimum else 'ОШИБКА'}"
         )
+        price_rows.append(
+            {
+                "item": _item_label(item),
+                "quantity": _format_decimal(quantity) if quantity is not None else None,
+                "unit": item.unit,
+                "selected": _format_decimal(selected),
+                "minimum_source": min_source_label,
+                "suppliers": [
+                    {
+                        "label": source_labels.get(source_id, _supplier_label(source_id)),
+                        "price": _format_decimal(price),
+                    }
+                    for source_id, price in source_prices
+                    if price is not None
+                ],
+                "status": "passed" if selected == minimum else "failed",
+            }
+        )
     checked_count = len(onmck.items) - len(incomplete)
     if failed:
         status = "failed"
@@ -940,6 +987,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
             details={
                 "failed_items": failed,
                 "incomplete_items": incomplete,
+                "price_rows": price_rows,
                 "summary_lines": [
                     f"проверено позиций: {checked_count}",
                     f"позиций с ошибкой: {len(failed)}",
@@ -1114,6 +1162,53 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
     ]
 
 
+def _check_purchase_item_trademarks(
+    package: ProcurementPackageExtraction,
+) -> list[CheckResult]:
+    items = package.purchase_description.items if package.purchase_description else []
+    rows = []
+    for item in items:
+        trademark = item.trademark or _trademark_from_item_name(item.name)
+        if not trademark:
+            continue
+        rows.append(
+            {
+                "item_name": item.name,
+                "trademark": trademark,
+                "justification_found": bool(item.trademark_justification_text),
+                "justification_text": item.trademark_justification_text,
+                "evidence": item.evidence,
+            }
+        )
+    if not rows:
+        return []
+    return [
+        _result(
+            "manual.ktru.trademarks",
+            "Товарные знаки в ООЗ",
+            "passed",
+            "manual_review",
+            "Найденные товарные знаки перечислены без правовой оценки.",
+            documents=["purchase_description"],
+            fields=[
+                "purchase_description.items[].trademark",
+                "purchase_description.items[].trademark_justification_text",
+            ],
+            details={"trademarks": rows},
+        )
+    ]
+
+
+def _trademark_from_item_name(value: str | None) -> str | None:
+    text = " ".join(str(value or "").split())
+    match = re.search(
+        r"товарн(?:ый|ого)\s+знак(?:а)?\s*:\s*([^*;,()]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip(" .:") if match else None
+
+
 def _stage_prefix(value: Any) -> str | None:
     text = str(value or "").strip()
     match = re.match(r"(\d+)\.", text)
@@ -1232,7 +1327,7 @@ def _match_offers_to_price_sources(
                 matched = candidates[0]
             elif len(candidates) > 1:
                 warnings.append(f"{_supplier_label(source.source_id)}: несколько КП совпали по исходящему номеру/дате")
-        if matched is None:
+        if matched is None and not (source_number or source_date):
             index = _source_index(source.source_id)
             if index is not None and 0 <= index - 1 < len(offers):
                 matched = offers[index - 1]
@@ -1515,28 +1610,39 @@ def _names_close(left: str | None, right: str | None) -> bool:
 def _check_codes(package: ProcurementPackageExtraction, code_type: str) -> list[CheckResult]:
     values = _document_code_sets(package, code_type)
     names = _document_code_names(package, code_type)
-    nonempty = {name: codes for name, codes in values.items() if codes}
-    title = f"Сверка {code_type.upper()} между документами"
-    if len(nonempty) < 2:
+    code_label = "ОКПД2" if code_type == "okpd2" else "КТРУ" if code_type == "ktru" else code_type.upper()
+    title = f"Сверка {code_label} между документами"
+    expected = values.get("schedule_application", set())
+    if not expected:
         return [
             _result(
                 f"strict.codes.{code_type}",
                 title,
                 "manual_review",
                 "strict",
-                f"Недостаточно {code_type.upper()}-кодов для сверки.",
+                f"В заявке в план-график не найдены коды {code_label} для сверки.",
                 fields=[f"*.{code_type}_codes", f"*.items[].{code_type}_code"],
                 details={"codes": {key: sorted(value) for key, value in values.items()}},
             )
         ]
-    expected = next(iter(nonempty.values()))
-    passed = all(codes == expected for codes in nonempty.values())
-    union_codes = set().union(*nonempty.values())
     missing_by_document = {
-        name: sorted(union_codes - codes)
-        for name, codes in nonempty.items()
-        if union_codes - codes
+        name: sorted(expected - codes)
+        for name, codes in values.items()
+        if name != "schedule_application" and expected - codes
     }
+    additional_by_document = {
+        name: sorted(codes - expected)
+        for name, codes in values.items()
+        if name != "schedule_application" and codes - expected
+    }
+    derived_only_by_document: dict[str, list[str]] = {}
+    if code_type == "okpd2":
+        explicit = _document_explicit_okpd2_sets(package)
+        derived_only_by_document = {
+            name: sorted((expected & codes) - explicit.get(name, set()))
+            for name, codes in values.items()
+            if name != "schedule_application" and (expected & codes) - explicit.get(name, set())
+        }
     similar_by_document = (
         _similar_missing_codes(missing_by_document, values, names)
         if code_type == "okpd2"
@@ -1545,7 +1651,6 @@ def _check_codes(package: ProcurementPackageExtraction, code_type: str) -> list[
     summary_lines = [
         f"{DOCUMENT_LABELS.get(name, name)}: {', '.join(sorted(codes))}"
         for name, codes in values.items()
-        if codes
     ]
     if missing_by_document:
         for name, codes in missing_by_document.items():
@@ -1560,18 +1665,41 @@ def _check_codes(package: ProcurementPackageExtraction, code_type: str) -> list[
                     summary_lines.append(f"{label}: не найден {code_text}; похожие найденные коды: {similar_text}")
                 else:
                     summary_lines.append(f"{label}: не найден {code_text}")
+    for name, codes in additional_by_document.items():
+        label = DOCUMENT_LABELS.get(name, name)
+        summary_lines.append(
+            f"{label}: дополнительные коды {', '.join(codes)}; требуется сверка происхождения кода"
+        )
+    for name, codes in derived_only_by_document.items():
+        label = DOCUMENT_LABELS.get(name, name)
+        summary_lines.append(
+            f"{label}: коды {', '.join(codes)} определены только как корни КТРУ; требуется подтверждение ОКПД2"
+        )
+    has_warnings = bool(additional_by_document or derived_only_by_document)
+    status = "failed" if missing_by_document else "warning" if has_warnings else "passed"
+    if status == "passed":
+        message = f"Все коды {code_label} из заявки найдены в ООЗ и проекте контракта."
+    elif status == "warning":
+        message = (
+            f"Все коды из заявки найдены, но часть сведений {code_label} "
+            "требует подтверждения по источнику."
+        )
+    else:
+        message = f"Не все коды {code_label} из заявки найдены в ООЗ и проекте контракта."
     return [
         _result(
             f"strict.codes.{code_type}",
             title,
-            "passed" if passed else "failed",
+            status,
             "strict",
-            f"{code_type.upper()}-коды совпадают между документами." if passed else f"Найдены расхождения {code_type.upper()}-кодов между документами.",
-            documents=list(nonempty),
+            message,
+            documents=list(values),
             fields=[f"*.{code_type}_codes", f"*.items[].{code_type}_code"],
             details={
                 "codes": {key: sorted(value) for key, value in values.items()},
                 "missing_by_document": missing_by_document,
+                "additional_by_document": additional_by_document,
+                "derived_only_by_document": derived_only_by_document,
                 "similar_by_document": similar_by_document,
                 "empty_documents": [key for key, codes in values.items() if not codes],
                 "summary_lines": summary_lines,
@@ -1584,22 +1712,27 @@ def _document_code_sets(package: ProcurementPackageExtraction, code_type: str) -
     field = f"{code_type}_code"
     schedule_field = f"{code_type}_codes"
     if code_type == "okpd2":
-        schedule_codes = set()
-        if package.schedule_application:
-            schedule_codes.update(_normalized_codes(getattr(package.schedule_application, schedule_field, [])))
-            schedule_codes.update(_okpd2_codes_from_ktru(getattr(package.schedule_application, "ktru_codes", [])))
+        schedule_codes = _document_level_codes(package.schedule_application, schedule_field)
+        contract_embedded = (
+            package.contract_draft.embedded_purchase_description
+            if package.contract_draft else None
+        )
         return {
             "schedule_application": schedule_codes,
             "purchase_description": _document_level_codes(package.purchase_description, schedule_field)
             | _item_codes(package.purchase_description.items if package.purchase_description else [], field)
             | _item_okpd2_from_ktru(package.purchase_description.items if package.purchase_description else []),
             "contract_draft": _document_level_codes(package.contract_draft, schedule_field)
+            | _document_level_codes(contract_embedded, schedule_field)
             | _item_codes(package.contract_draft.items if package.contract_draft else [], field)
-            | _item_okpd2_from_ktru(package.contract_draft.items if package.contract_draft else []),
-            "nmck_justification": _document_level_codes(package.nmck_justification, schedule_field)
-            | _item_codes(package.nmck_justification.items if package.nmck_justification else [], field)
-            | _item_okpd2_from_ktru(package.nmck_justification.items if package.nmck_justification else []),
+            | _item_codes(contract_embedded.items if contract_embedded else [], field)
+            | _item_okpd2_from_ktru(package.contract_draft.items if package.contract_draft else [])
+            | _item_okpd2_from_ktru(contract_embedded.items if contract_embedded else []),
         }
+    contract_embedded = (
+        package.contract_draft.embedded_purchase_description
+        if package.contract_draft else None
+    )
     return {
         "schedule_application": {
             normalize_code(code)
@@ -1609,9 +1742,9 @@ def _document_code_sets(package: ProcurementPackageExtraction, code_type: str) -
         "purchase_description": _document_level_codes(package.purchase_description, schedule_field)
         | _item_codes(package.purchase_description.items if package.purchase_description else [], field),
         "contract_draft": _document_level_codes(package.contract_draft, schedule_field)
-        | _item_codes(package.contract_draft.items if package.contract_draft else [], field),
-        "nmck_justification": _document_level_codes(package.nmck_justification, schedule_field)
-        | _item_codes(package.nmck_justification.items if package.nmck_justification else [], field),
+        | _document_level_codes(contract_embedded, schedule_field)
+        | _item_codes(package.contract_draft.items if package.contract_draft else [], field)
+        | _item_codes(contract_embedded.items if contract_embedded else [], field),
     }
 
 
@@ -1619,6 +1752,27 @@ def _document_level_codes(document: Any, field: str) -> set[str]:
     if document is None:
         return set()
     return _normalized_codes(list(getattr(document, field, []) or []))
+
+
+def _document_explicit_okpd2_sets(
+    package: ProcurementPackageExtraction,
+) -> dict[str, set[str]]:
+    embedded = (
+        package.contract_draft.embedded_purchase_description
+        if package.contract_draft else None
+    )
+    return {
+        "purchase_description": (
+            _document_level_codes(package.purchase_description, "okpd2_codes")
+            | _item_codes(package.purchase_description.items if package.purchase_description else [], "okpd2_code")
+        ),
+        "contract_draft": (
+            _document_level_codes(package.contract_draft, "okpd2_codes")
+            | _item_codes(package.contract_draft.items if package.contract_draft else [], "okpd2_code")
+            | _document_level_codes(embedded, "okpd2_codes")
+            | _item_codes(embedded.items if embedded else [], "okpd2_code")
+        ),
+    }
 
 
 def _item_codes(items: list[Any], field: str) -> set[str]:
@@ -1630,7 +1784,6 @@ def _document_code_names(package: ProcurementPackageExtraction, code_type: str) 
         "schedule_application": package.schedule_application,
         "purchase_description": package.purchase_description,
         "contract_draft": package.contract_draft,
-        "nmck_justification": package.nmck_justification,
     }
     result: dict[str, dict[str, set[str]]] = {}
     for name, document in documents.items():
@@ -1642,6 +1795,11 @@ def _document_code_names(package: ProcurementPackageExtraction, code_type: str) 
         _add_item_names(names_by_code, getattr(document, "items", []) or [], code_type)
         _add_item_names(names_by_code, getattr(document, "included_goods", []) or [], code_type)
         _add_item_names(names_by_code, getattr(document, "specification_items", []) or [], code_type)
+        if name == "contract_draft":
+            embedded = getattr(document, "embedded_purchase_description", None)
+            if embedded is not None:
+                _add_reference_names(names_by_code, getattr(embedded, "subject_codes", []) or [], code_type)
+                _add_item_names(names_by_code, getattr(embedded, "items", []) or [], code_type)
         result[name] = names_by_code
     return result
 
@@ -1787,11 +1945,14 @@ def _check_plan_ground_truth(
     stage_results: list[CheckResult] | None = None,
 ) -> list[CheckResult]:
     deterministic_stage_result = _check_stages_against_plan(package)
+    effective_stage_result = (
+        stage_results[0]
+        if stage_results
+        else deterministic_stage_result
+    )
     return [
         _check_subject_against_plan(package),
-        _check_delivery_term_against_plan(
-            package,
-        ),
+        _check_delivery_term_against_plan(package, effective_stage_result),
         _check_text_against_plan(
             package,
             check_id="strict.plan.delivery_place",
@@ -1827,7 +1988,21 @@ def _check_plan_ground_truth(
 
 def _check_delivery_term_against_plan(
     package: ProcurementPackageExtraction,
+    stage_result: CheckResult,
 ) -> CheckResult:
+    if _plan_has_stages(package):
+        return _result(
+            "strict.plan.delivery_term",
+            "Срок поставки / оказания услуг",
+            stage_result.status,
+            stage_result.mode,
+            (
+                "Сроки проверены по этапам; итог совпадает с проверкой этапов исполнения."
+            ),
+            documents=list(stage_result.documents),
+            fields=list(stage_result.fields_compared),
+            details={"comparison_source": "stages"},
+        )
     direct_result = _check_text_against_plan(
         package,
         check_id="strict.plan.delivery_term",
@@ -1867,54 +2042,12 @@ def _check_delivery_term_against_plan(
             "contract_draft.stages",
         ],
     )
-    if direct_result.status != "manual_review":
-        return direct_result
+    return direct_result
 
-    plan_stages = list(
-        getattr(package.schedule_application, "stages", []) or []
-    ) if package.schedule_application else []
-    stage_documents = [
-        (
-            "purchase_description",
-            list(getattr(package.purchase_description, "stages", []) or [])
-            if package.purchase_description
-            else [],
-        ),
-        (
-            "contract_draft",
-            list(getattr(package.contract_draft, "stages", []) or [])
-            if package.contract_draft
-            else [],
-        ),
-    ]
-    if not plan_stages or not any(stages for _name, stages in stage_documents):
-        return direct_result
-    comparison = _compare_stage_sets(plan_stages, stage_documents)
-    if comparison["failed"] or comparison["manual"]:
-        return direct_result
-    return _result(
-        "strict.plan.delivery_term",
-        "Срок поставки / оказания услуг",
-        "passed",
-        "strict",
-        "Сроки поставки/оказания услуг совпадают с заявкой в план-график по этапам.",
-        documents=[
-            "schedule_application",
-            *[name for name, stages in stage_documents if stages],
-        ],
-        fields=direct_result.fields_compared,
-        details={
-            "summary_lines": [
-                f"Заявка в план-график: {_stages_summary(True, plan_stages)}",
-                *[
-                    f"{DOCUMENT_LABELS.get(name, name)}: {_stages_summary(bool(stages), stages)}"
-                    for name, stages in stage_documents
-                ],
-                *comparison["summary_lines"],
-            ],
-            "comparison_source": "stages",
-        },
-    )
+
+def _plan_has_stages(package: ProcurementPackageExtraction) -> bool:
+    schedule = package.schedule_application
+    return bool(schedule and (getattr(schedule, "stages", []) or getattr(schedule, "has_stages", False)))
 
 
 def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
@@ -2258,12 +2391,9 @@ def _check_warranty_between_ooz_and_contract(package: ProcurementPackageExtracti
 
 def _check_securities(package: ProcurementPackageExtraction) -> list[CheckResult]:
     schedule = package.schedule_application
-    contract = package.contract_draft
     application_security = schedule.application_security if schedule else None
     schedule_contract_security = schedule.contract_security if schedule else None
     schedule_warranty_security = schedule.warranty_security if schedule else None
-    contract_security = getattr(contract, "contract_security", None) if contract else None
-    warranty_security = getattr(contract, "warranty_security", None) if contract else None
     nmck = _money_amount(schedule.nmck) if schedule else None
     method = getattr(schedule, "procurement_method", None) if schedule else None
     application_exception = _security_exception_note(schedule, kind="application")
@@ -2272,8 +2402,6 @@ def _check_securities(package: ProcurementPackageExtraction) -> list[CheckResult
         _check_application_security(application_security, nmck, method, application_exception),
         _check_contract_security_limits(schedule_contract_security, nmck, contract_exception),
         _check_warranty_security_limits(schedule_warranty_security, nmck),
-        _check_contract_security(schedule_contract_security, contract_security),
-        _check_warranty_security(schedule_warranty_security, warranty_security),
     ]
 
 
@@ -2293,6 +2421,9 @@ def _check_application_security(
     elif value is None:
         status = "manual_review"
         message = "Размер обеспечения заявки не извлечён из заявки в план-график."
+    elif getattr(value, "is_not_required", False):
+        status = "passed"
+        message = "В заявке обеспечение заявки не предусмотрено."
     elif nmck is None:
         status = "manual_review"
         message = "НМЦК не извлечена из заявки; базовый диапазон обеспечения заявки определить нельзя."
@@ -2465,6 +2596,12 @@ def _check_contract_security(plan_value: Any, contract_value: Any) -> CheckResul
     elif getattr(plan_value, "is_not_required", False) and getattr(contract_value, "is_not_required", False):
         status = "passed"
         message = "Обеспечение исполнения контракта не предусмотрено в обоих документах."
+    elif getattr(plan_value, "is_not_required", False) and contract_value is None:
+        status = "manual_review"
+        message = (
+            "В заявке обеспечение исполнения контракта не предусмотрено; "
+            "в проекте контракта отдельное условие не найдено."
+        )
     elif contract_value is None:
         status = "manual_review"
         message = "В заявке размер указан, но условие об обеспечении не найдено в проекте контракта."
@@ -2512,6 +2649,12 @@ def _check_warranty_security(plan_value: Any, contract_value: Any) -> CheckResul
     elif getattr(plan_value, "is_not_required", False) and getattr(contract_value, "is_not_required", False):
         status = "passed"
         message = "Обеспечение гарантийных обязательств не предусмотрено в обоих документах."
+    elif getattr(plan_value, "is_not_required", False) and contract_value is None:
+        status = "manual_review"
+        message = (
+            "В заявке обеспечение гарантийных обязательств не предусмотрено; "
+            "в проекте контракта отдельное условие не найдено."
+        )
     elif contract_value is None:
         status = "manual_review"
         message = "В заявке размер указан, но условие не найдено в проекте контракта."
@@ -2821,7 +2964,10 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
         )
         if supplier_value is not None:
             findings.append(
-                f"Штраф поставщика за стоимостное обязательство: {expected_supplier_percent}% - найден"
+                _penalty_finding(
+                    f"Штраф поставщика за стоимостное обязательство: {expected_supplier_percent}%",
+                    supplier_value,
+                )
             )
         else:
             supplier_clauses = _find_penalty_clauses(all_clauses, party="supplier", kind="value_obligation")
@@ -2846,7 +2992,10 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
         )
         if customer_fine is not None:
             findings.append(
-                f"Штраф заказчика: {_format_money(expected_fixed_fine)} - найден"
+                _penalty_finding(
+                    f"Штраф заказчика: {_format_money(expected_fixed_fine)}",
+                    customer_fine,
+                )
             )
         elif _section_contains_money(responsibility_section, expected_fixed_fine):
             findings.append(
@@ -2870,7 +3019,10 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
         )
         if supplier_non_value is not None:
             findings.append(
-                f"Штраф поставщика за нестоимостное обязательство: {_format_money(expected_fixed_fine)} - найден"
+                _penalty_finding(
+                    f"Штраф поставщика за нестоимостное обязательство: {_format_money(expected_fixed_fine)}",
+                    supplier_non_value,
+                )
             )
         elif _section_contains_money(responsibility_section, expected_fixed_fine):
             findings.append(
@@ -2891,7 +3043,7 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
     if peni is None:
         manual.append("формула пеней за просрочку не найдена")
     else:
-        findings.append("Пени за просрочку: формула найдена")
+        findings.append(_penalty_finding("Пени за просрочку: формула", peni))
 
     if expected_smp_percent is not None:
         smp_clause = _find_penalty_clause_with_percent(
@@ -2900,7 +3052,7 @@ def _check_contract_penalties(package: ProcurementPackageExtraction) -> list[Che
             kind="smp_sonko_subcontract",
         )
         if smp_clause is not None:
-            findings.append("Штраф за непривлечение СМП/СОНКО: 5% - найден")
+            findings.append(_penalty_finding("Штраф за непривлечение СМП/СОНКО: 5%", smp_clause))
         elif _section_contains_percent(responsibility_section, expected_smp_percent, markers=("смп", "сонко", "соисполн", "субподряд")):
             findings.append("Штраф за непривлечение СМП/СОНКО: 5% - найден в разделе ответственности")
         elif not _find_penalty_clauses(all_clauses, kind="smp_sonko_subcontract"):
@@ -3256,6 +3408,15 @@ def _plan_requires_smp_sonko_subcontract(package: ProcurementPackageExtraction) 
 def _short_clause_text(text: str) -> str:
     line = " ".join(str(text or "").split())
     return line[:500] + ("..." if len(line) > 500 else "")
+
+
+def _penalty_finding(label: str, clause: Any) -> str:
+    reference = str(getattr(clause, "evidence", "") or "").strip()
+    reference_match = re.search(r"\b\d+(?:\.\d+){1,2}\b", reference)
+    reference_text = f" ({reference_match.group(0)})" if reference_match else ""
+    quote = _short_clause_text(str(getattr(clause, "raw_text", "") or ""))[:260]
+    suffix = f": {quote}" if quote else ""
+    return f"{label} - найден в разделе «Ответственность сторон»{reference_text}{suffix}"
 
 
 def _check_smp_sonko_subcontract(package: ProcurementPackageExtraction) -> list[CheckResult]:

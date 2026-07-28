@@ -140,6 +140,7 @@ def run_ktru_characteristic_checks(
                         "rule_okpd2_code": extra_allowed.get("okpd2_code"),
                         "rule_okpd2_source": extra_allowed.get("okpd2_source"),
                         "item_name": item.name,
+                        "item_row_number": item.row_number,
                         "characteristic_name": characteristic.name,
                         "value": characteristic.value,
                         "unit": characteristic.unit,
@@ -214,6 +215,7 @@ def run_ktru_characteristic_checks(
     assessments = build_assessments(
         additional_rows,
         ooz_state=ooz_justification_state,
+        records=ooz_justifications,
     )
     additional_status, additional_message = result_status(assessments, unavailable)
     justification_text = first_justification(ooz_justifications)

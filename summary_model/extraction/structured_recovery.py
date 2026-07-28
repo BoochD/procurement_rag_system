@@ -313,6 +313,11 @@ def _unwrap_fact_value(
 ) -> tuple[Any, list[RecoveryIssue]]:
     issues: list[RecoveryIssue] = []
     expected_model = _base_model_type(expected_type)
+    if expected_model is not None and isinstance(value, dict):
+        # Provider metadata may live beside a complete nested model. Keep the
+        # model intact instead of mistaking it for a scalar fact wrapper.
+        if any(field_name in value for field_name in expected_model.model_fields):
+            return value, issues
     if expected_model is not None and {
         "raw_value",
         "normalized_value",

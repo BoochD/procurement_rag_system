@@ -197,7 +197,7 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     assert "КП №1: поставщик, ИНН, срок, место, НДС." in text
     assert "Распознаны товарные знаки: DEPO, YADRO." in text
     assert "| Сервер / 26.20.14.000-00000189 |" in text
-    assert "| 17.2: confirmed | 2 | найдено в ООЗ | ПРЕДУПРЕЖДЕНИЕ |" in text
+    assert "| 17.2: подтверждено | 2 | найдено в ООЗ | ПРЕДУПРЕЖДЕНИЕ |" in text
     assert "Краткая цитата обоснования: Совместимость" in text
 
 
@@ -327,5 +327,130 @@ def test_report_keeps_allowed_ktru_rows_detailed_beside_restricted_summary():
 
     text = build_checks_report_text(report)
 
-    assert "| Сервер / 26.20.14.000-00000189 | 26.20.14.120 | 17.2: confirmed | 1 |" in text
+    assert "| Сервер / 26.20.14.000-00000189 | 26.20.14.120 | 17.2: подтверждено | 1 |" in text
     assert "| Программное обеспечение / 58.29.11.000-00000003 | Централизованное управление | Наличие | логическое | найдено в ООЗ | ОК |" in text
+
+
+def test_report_localizes_public_technical_terms_and_hides_service_rows():
+    report = _report(
+        _check_result(
+            "manual.national_regime_1875",
+            "Национальный режим / ПП №1875",
+            "warning",
+            "Проверены OKPD2 и KTRU.",
+            details={
+                "matches": [
+                    {"message": "- 26.20.14.120: table_02 позиция 198"},
+                ]
+            },
+        ),
+        _check_result(
+            "manual.ktru.additional",
+            "Дополнительные характеристики КТРУ",
+            "passed",
+            "Обоснование найдено.",
+            details={
+                "assessments": [
+                    {
+                        "item": "Программное обеспечение",
+                        "ktru_code": "58.29.11.000-00000003",
+                        "characteristic": "Дополнительные характеристики **",
+                        "decision": "allowed",
+                        "justification": {"status": "found", "source": "ooz"},
+                    },
+                    {
+                        "item": "Программное обеспечение",
+                        "ktru_code": "58.29.11.000-00000003",
+                        "characteristic": "Централизованное управление",
+                        "decision": "allowed",
+                        "justification": {"status": "found", "source": "ooz"},
+                    },
+                ],
+                "additional_rows": [
+                    {"value": "Дополнительные характеристики **"},
+                    {"value": "Наличие"},
+                ],
+            },
+        ),
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "5) Смысловая и ручная проверка:" in text
+    assert "ОКПД2 и КТРУ" in text
+    assert "приложение №2 позиция 198" in text
+    assert "17.2: confirmed" not in text
+    assert "| Программное обеспечение / 58.29.11.000-00000003 | Дополнительные характеристики" not in text
+    assert "| Программное обеспечение / 58.29.11.000-00000003 | Централизованное управление |" in text
+
+
+def test_report_renders_onmck_minimum_prices_as_readable_blocks():
+    report = _report(
+        _check_result(
+            "strict.onmck.min_price",
+            "Минимальная цена ОНМЦК",
+            "passed",
+            "Минимальные цены ОНМЦК проверены.",
+            details={
+                "price_rows": [
+                    {
+                        "item": "Сервер*",
+                        "quantity": "4",
+                        "unit": "шт.",
+                        "selected": "10245000",
+                        "minimum_source": "Исполнитель 3 (письмо № 3)",
+                        "suppliers": [
+                            {"label": "Исполнитель 1", "price": "10300000"},
+                            {"label": "Исполнитель 2", "price": "10470000"},
+                            {"label": "Исполнитель 3", "price": "10245000"},
+                        ],
+                        "status": "passed",
+                    }
+                ]
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "<b>Сервер*</b>; количество <b>4</b> шт." in text
+    assert "Выбранная минимальная цена: <b>10 245 000,00 руб.</b>" in text
+    assert "- Исполнитель 1: <b>10 300 000,00 руб.</b>" in text
+    assert "- Исполнитель 2: <b>10 470 000,00 руб.</b>" in text
+    assert "- Исполнитель 3: <b>10 245 000,00 руб.</b>" in text
+    assert "Итог: <b>ОК</b>" in text
+
+
+def test_report_renders_onmck_arithmetic_with_formula_and_kopecks():
+    report = _report(
+        _check_result(
+            "strict.onmck.arithmetic",
+            "Арифметика ОНМЦК",
+            "passed",
+            "Арифметика ОНМЦК проверена.",
+            details={
+                "arithmetic_rows": [
+                    {
+                        "item": "Сервер",
+                        "quantity": "4",
+                        "unit": "шт.",
+                        "unit_price": "10245000",
+                        "calculated": "40980000",
+                        "declared": "40980000",
+                        "status": "passed",
+                    }
+                ],
+                "row_sum": "40980000",
+                "onmck_total": "40980000",
+                "plan_nmck": "40980000",
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "<b>Сервер</b>, количество <b>4</b> шт." in text
+    assert "Цена за единицу: <b>10 245 000,00 руб.</b>" in text
+    assert "Расчёт: <b>10 245 000,00 руб.</b> × <b>4</b> = <b>40 980 000,00 руб.</b>" in text
+    assert "Стоимость в ОНМЦК: <b>40 980 000,00 руб.</b>" in text
+    assert "Сумма строк: <b>40 980 000,00 руб.</b>" in text

@@ -267,7 +267,14 @@ def _public_pipeline_warning(warning: str) -> str:
     if "спецификация распознана как пустая или шаблонная" in text:
         return f"{prefix}: спецификация не содержит заполненных товарных позиций."
     if "VLM fallback failed" in text:
-        return f"{prefix}: сложная таблица не прошла VLM-разбор; использован исходный fallback."
+        localized_prefix = prefix.replace(", table ", ", таблица ")
+        return (
+            f"{localized_prefix}: сложная таблица не прошла визуальное распознавание; "
+            "использован исходный детерминированный разбор."
+        )
     if "Structured extraction failed" in text or "structured output (None)" in text:
-        return f"{prefix}: LLM не вернула структурированный ответ; использован детерминированный разбор."
+        return (
+            f"{prefix}: языковая модель не вернула структурированный ответ; "
+            "использован детерминированный разбор."
+        )
     return text[:500] + ("..." if len(text) > 500 else "")
