@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from summary_model.checks import run_checks
 from summary_model.checks import commercial_offer_llm
+from summary_model.checks.runner import _match_offer_items
 from summary_model.checks.commercial_offer_llm import (
     CommercialOfferMatchDecision,
     _build_payload,
@@ -59,6 +60,56 @@ def test_payload_contains_offer_once_for_multiple_unmatched_rows():
         "supplier_1:item:0",
         "supplier_1:item:1",
     ]
+
+
+def test_deterministic_matcher_maps_cod_rows_one_to_one_before_llm():
+    nmck_items = [
+        NmckItem(name="Подготовка технической документации", quantity=1, unit="усл. ед."),
+        NmckItem(name="Сервер*", quantity=4, unit="шт"),
+        NmckItem(
+            name="Комплект расширения системы хранения данных товарный знак: YADRO TATLIN*",
+            quantity=1,
+            unit="шт",
+        ),
+        NmckItem(name="Программное обеспечение (тип №1)*", quantity=4, unit="шт"),
+        NmckItem(name="Программное обеспечение (тип №2)*", quantity=6, unit="шт"),
+        NmckItem(name="Программное обеспечение (тип №3)*", quantity=14, unit="шт"),
+        NmckItem(name="Расширение вычислительных мощностей", quantity=1, unit="усл. ед."),
+    ]
+    offer_items = [
+        CommercialOfferItem(name="Подготовка технической документации", quantity=1, unit="усл. ед."),
+        CommercialOfferItem(name="Расширение вычислительных мощностей", quantity=1, unit="усл. ед."),
+        CommercialOfferItem(name="Сервер YADRO VEGMAN R220 G2", quantity=4, unit="шт"),
+        CommercialOfferItem(
+            name="Комплект расширения системы хранения данных",
+            trademark="YADRO TATLIN",
+            quantity=1,
+            unit="шт",
+        ),
+        CommercialOfferItem(name="Передача прав на ПО zVirt", quantity=4, unit="шт"),
+        CommercialOfferItem(name="Передача прав на ПО Кибер Бэкап", quantity=6, unit="шт"),
+        CommercialOfferItem(name="Передача прав на ПО Кибер Бэкап", quantity=14, unit="шт"),
+    ]
+
+    matches, reasons = _match_offer_items(nmck_items, offer_items)
+
+    assert matches == {0: 0, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 1}
+    assert all(reasons[index] == "позиция найдена однозначно" for index in range(7))
+
+
+def test_deterministic_matcher_does_not_guess_duplicate_shapes_by_position():
+    nmck_items = [
+        NmckItem(name="Тип А", quantity=1, unit="шт"),
+        NmckItem(name="Тип Б", quantity=1, unit="шт"),
+    ]
+    offer_items = [
+        CommercialOfferItem(name="Неизвестная позиция X", quantity=1, unit="шт"),
+        CommercialOfferItem(name="Неизвестная позиция Y", quantity=1, unit="шт"),
+    ]
+
+    matches, _reasons = _match_offer_items(nmck_items, offer_items)
+
+    assert matches == {}
 
 
 def test_non_price_support_accepts_codes_and_unique_quantity_unit():

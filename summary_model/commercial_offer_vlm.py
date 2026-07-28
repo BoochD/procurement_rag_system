@@ -309,9 +309,9 @@ def _remove_proven_aggregate_items(
         return offer, 0
 
     item_totals = [
-        (index, normalize_money(item.total_price))
+        (index, _effective_item_total(item))
         for index, item in enumerate(offer.items)
-        if normalize_money(item.total_price) is not None
+        if _effective_item_total(item) is not None
     ]
     if len(item_totals) < 3:
         return offer, 0
@@ -340,13 +340,24 @@ def _remove_proven_aggregate_items(
     return offer, 0
 
 
+def _effective_item_total(item: CommercialOfferItem) -> Decimal | None:
+    declared = normalize_money(item.total_price)
+    if declared is not None:
+        return declared
+    quantity = normalize_decimal(item.quantity)
+    unit_price = normalize_money(item.unit_price)
+    if quantity is None or unit_price is None:
+        return None
+    return normalize_money(quantity * unit_price)
+
+
 def _remove_noncommercial_reference_items(
     offer: CommercialOfferSchema,
 ) -> tuple[CommercialOfferSchema, int]:
     priced_items = [
         item
         for item in offer.items
-        if item.quantity is not None or item.unit_price is not None or item.total_price is not None
+        if item.unit_price is not None or item.total_price is not None
     ]
     if len(priced_items) < 2 or len(priced_items) == len(offer.items):
         return offer, 0

@@ -160,13 +160,20 @@ Commercial-offer VLM lab:
 Commercial-offer arithmetic:
 
 - Every recognized row is checked as `quantity * unit price = row total`.
-- When every row total is available, their sum is compared with the declared
-  commercial-offer total.
+- If a printed row total is absent but quantity and unit price are available,
+  the calculated total participates in the offer-total check and one compact
+  manual-review note records that the printed row totals were not verified.
 - A row equal to the whole offer total is removed as an aggregate row only when
-  the sum of all remaining rows independently equals the same declared total.
+  the declared or calculated totals of all remaining rows independently equal
+  the same declared total.
   Otherwise it is retained and reported for review.
 - The report shows one compact arithmetic row per offer. Complete VLM warnings
   remain in `checks.json`; the public report shows only prioritized summaries.
+- ONMCK rows and each offer are matched one-to-one before comparison. The
+  deterministic matcher uses codes, normalized names, trademark/model markers,
+  and quantities that can be confirmed from ONMCK supplier totals. The text LLM
+  receives only pairs left unresolved by those rules and cannot replace an
+  already established deterministic match.
 
 Structured-output recovery lab:
 

@@ -1853,6 +1853,24 @@ def test_commercial_offer_keeps_total_like_row_when_detail_sum_is_not_proven():
     assert len(cleaned.items) == 3
 
 
+def test_commercial_offer_removes_aggregate_using_quantity_times_unit_price():
+    from summary_model.commercial_offer_vlm import _remove_proven_aggregate_items
+
+    offer = CommercialOfferSchema(
+        total_amount=MoneyValue(amount=Decimal("100")),
+        items=[
+            CommercialOfferItem(name="Оказание услуг, в том числе", quantity=1, unit_price=100),
+            CommercialOfferItem(name="Этап 1", quantity=2, unit_price=20),
+            CommercialOfferItem(name="Этап 2", quantity=3, unit_price=20),
+        ],
+    )
+
+    cleaned, removed = _remove_proven_aggregate_items(offer)
+
+    assert removed == 1
+    assert [item.name for item in cleaned.items] == ["Этап 1", "Этап 2"]
+
+
 def test_commercial_offer_separates_aggregate_and_non_price_appendix_rows():
     from summary_model.commercial_offer_vlm import (
         _remove_noncommercial_reference_items,
@@ -1875,7 +1893,10 @@ def test_commercial_offer_separates_aggregate_and_non_price_appendix_rows():
                 unit_price=Decimal("60"),
                 total_price=Decimal("60"),
             ),
-            CommercialOfferItem(name="Техническая характеристика приложения"),
+            CommercialOfferItem(
+                name="Техническая характеристика приложения",
+                quantity=Decimal("4"),
+            ),
         ],
     )
 
@@ -1925,6 +1946,31 @@ def test_commercial_offer_arithmetic_checks_rows_and_declared_total():
     assert result.status == "failed"
     assert result.details["arithmetic_rows"][0]["status"] == "failed"
     assert len(result.details["arithmetic_failures"]) == 2
+
+
+def test_commercial_offer_arithmetic_uses_calculated_totals_without_repeating_warnings():
+    package = ProcurementPackageExtraction(
+        commercial_offers=[
+            CommercialOfferSchema(
+                supplier_name="ООО Тест",
+                total_amount=MoneyValue(amount=Decimal("100")),
+                items=[
+                    CommercialOfferItem(name="Строка 1", quantity=2, unit_price=20),
+                    CommercialOfferItem(name="Строка 2", quantity=3, unit_price=20),
+                ],
+            )
+        ],
+        commercial_offers_found_count=1,
+    )
+
+    result = _by_id(run_checks(package))["manual.commercial_offers.content"]
+    arithmetic = result.details["arithmetic_rows"][0]
+
+    assert arithmetic["checked_rows"] == 2
+    assert arithmetic["derived_rows"] == 2
+    assert arithmetic["calculated_total"] == "100.00"
+    assert arithmetic["total_matches"] is True
+    assert len(arithmetic["manual_review"]) == 1
 
 
 def test_commercial_offer_vlm_normalizes_russian_dates_and_money_strings():

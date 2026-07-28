@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 
 from shared_modules.llm_models import OPENAI_FAST_MODEL, get_chatGPT_client
 from summary_model.checks.normalization import normalize_decimal, normalize_text, normalize_unit
-from summary_model.checks.runner import _match_offer_item, _match_offers_to_price_sources
+from summary_model.checks.runner import (
+    _match_offer_items,
+    _match_offers_to_price_sources,
+    _offer_marker_support,
+    _offer_names_support,
+)
 from summary_model.extraction.structured_recovery import parse_json_object, recover_model
 from summary_model.extraction_models import ProcurementPackageExtraction
 
@@ -234,14 +239,17 @@ def _build_payload(package: ProcurementPackageExtraction) -> dict[str, Any]:
     if onmck is None or not offers:
         return {"unmatched_rows": [], "offers": []}
     offer_by_source, _warnings = _match_offers_to_price_sources(offers, onmck.price_sources)
+    matches_by_source = {
+        source_id: _match_offer_items(onmck.items, offer.items)[0]
+        for source_id, offer in offer_by_source.items()
+    }
     unmatched_rows: list[dict[str, Any]] = []
     for nmck_item_index, nmck_item in enumerate(onmck.items):
         for supplier_price in nmck_item.supplier_prices:
             offer = offer_by_source.get(supplier_price.source_id)
             if offer is None:
                 continue
-            matched, _reason = _match_offer_item(nmck_item, offer.items)
-            if matched is not None:
+            if nmck_item_index in matches_by_source.get(supplier_price.source_id, {}):
                 continue
             unmatched_rows.append({
                 "nmck_item_index": nmck_item_index,
@@ -350,10 +358,9 @@ def _has_non_price_support(nmck_item: Any, offer_item: Any, offer_items: list[An
         return True
     if _same_nonempty_code(nmck_item.okpd2_code, offer_item.okpd2_code):
         return True
-    if normalize_text(nmck_item.name) and (
-        normalize_text(nmck_item.name) in normalize_text(offer_item.name)
-        or normalize_text(offer_item.name) in normalize_text(nmck_item.name)
-    ):
+    if _offer_names_support(nmck_item.name, offer_item.name):
+        return True
+    if _offer_marker_support(nmck_item, offer_item):
         return True
     quantity = normalize_decimal(nmck_item.quantity)
     unit = normalize_unit(nmck_item.unit)

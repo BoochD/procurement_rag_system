@@ -306,6 +306,7 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
     failures: list[str] = []
     manual: list[str] = []
     checked_rows = 0
+    derived_rows = 0
     row_errors = 0
     item_totals: list[Decimal] = []
 
@@ -314,28 +315,36 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
         quantity = normalize_decimal(item.quantity)
         unit_price = _money(item.unit_price)
         total = _money(item.total_price)
-        if total is not None:
-            item_totals.append(total)
-        if quantity is None or unit_price is None or total is None:
+        effective_total = total
+        if effective_total is None and quantity is not None and unit_price is not None:
+            effective_total = _money(quantity * unit_price)
+            derived_rows += 1
+        if effective_total is not None:
+            item_totals.append(effective_total)
+        if quantity is None or unit_price is None:
             missing_fields = []
             if quantity is None:
                 missing_fields.append("количество")
             if unit_price is None:
                 missing_fields.append("цена за единицу")
-            if total is None:
-                missing_fields.append("итог строки")
             manual.append(
                 f"{label}, {item_label}: не проверены {', '.join(missing_fields)}"
             )
             continue
         checked_rows += 1
         calculated = _money(quantity * unit_price)
-        if calculated != total:
+        if total is not None and calculated != total:
             row_errors += 1
             failures.append(
                 f"{label}, {item_label}: итог строки {_format_money(total)} не равен "
                 f"количество × цена {_format_money(calculated)}"
             )
+
+    if derived_rows:
+        manual.append(
+            f"{label}: для {derived_rows} строк документальный итог не распознан; "
+            "сумма рассчитана как количество × цена за единицу"
+        )
 
     declared_total = _money_amount(offer.total_amount)
     calculated_total = _money(sum(item_totals, Decimal("0"))) if item_totals else None
@@ -358,6 +367,7 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
         "label": label,
         "items_count": len(offer.items),
         "checked_rows": checked_rows,
+        "derived_rows": derived_rows,
         "row_errors": row_errors,
         "calculated_total": _format_money(calculated_total) if calculated_total is not None else None,
         "declared_total": _format_money(declared_total) if declared_total is not None else None,
@@ -402,6 +412,12 @@ def _check_commercial_offers_against_onmck(
         ]
 
     offer_by_source, source_warnings = _match_offers_to_price_sources(offers, onmck.price_sources)
+    item_matches: dict[str, dict[int, int]] = {}
+    item_match_reasons: dict[str, dict[int, str]] = {}
+    for source_id, offer in offer_by_source.items():
+        matches, reasons = _match_offer_items(onmck.items, offer.items)
+        item_matches[source_id] = matches
+        item_match_reasons[source_id] = reasons
     ooz_items = list(package.purchase_description.items if package.purchase_description else [])
     summary_lines = list(source_warnings)
     failures: list[str] = []
@@ -419,7 +435,16 @@ def _check_commercial_offers_against_onmck(
             if offer is None:
                 manual.append(f"{item_label}: для {source_label} не найдено соответствующее КП")
                 continue
-            offer_item, reason = _match_offer_item(nmck_item, offer.items)
+            offer_item_index = item_matches.get(supplier_price.source_id, {}).get(nmck_item_index)
+            offer_item = (
+                offer.items[offer_item_index]
+                if offer_item_index is not None and 0 <= offer_item_index < len(offer.items)
+                else None
+            )
+            reason = item_match_reasons.get(supplier_price.source_id, {}).get(
+                nmck_item_index,
+                f"строка КП для позиции '{item_label}' не найдена",
+            )
             if offer_item is None:
                 decision = _commercial_offer_llm_decision(
                     llm_matches,
@@ -1242,6 +1267,162 @@ def _match_offer_item(
     return None, f"строка КП для позиции '{_item_label(nmck_item)}' не найдена"
 
 
+def _match_offer_items(
+    nmck_items: list[NmckItem],
+    offer_items: list[CommercialOfferItem],
+) -> tuple[dict[int, int], dict[int, str]]:
+    """Build a one-to-one deterministic map before asking the LLM."""
+    matches: dict[int, int] = {}
+    used_offer_indexes: set[int] = set()
+
+    def assign_unique(predicate: Any) -> None:
+        candidate_map = {
+            nmck_index: [
+                offer_index
+                for offer_index, offer_item in enumerate(offer_items)
+                if offer_index not in used_offer_indexes and predicate(nmck_item, offer_item)
+            ]
+            for nmck_index, nmck_item in enumerate(nmck_items)
+            if nmck_index not in matches
+        }
+        uniquely_claimed = {
+            candidates[0]
+            for candidates in candidate_map.values()
+            if len(candidates) == 1
+            and sum(candidates[0] in other for other in candidate_map.values()) == 1
+        }
+        for nmck_index, candidates in candidate_map.items():
+            if len(candidates) == 1 and candidates[0] in uniquely_claimed:
+                matches[nmck_index] = candidates[0]
+                used_offer_indexes.add(candidates[0])
+
+    assign_unique(lambda nmck, offer: _same_code(nmck.ktru_code, offer.ktru_code))
+    assign_unique(
+        lambda nmck, offer: _same_code(nmck.okpd2_code, offer.okpd2_code)
+        and _offer_names_support(nmck.name, offer.name)
+    )
+    name_scores = {
+        (nmck_index, offer_index): _offer_name_score(nmck_item.name, offer_item.name)
+        for nmck_index, nmck_item in enumerate(nmck_items)
+        if nmck_index not in matches
+        for offer_index, offer_item in enumerate(offer_items)
+        if offer_index not in used_offer_indexes
+    }
+    for (nmck_index, offer_index), score in name_scores.items():
+        if nmck_index in matches or offer_index in used_offer_indexes:
+            continue
+        if score < 0.55:
+            continue
+        nmck_scores = [
+            value for (left, _right), value in name_scores.items() if left == nmck_index
+        ]
+        offer_scores = [
+            value for (_left, right), value in name_scores.items() if right == offer_index
+        ]
+        if nmck_scores.count(score) == 1 and offer_scores.count(score) == 1:
+            if score == max(nmck_scores) and score == max(offer_scores):
+                matches[nmck_index] = offer_index
+                used_offer_indexes.add(offer_index)
+    assign_unique(lambda nmck, offer: _offer_names_support(nmck.name, offer.name))
+    assign_unique(_offer_marker_support)
+
+    if matches:
+        remaining_nmck = [index for index in range(len(nmck_items)) if index not in matches]
+        remaining_offers = [index for index in range(len(offer_items)) if index not in used_offer_indexes]
+        signatures: dict[Decimal, tuple[list[int], list[int]]] = {}
+        for nmck_index in remaining_nmck:
+            signature = _item_quantity(nmck_items[nmck_index])
+            if signature is not None:
+                signatures.setdefault(signature, ([], []))[0].append(nmck_index)
+        for offer_index in remaining_offers:
+            signature = _item_quantity(offer_items[offer_index])
+            if signature is not None:
+                signatures.setdefault(signature, ([], []))[1].append(offer_index)
+        for nmck_indexes, offer_indexes in signatures.values():
+            if len(nmck_indexes) == 1 and len(offer_indexes) == 1:
+                matches[nmck_indexes[0]] = offer_indexes[0]
+                used_offer_indexes.add(offer_indexes[0])
+
+    reasons = {}
+    for nmck_index, nmck_item in enumerate(nmck_items):
+        if nmck_index in matches:
+            reasons[nmck_index] = "позиция найдена однозначно"
+        else:
+            _item, reasons[nmck_index] = _match_offer_item(nmck_item, offer_items)
+    return matches, reasons
+
+
+def _item_quantity(item: Any) -> Decimal | None:
+    quantity = normalize_decimal(getattr(item, "quantity", None))
+    if quantity is not None:
+        return quantity
+    inferred_values = [
+        row_total / unit_price
+        for price in (getattr(item, "supplier_prices", None) or [])
+        if (row_total := normalize_decimal(getattr(price, "row_total", None))) is not None
+        and (unit_price := normalize_decimal(getattr(price, "unit_price", None))) not in (None, 0)
+    ]
+    if len(inferred_values) < 2:
+        return None
+    inferred = set(inferred_values)
+    return inferred.pop() if len(inferred) == 1 else None
+
+
+def _offer_names_support(left: str | None, right: str | None) -> bool:
+    left_norm = normalize_text(left)
+    right_norm = normalize_text(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    left_tokens = _meaningful_name_tokens(left)
+    right_tokens = _meaningful_name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    if len(left_tokens) == 1:
+        return left_tokens <= right_tokens
+    if len(right_tokens) == 1:
+        return right_tokens <= left_tokens
+    if min(len(left_tokens), len(right_tokens)) <= 3:
+        return left_tokens <= right_tokens or right_tokens <= left_tokens
+    if len(left_tokens) < 3 or len(right_tokens) < 3:
+        return False
+    return _offer_name_score(left, right) >= 0.55
+
+
+def _offer_name_score(left: Any, right: Any) -> float:
+    left_tokens = _meaningful_name_tokens(left)
+    right_tokens = _meaningful_name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    return overlap / union if union else 0.0
+
+
+def _meaningful_name_tokens(value: Any) -> set[str]:
+    ignored = {
+        "товарный", "знак", "тип", "этап", "услуга", "услуги", "оказание",
+        "поставка", "предоставление", "передача", "программное", "обеспечение",
+    }
+    return {
+        token
+        for token in normalize_text(value).split()
+        if len(token) >= 3 and token not in ignored and not token.isdigit()
+    }
+
+
+def _offer_marker_support(nmck_item: NmckItem, offer_item: CommercialOfferItem) -> bool:
+    nmck_text = normalize_text(nmck_item.name)
+    if not nmck_text:
+        return False
+    for value in (offer_item.trademark, offer_item.model):
+        marker = normalize_text(value)
+        if len(marker) >= 3 and marker in nmck_text:
+            return True
+    return False
+
+
 def _compare_offer_item_to_reference(
     *,
     item_label: str,
@@ -1287,7 +1468,10 @@ def _check_offer_row_total(
     unit_price = _money(offer_item.unit_price)
     total = _money(offer_item.total_price)
     if total is None:
-        manual.append(f"{item_label}: {_commercial_offer_name(offer)} итоговая стоимость строки КП не распознана")
+        if quantity is None or unit_price is None:
+            manual.append(
+                f"{item_label}: {_commercial_offer_name(offer)} итог строки нельзя проверить"
+            )
         return
     if quantity is not None and unit_price is not None and _money(quantity * unit_price) != total:
         failures.append(
