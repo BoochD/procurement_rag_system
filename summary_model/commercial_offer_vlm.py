@@ -221,8 +221,8 @@ def _normalize_vlm_offer_payload(data: dict[str, Any]) -> dict[str, Any]:
             if parsed is not None:
                 normalized[field_name] = parsed
 
-    for field_name in ("vat_rate", "vat_amount"):
-        _normalize_decimal_field(normalized, field_name)
+    _normalize_decimal_field(normalized, "vat_rate", raw_text_field="vat_text")
+    _normalize_decimal_field(normalized, "vat_amount")
     total = normalized.get("total_amount")
     if isinstance(total, dict):
         total = dict(total)
@@ -244,18 +244,32 @@ def _normalize_vlm_offer_payload(data: dict[str, Any]) -> dict[str, Any]:
                 "vat_rate",
                 "vat_amount",
             ):
-                _normalize_decimal_field(normalized_item, field_name)
+                _normalize_decimal_field(
+                    normalized_item,
+                    field_name,
+                    raw_text_field="vat_text" if field_name == "vat_rate" else None,
+                )
             normalized_items.append(normalized_item)
         normalized["items"] = normalized_items
     return normalized
 
 
-def _normalize_decimal_field(data: dict[str, Any], field_name: str) -> None:
+def _normalize_decimal_field(
+    data: dict[str, Any],
+    field_name: str,
+    *,
+    raw_text_field: str | None = None,
+) -> None:
     value = data.get(field_name)
     if isinstance(value, str):
         parsed = normalize_decimal(value)
         if parsed is not None:
             data[field_name] = parsed
+        elif raw_text_field and value.strip():
+            existing = str(data.get(raw_text_field) or "").strip()
+            if value.strip().casefold() not in existing.casefold():
+                data[raw_text_field] = "; ".join(filter(None, (existing, value.strip())))
+            data[field_name] = None
 
 
 def _merge_page_offers(

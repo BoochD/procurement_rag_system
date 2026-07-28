@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from math import sqrt
 from pathlib import Path
 from typing import Any
@@ -196,6 +196,8 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
     arithmetic_rows: list[dict[str, Any]] = []
     arithmetic_failures: list[str] = []
     arithmetic_manual: list[str] = []
+    vat_rows: list[dict[str, Any]] = []
+    vat_manual: list[str] = []
     offer_summaries: list[dict[str, Any]] = []
     for index, offer in enumerate(offers, 1):
         label = _commercial_offer_label(index, offer)
@@ -203,6 +205,9 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
         arithmetic_rows.append(arithmetic)
         arithmetic_failures.extend(arithmetic["failures"])
         arithmetic_manual.extend(arithmetic["manual_review"])
+        vat_row = _commercial_offer_vat_arithmetic(label, offer)
+        vat_rows.append(vat_row)
+        vat_manual.extend(vat_row["issues"])
         offer_summaries.append(
             {
                 "label": label,
@@ -267,7 +272,7 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
     if arithmetic_failures:
         status = "failed"
         message = "В арифметике коммерческих предложений найдены ошибки."
-    elif missing or arithmetic_manual:
+    elif missing or arithmetic_manual or vat_manual:
         status = "manual_review"
         message = "Часть реквизитов или арифметических данных КП требует проверки."
     elif warnings:
@@ -312,6 +317,13 @@ def _check_commercial_offer_content(package: ProcurementPackageExtraction) -> li
                         else "passed"
                     ),
                     "issues": [*arithmetic_failures, *arithmetic_manual],
+                },
+                "vat_criterion": {
+                    "key": "vat",
+                    "label": "Правильность расчёта НДС",
+                    "status": "manual_review" if vat_manual else "passed",
+                    "issues": vat_manual,
+                    "calculations": vat_rows,
                 },
             },
         )
@@ -394,6 +406,69 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
     }
 
 
+def _commercial_offer_vat_arithmetic(label: str, offer: Any) -> dict[str, Any]:
+    vat_text = str(getattr(offer, "vat_text", None) or "").strip()
+    vat_rate = _money(getattr(offer, "vat_rate", None))
+    vat_amount = _money(getattr(offer, "vat_amount", None))
+    total = _money_amount(getattr(offer, "total_amount", None))
+    vat_included = getattr(offer, "vat_included", None)
+    normalized_text = normalize_text(vat_text)
+
+    if any(marker in normalized_text for marker in ("без ндс", "ндс не облага", "ндс не предусмотр")) or (
+        vat_rate == Decimal("0") and vat_amount in (None, Decimal("0"))
+    ):
+        return {
+            "label": label,
+            "status": "passed",
+            "note": "НДС не начисляется согласно тексту КП.",
+            "issues": [],
+        }
+
+    missing = []
+    if total is None:
+        missing.append("итоговая сумма")
+    if vat_rate is None:
+        missing.append("ставка НДС")
+    if vat_amount is None:
+        missing.append("сумма НДС")
+    if missing:
+        message = f"{label}: нельзя проверить НДС, не распознаны {', '.join(missing)}"
+        return {"label": label, "status": "manual_review", "issues": [message]}
+
+    if vat_included is None:
+        if "в том числе" in normalized_text or "включ" in normalized_text:
+            vat_included = True
+        elif "сверх" in normalized_text or "плюс ндс" in normalized_text or "без учета ндс" in normalized_text:
+            vat_included = False
+        else:
+            message = f"{label}: не определено, включён ли НДС в итоговую сумму"
+            return {"label": label, "status": "manual_review", "issues": [message]}
+
+    base = total - vat_amount if vat_included else total
+    if base < 0:
+        message = f"{label}: распознанная сумма НДС превышает итоговую сумму КП"
+        return {"label": label, "status": "manual_review", "issues": [message]}
+
+    rate_fraction = vat_rate / Decimal("100")
+    calculated = (base * rate_fraction).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    declared = vat_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    matches = calculated == declared
+    issues = [] if matches else [
+        f"{label}: расчётный НДС {_format_money(calculated)} не совпадает с указанным {_format_money(declared)}"
+    ]
+    return {
+        "label": label,
+        "status": "passed" if matches else "manual_review",
+        "base": str(base),
+        "rate": str(vat_rate),
+        "rate_fraction": str(rate_fraction),
+        "calculated": str(calculated),
+        "declared": str(declared),
+        "vat_included": bool(vat_included),
+        "issues": issues,
+    }
+
+
 def _check_commercial_offers_against_onmck(
     package: ProcurementPackageExtraction,
     *,
@@ -405,10 +480,10 @@ def _check_commercial_offers_against_onmck(
         return [
             _result(
                 "manual.commercial_offers.onmck",
-                "Сверка КП с ОНМЦК",
+                "Сверка строк КП с ОНМЦК и ООЗ",
                 "manual_review",
                 "manual_review",
-                "Коммерческие предложения не приложены. Сверка КП с ОНМЦК невозможна.",
+                "Коммерческие предложения не приложены. Сверка строк КП с ОНМЦК и ООЗ невозможна.",
                 documents=["commercial_offers", "nmck_justification"],
                 fields=["commercial_offers", "nmck_justification.price_sources"],
                 details={"summary_lines": ["КП не приложены."]},
@@ -418,10 +493,10 @@ def _check_commercial_offers_against_onmck(
         return [
             _result(
                 "manual.commercial_offers.onmck",
-                "Сверка КП с ОНМЦК",
+                "Сверка строк КП с ОНМЦК и ООЗ",
                 "manual_review",
                 "manual_review",
-                "ОНМЦК не распознана. Сверка КП с ОНМЦК невозможна.",
+                "ОНМЦК не распознана. Сверка строк КП с ОНМЦК и ООЗ невозможна.",
                 documents=["commercial_offers", "nmck_justification"],
                 fields=["commercial_offers", "nmck_justification.items"],
             )
@@ -605,7 +680,7 @@ def _check_commercial_offers_against_onmck(
     return [
         _result(
             "manual.commercial_offers.onmck",
-            "Сверка КП с ОНМЦК",
+            "Сверка строк КП с ОНМЦК и ООЗ",
             status,
             "manual_review",
             message,
@@ -1669,6 +1744,10 @@ def _offer_names_support(left: str | None, right: str | None) -> bool:
         return left_tokens <= right_tokens or right_tokens <= left_tokens
     if len(left_tokens) < 3 or len(right_tokens) < 3:
         return False
+    overlap = len(left_tokens & right_tokens)
+    shorter_coverage = overlap / min(len(left_tokens), len(right_tokens))
+    if shorter_coverage >= 0.75:
+        return True
     return _offer_name_score(left, right) >= 0.55
 
 

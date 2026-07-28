@@ -62,6 +62,9 @@ SEMANTIC_CHECKS_PROMPT = """
 Если данных недостаточно, ставь manual_review и коротко назови недостающие поля.
 Если формулировки отличаются только регистром, пунктуацией или небольшой
 перефразировкой без изменения смысла, это passed.
+Для semantic.delivery_place адрес сравнивай точно. Разные номера дома, корпуса,
+строения или помещения являются подтверждённым расхождением и дают failed;
+их нельзя считать отличием форматирования. Например, «д. 001» и «д. 14» — failed.
 Для semantic.delivery_term сравнивай только сроки поставки/оказания услуг/выполнения работ.
 Не считай срок исполнения Контракта, срок действия Контракта, дату начала/окончания исполнения или общий срок
 исполнения Контракта противоречием сроку поставки. Например, "поставка в течение 15 рабочих дней" и
@@ -161,11 +164,65 @@ def run_semantic_llm_checks(
             checks.append(_manual_result(check_id, title, "LLM не вернула результат по этому пункту."))
             continue
         finding = _apply_delivery_term_guard(package, finding)
+        finding = _apply_delivery_place_guard(package, finding)
         finding = _apply_procurement_method_guard(package, finding)
         finding = _apply_smp_preference_guard(package, finding)
         finding = _apply_warranty_guard(package, finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
+
+
+def _apply_delivery_place_guard(
+    package: ProcurementPackageExtraction,
+    finding: SemanticCheckFinding,
+) -> SemanticCheckFinding:
+    if finding.check_id != "semantic.delivery_place":
+        return finding
+
+    values = [
+        ("Заявка в план-график", getattr(package.schedule_application, "delivery_place", None)),
+        ("ООЗ", getattr(package.purchase_description, "delivery_place", None)),
+        ("Проект контракта", getattr(package.contract_draft, "delivery_place", None)),
+    ]
+    house_numbers = [
+        (label, _house_numbers(value))
+        for label, value in values
+        if value and _house_numbers(value)
+    ]
+    if len(house_numbers) < 2:
+        return finding
+
+    baseline_label, baseline_numbers = house_numbers[0]
+    conflicts = [
+        f"{label}: {', '.join(sorted(numbers))}"
+        for label, numbers in house_numbers[1:]
+        if baseline_numbers.isdisjoint(numbers)
+    ]
+    if not conflicts:
+        return finding
+
+    baseline = ", ".join(sorted(baseline_numbers))
+    return SemanticCheckFinding(
+        check_id=finding.check_id,
+        status="failed",
+        message=(
+            f"Номер дома различается: {baseline_label} — {baseline}; "
+            f"{' ; '.join(conflicts)}. Адреса не согласованы."
+        ),
+        compared_values=finding.compared_values,
+        evidence=finding.evidence,
+    )
+
+
+def _house_numbers(value: object) -> set[str]:
+    matches = re.findall(
+        r"(?i)(?<![а-яa-z])(?:д(?:ом)?\.?)\s*(\d+[а-яa-z]?)",
+        str(value or ""),
+    )
+    return {
+        re.sub(r"^0+(?=\d)", "", match.casefold())
+        for match in matches
+    }
 
 
 def _extract_check(client, schema, prompt: str, payload: str):

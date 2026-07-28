@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -46,7 +47,8 @@ PENALTY_CHECK_PROMPT = """
 
 Сверь текст главы с expected из payload. Верни общий status и короткий message.
 Все текстовые поля ответа заполняй только на русском языке.
-В findings верни отдельную запись для каждого найденного или отсутствующего вида:
+В findings ОБЯЗАТЕЛЬНО верни отдельную запись для каждого из перечисленных видов,
+даже если условие не найдено или требует проверки:
 - штраф заказчика;
 - штраф поставщика за стоимостное обязательство;
 - штраф поставщика за нестоимостное обязательство;
@@ -153,6 +155,8 @@ def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object
         "manual_review": "manual_review",
     }[status]
     lines = _expected_lines(payload)
+    if result.message:
+        lines.append(f"Вывод специализированной проверки: {_short_text(result.message)}")
     for finding in findings:
         status_label = {
             "passed": "ОК",
@@ -166,6 +170,13 @@ def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object
             f"{_finding_label(finding.label)} — {status_label}.{source} "
             f"{_finding_message(finding.status)}{quote}".strip()
         )
+    if not findings:
+        lines.append(
+            "Специализированная LLM не вернула перечень найденных пунктов; "
+            "результат нельзя считать подтверждённым."
+        )
+        for preview in _penalty_clause_previews(payload.get("responsibility_section_text")):
+            lines.append(f"Найдено в разделе ответственности: {preview}")
     report_message = _result_message(status)
     return CheckResult(
         check_id="strict.contract.penalties",
@@ -228,6 +239,19 @@ def _expected_lines(payload: dict[str, object]) -> list[str]:
 def _short_text(value: str | None, limit: int = 260) -> str:
     text = " ".join((value or "").split())
     return text if len(text) <= limit else f"{text[:limit - 3].rstrip()}..."
+
+
+def _penalty_clause_previews(value: object, limit: int = 5) -> list[str]:
+    text = str(value or "")
+    clauses = re.split(r"(?=\b\d+(?:\.\d+)+\.\s*)", text)
+    result = []
+    for clause in clauses:
+        compact = " ".join(clause.split())
+        if compact and _has_penalty_words(compact):
+            result.append(_short_text(compact))
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _penalty_payload(package: ProcurementPackageExtraction) -> dict[str, object]:

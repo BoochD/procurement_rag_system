@@ -737,6 +737,52 @@ def test_penalty_result_is_passed_when_every_expected_finding_passed():
     assert "соответствуют" in check.report_text
 
 
+def test_penalty_result_shows_source_clauses_when_llm_returns_no_findings():
+    from summary_model.checks.penalty_llm import ContractPenaltyLLMResult, _to_check_result
+
+    result = ContractPenaltyLLMResult(
+        status="manual_review",
+        message="Не удалось сформировать перечень.",
+        findings=[],
+    )
+    payload = {
+        "nmck": "106312006.01",
+        "expected": {"fixed_fine_amount": "100000.00"},
+        "responsibility_section_text": (
+            "7.4. Штраф заказчика составляет 100000 рублей. "
+            "7.5. Пеня начисляется в размере 1/300 ключевой ставки."
+        ),
+    }
+
+    check = _to_check_result(result, payload)
+
+    assert any("7.4. Штраф заказчика" in line for line in check.details["summary_lines"])
+    assert any("7.5. Пеня начисляется" in line for line in check.details["summary_lines"])
+
+
+def test_semantic_delivery_place_rejects_different_house_numbers():
+    from summary_model.checks.semantic_llm import (
+        SemanticCheckFinding,
+        _apply_delivery_place_guard,
+    )
+
+    package = _base_package()
+    package.schedule_application.delivery_place = "г. Новосибирск, ул. Свердлова, д. 001"
+    package.purchase_description.delivery_place = "г. Новосибирск, ул. Свердлова, д. 14"
+    package.contract_draft.delivery_place = "г. Новосибирск, ул. Свердлова, д. 14"
+    finding = SemanticCheckFinding(
+        check_id="semantic.delivery_place",
+        status="passed",
+        message="Адреса совпадают.",
+    )
+
+    guarded = _apply_delivery_place_guard(package, finding)
+
+    assert guarded.status == "failed"
+    assert "001" not in guarded.message
+    assert "1" in guarded.message and "14" in guarded.message
+
+
 def test_penalty_llm_is_not_called_without_usable_responsibility_section():
     from summary_model.checks.penalty_llm import run_penalty_llm_checks
 
@@ -1069,6 +1115,22 @@ def test_commercial_offer_subject_is_compared_with_ooz():
     assert result.status == "failed"
     assert subject["status"] == "failed"
     assert any("не соответствует ООЗ" in issue for issue in subject["issues"])
+
+
+def test_commercial_offer_subject_accepts_meaningful_shortened_ooz_name():
+    from summary_model.checks.runner import _offer_names_support
+
+    assert _offer_names_support(
+        "оказание услуг по расширению вычислительных мощностей, среды виртуализации, "
+        "системы резервного копирования центра обработки данных Правительства "
+        "Новосибирской области",
+        "Расширение вычислительных мощностей, среды виртуализации и системы "
+        "резервного копирования",
+    )
+    assert not _offer_names_support(
+        "поставка расходных материалов для оргтехники",
+        "поставка автомобильных шин",
+    )
 
 
 def test_commercial_offers_onmck_match_fails_on_price_quantity_or_unit_mismatch():
@@ -1731,6 +1793,56 @@ def test_ktru_uses_ooz_justification_without_contract_table_comparison():
     assert results["manual.ktru.additional"].details["assessments"][0]["decision"] == "allowed"
 
 
+def test_ktru_justifications_do_not_cross_match_same_ktru_items():
+    from summary_model.checks.additional_characteristics import build_assessments
+
+    records = [
+        AdditionalCharacteristicsJustification(
+            item_name="Программное обеспечение (тип №1)",
+            item_row_number="2.1",
+            item_ktru_code="58.29.11.000-00000003",
+            characteristic_names=["Виртуализация"],
+            justification_text="Обоснование виртуализации",
+            extraction_method="vlm_table",
+        ),
+        AdditionalCharacteristicsJustification(
+            item_name="Программное обеспечение (тип №2)",
+            item_row_number="2.2",
+            item_ktru_code="58.29.11.000-00000003",
+            characteristic_names=["Резервное копирование"],
+            justification_text="Обоснование резервного копирования",
+            extraction_method="vlm_table",
+        ),
+    ]
+    rows = [
+        {
+            "item_name": "Программное обеспечение (тип №1)",
+            "item_row_number": "2.1",
+            "ktru_code": "58.29.11.000-00000003",
+            "characteristic_name": "Виртуализация",
+            "status": "passed",
+        },
+        {
+            "item_name": "Программное обеспечение (тип №2)",
+            "item_row_number": "2.2",
+            "ktru_code": "58.29.11.000-00000003",
+            "characteristic_name": "Резервное копирование",
+            "status": "passed",
+        },
+    ]
+
+    assessments = build_assessments(
+        rows,
+        ooz_state={"found": False, "partial": False},
+        records=records,
+    )
+
+    assert [item["justification"]["quote"] for item in assessments] == [
+        "Обоснование виртуализации",
+        "Обоснование резервного копирования",
+    ]
+
+
 def test_ktru_partial_justification_table_degrades_to_manual_review():
     from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
 
@@ -2367,3 +2479,38 @@ def test_justification_state_prefers_explicit_justification_heading():
     ])
 
     assert state["quote"].startswith("Обоснование применения дополнительных характеристик")
+
+
+def test_commercial_offer_vlm_preserves_textual_vat_in_vat_text():
+    from summary_model.commercial_offer_vlm import _normalize_vlm_offer_payload
+
+    payload = _normalize_vlm_offer_payload({"vat_rate": "смешанный НДС"})
+
+    assert payload["vat_rate"] is None
+    assert payload["vat_text"] == "смешанный НДС"
+
+
+def test_commercial_offer_vat_arithmetic_is_conservative():
+    from summary_model.checks.runner import _commercial_offer_vat_arithmetic
+
+    offer = CommercialOfferSchema(
+        document_title="КП №1",
+        total_amount=MoneyValue(amount=Decimal("12200")),
+        vat_rate=Decimal("22"),
+        vat_amount=Decimal("2200"),
+        vat_included=True,
+    )
+
+    passed = _commercial_offer_vat_arithmetic("КП №1", offer)
+    assert passed["status"] == "passed"
+    assert passed["base"] == "10000.00"
+    assert passed["calculated"] == "2200.00"
+
+    offer.vat_amount = Decimal("2100")
+    review = _commercial_offer_vat_arithmetic("КП №1", offer)
+    assert review["status"] == "manual_review"
+    assert review["issues"]
+
+    offer.vat_amount = None
+    missing = _commercial_offer_vat_arithmetic("КП №1", offer)
+    assert missing["status"] == "manual_review"

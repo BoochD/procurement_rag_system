@@ -257,6 +257,14 @@ def _normalize_value(
             issues.append(RecoveryIssue(_format_path(path), "одиночное значение преобразовано в список"))
         result = []
         for index, item in enumerate(value):
+            if item in (None, "", [], {}):
+                issues.append(
+                    RecoveryIssue(
+                        _format_path((*path, index)),
+                        "пустой элемент списка удалён",
+                    )
+                )
+                continue
             normalized_item, item_issues = _normalize_value(item_type, item, (*path, index))
             result.append(normalized_item)
             issues.extend(item_issues)
@@ -303,6 +311,12 @@ def _normalize_value(
         if text is not None:
             return text, [*issues, RecoveryIssue(_format_path(path), "текст извлечён из объекта LLM")]
 
+    if base is str and isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return str(value), [
+            *issues,
+            RecoveryIssue(_format_path(path), "числовое значение преобразовано в строку"),
+        ]
+
     return value, issues
 
 
@@ -316,7 +330,9 @@ def _unwrap_fact_value(
     if expected_model is not None and isinstance(value, dict):
         # Provider metadata may live beside a complete nested model. Keep the
         # model intact instead of mistaking it for a scalar fact wrapper.
-        if any(field_name in value for field_name in expected_model.model_fields):
+        wrapper_fields = {"raw_value", "normalized_value", "confidence", "evidence"}
+        domain_fields = set(expected_model.model_fields) - wrapper_fields
+        if any(field_name in value for field_name in domain_fields):
             return value, issues
     if expected_model is not None and {
         "raw_value",
@@ -344,15 +360,15 @@ def _unwrap_fact_value(
                 ]
         elif expected_model is not None and expected_model.__name__ == "TermValue":
             candidates = [item for item in value if isinstance(item, dict)]
-            if candidates:
-                value = candidates[0]
-                issues.append(
+            texts = [_text_from_fact(item) for item in candidates]
+            texts = list(dict.fromkeys(text for text in texts if text))
+            if texts:
+                return {"raw": "; ".join(texts)}, [
                     RecoveryIssue(
                         _format_path(path),
-                        "из нескольких вариантов срока выбран первый структурированный факт",
-                        lossy=True,
+                        "несколько формулировок срока объединены без потери текста",
                     )
-                )
+                ]
 
     if not isinstance(value, dict) or not ({"raw_value", "normalized_value"} & value.keys()):
         return value, issues

@@ -427,7 +427,10 @@ def _render_ktru_characteristics_section(by_id: dict[str, CheckResult]) -> list[
     characteristics = by_id.get("manual.ktru.characteristics")
     if characteristics is not None:
         if characteristics.status == "passed":
-            lines.append("- <ok>Все характеристики ООЗ полностью соответствуют записям КТРУ.</ok>")
+            lines.append(
+                "- <ok>Обязательные характеристики и единицы их измерения в ООЗ соответствуют записям КТРУ; "
+                "дополнительные характеристики проверены отдельно ниже.</ok>"
+            )
         else:
             rendered = _render_ktru_characteristic_rows(characteristics)
             lines.extend(rendered if rendered else _render_result(characteristics))
@@ -449,6 +452,8 @@ def _render_commercial_offer_criteria(
         criteria.extend(comparison.details["criteria"])
     if content and isinstance(content.details.get("total_criterion"), dict):
         criteria.append(content.details["total_criterion"])
+    if content and isinstance(content.details.get("vat_criterion"), dict):
+        criteria.append(content.details["vat_criterion"])
     if not criteria:
         return []
     lines = ["", "- <b>Проверки КП по ООЗ и ОНМЦК:</b>"]
@@ -458,6 +463,32 @@ def _render_commercial_offer_criteria(
         status = str(criterion.get("status") or "manual_review")
         label = _human_text(str(criterion.get("label") or "Проверка"))
         lines.append(f"  - {label} — <b>{STATUS_LABELS.get(status, status)}</b>.")
+        calculations = criterion.get("calculations")
+        if criterion.get("key") == "vat" and isinstance(calculations, list):
+            for calculation in calculations:
+                if not isinstance(calculation, dict):
+                    continue
+                calculation_label = _human_text(str(calculation.get("label") or "КП"))
+                if calculation.get("note"):
+                    lines.append(f"    - {calculation_label}: {_human_text(str(calculation['note']))}")
+                elif calculation.get("base") is not None:
+                    lines.append(
+                        f"    - {calculation_label}: база без НДС <b>{_report_money(calculation['base'])}</b> "
+                        f"× {str(calculation.get('rate_fraction') or '').replace('.', ',')} = "
+                        f"<b>{_report_money(calculation.get('calculated'))}</b>; "
+                        f"в КП указано <b>{_report_money(calculation.get('declared'))}</b>."
+                    )
+        issues = criterion.get("issues")
+        if status != "passed" and isinstance(issues, list):
+            unique_issues = list(dict.fromkeys(
+                _human_text(str(issue)) for issue in issues if str(issue).strip()
+            ))
+            for issue in unique_issues[:5]:
+                lines.append(f"    - {issue}")
+            if len(unique_issues) > 5:
+                lines.append(
+                    f"    - Ещё причин: {len(unique_issues) - 5}; полный список сохранён в checks.json."
+                )
     return lines
 
 
@@ -891,7 +922,11 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
     failures = details.get("failures") or []
     if isinstance(manual, list) and manual:
         manual_rows = [row for row in comparison_rows or [] if isinstance(row, dict) and row.get("status") == "manual_review"]
-        lines.append(f"  Требуют ручной сверки: {len(manual_rows)} позиций. Причины сохранены в файле подробных результатов.")
+        lines.append(f"  Требуют ручной сверки: {len(manual_rows)} позиций.")
+        for reason in list(dict.fromkeys(_human_text(str(value)) for value in manual if value))[:5]:
+            lines.append(f"  - {reason}")
+        if len(set(str(value) for value in manual if value)) > 5:
+            lines.append("  - Остальные причины сохранены в файле подробных результатов.")
     if isinstance(failures, list) and failures:
         lines.append("  <error>Подтверждённые расхождения:</error>")
         lines.extend(f"  - {_human_text(value)}" for value in failures[:6])
@@ -1045,20 +1080,25 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
         char_name = row.get("characteristic_name") or "характеристика"
         ooz_value = row.get("ooz_value") or "не найдено"
         ooz_unit = row.get("ooz_unit") or "не указана"
-        allowed = row.get("ktru_allowed_values") or []
         legal_unit = row.get("ktru_unit") or "не указана"
         message = row.get("message") or ""
-        allowed_text = ", ".join(str(value) for value in allowed) if isinstance(allowed, list) else str(allowed)
-        lines.append(f"- <b>{item_name}</b>; КТРУ {ktru_code}; характеристика: {char_name} — {status}")
-        lines.append(f"  Значение в ООЗ: {ooz_value}; единица в ООЗ: {ooz_unit}")
-        if allowed_text:
-            lines.append(f"  Допустимые значения КТРУ: {allowed_text}")
-        lines.append(f"  Единица КТРУ: {legal_unit}")
-        if message and message != "ОК":
-            lines.append(f"  {_human_text(str(message))}")
-        lines.append("")
-    while lines and lines[-1] == "":
-        lines.pop()
+        lines.append(
+            f"  - <b>{_human_text(str(item_name))}</b>; КТРУ {_human_text(str(ktru_code))}; "
+            f"характеристика: {_human_text(str(char_name))} — <b>{status}</b>."
+        )
+        if str(row.get("status") or "") == "passed":
+            lines.append(
+                f"    В ООЗ: {_human_text(str(ooz_value))}; единица: "
+                f"{_human_text(str(ooz_unit))}. Значение допустимо в КТРУ."
+            )
+        else:
+            if message and message != "ОК":
+                lines.append(f"    {_human_text(str(message))}.")
+            if ooz_value != "не найдено" or ooz_unit != "не указана" or legal_unit != "не указана":
+                lines.append(
+                    f"    В ООЗ: {_human_text(str(ooz_value))}; единица: "
+                    f"{_human_text(str(ooz_unit))}. В КТРУ: {_human_text(str(legal_unit))}."
+                )
     return lines
 
 
@@ -1075,6 +1115,12 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         "missing_justification": "ОШИБКА",
         "manual_review": "ТРЕБУЕТ ПРОВЕРКИ",
     }
+    if ooz_state.get("found"):
+        lines.append("  - Обоснование дополнительных характеристик найдено в ООЗ.")
+    elif ooz_state.get("partial"):
+        lines.append("  - Таблица обоснований найдена в ООЗ, но извлечена не полностью.")
+    else:
+        lines.append("  - Явное обоснование дополнительных характеристик в ООЗ не найдено.")
 
     rows = details.get("additional_rows")
     rows = rows if isinstance(rows, list) else []
@@ -1083,96 +1129,155 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         for index, assessment in enumerate(assessments)
         if isinstance(assessment, dict)
     ]
-    detailed_assessments = [
-        pair
-        for pair in indexed_assessments
-        if pair[0].get("decision") != "restricted"
-        and _is_reportable_additional_characteristic(pair[0], pair[1])
-    ]
-    restricted_assessments = [
-        assessment for assessment, _row in indexed_assessments
-        if assessment.get("decision") == "restricted"
-    ]
-
-    if detailed_assessments:
-        lines.extend([
-            "", "| Позиция / КТРУ | Дополнительная характеристика | Значение | Единица | Обоснование | Итог |",
-            "| :--- | :--- | :--- | :---: | :--- | :---: |",
-        ])
-        for assessment, row in detailed_assessments:
-            justification = assessment.get("justification") if isinstance(assessment.get("justification"), dict) else {}
-            source = justification.get("source")
-            justification_label = (
-                "найдено в ООЗ" if source == "ooz"
-                else "извлечено частично" if justification.get("status") == "partial"
-                else "не найдено"
-            )
-            lines.append(
-                f"| {_table_cell(assessment.get('item') or 'позиция')} / "
-                f"{_table_cell(assessment.get('ktru_code') or 'не найден')} | "
-                f"{_table_cell(assessment.get('characteristic') or 'характеристика')} | "
-                f"{_table_cell(row.get('value') or 'не указано')} | "
-                f"{_table_cell(row.get('unit') or 'не указана')} | "
-                f"{_table_cell(justification_label)} | "
-                f"{decision_labels.get(str(assessment.get('decision')), 'ТРЕБУЕТ ПРОВЕРКИ')} |"
-            )
-    if restricted_assessments:
-        grouped: dict[tuple[str, str, str], dict[str, object]] = {}
-        for assessment in restricted_assessments:
-            okpd_rule = assessment.get("okpd_rule") if isinstance(assessment.get("okpd_rule"), dict) else {}
-            plan_regime = assessment.get("plan_regime") if isinstance(assessment.get("plan_regime"), dict) else {}
-            justification = assessment.get("justification") if isinstance(assessment.get("justification"), dict) else {}
-            key = (
-                str(assessment.get("item") or "позиция"),
-                str(assessment.get("ktru_code") or "не найден"),
-                str(okpd_rule.get("code") or "не найден"),
-            )
-            current = grouped.setdefault(key, {
-                "count": 0,
-                "decision": assessment.get("decision"),
-                "field_code": plan_regime.get("field_code"),
-                "regime_status": plan_regime.get("status"),
-                "justification_status": justification.get("status"),
-                "justification_source": justification.get("source"),
-            })
+    grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+    decision_rank = {"allowed": 0, "manual_review": 1, "missing_justification": 2, "restricted": 3}
+    for assessment, row in indexed_assessments:
+        okpd_rule = assessment.get("okpd_rule") if isinstance(assessment.get("okpd_rule"), dict) else {}
+        plan_regime = assessment.get("plan_regime") if isinstance(assessment.get("plan_regime"), dict) else {}
+        justification = assessment.get("justification") if isinstance(assessment.get("justification"), dict) else {}
+        key = (
+            str(assessment.get("item") or "позиция"),
+            str(assessment.get("ktru_code") or "не найден"),
+            str(okpd_rule.get("code") or "не найден"),
+        )
+        current = grouped.setdefault(key, {
+            "count": 0,
+            "sample_characteristic": None,
+            "decision": assessment.get("decision") or "manual_review",
+            "field_code": plan_regime.get("field_code"),
+            "field_value": plan_regime.get("field_value"),
+            "regime": plan_regime.get("regime"),
+            "regime_status": plan_regime.get("status"),
+            "table_id": plan_regime.get("table_id"),
+            "position": plan_regime.get("position"),
+            "rule_reason": okpd_rule.get("reason") or assessment.get("reason"),
+            "justification_status": justification.get("status"),
+            "justification_source": justification.get("source"),
+            "quote": justification.get("quote"),
+            "units": [],
+        })
+        if _is_reportable_additional_characteristic(assessment, row):
             current["count"] = int(current["count"]) + 1
-            if assessment.get("decision") == "restricted":
-                current["decision"] = "restricted"
-            elif assessment.get("decision") == "manual_review" and current["decision"] != "restricted":
-                current["decision"] = "manual_review"
+            if not current.get("sample_characteristic"):
+                current["sample_characteristic"] = _human_text(
+                    str(assessment.get("characteristic") or "")
+                ).strip()
+        if decision_rank.get(str(assessment.get("decision")), 1) > decision_rank.get(str(current["decision"]), 1):
+            current["decision"] = assessment.get("decision")
+        for field_name, value in (("rule_reason", okpd_rule.get("reason") or assessment.get("reason")), ("quote", justification.get("quote"))):
+            if value and not current.get(field_name):
+                current[field_name] = value
+
+    if grouped:
         lines.extend([
-            "", "| Позиция / КТРУ | ОКПД2 | Режим ПГ | Доп. характеристик | Обоснование | Итог |",
-            "| :--- | :--- | :--- | :---: | :--- | :---: |",
+            "", "| Позиция | КТРУ / ОКПД2 | ПП №1875 и режим ПГ | Доп. характеристик | Итог |",
+            "| :--- | :--- | :--- | :---: | :---: |",
         ])
         for (item_name, ktru_code, okpd2_code), item in grouped.items():
-            regime = item.get("field_code") or "не требуется"
-            if item.get("regime_status"):
-                regime = _human_text(f"{regime}: {item['regime_status']}")
-            source = item.get("justification_source")
-            justification_source = (
-                "найдено в ООЗ" if source == "ooz"
-                else "извлечено частично" if item.get("justification_status") == "partial"
-                else "не найдено"
-            )
+            regime = _compact_pp1875_regime(item)
+            count = int(item["count"]) or 1
             lines.append(
-                f"| {_table_cell(item_name)} / {ktru_code} | {_table_cell(okpd2_code)} | "
-                f"{_table_cell(regime)} | {_table_cell(item['count'])} | "
-                f"{_table_cell(justification_source)} | "
+                f"| {_table_cell(item_name)} | "
+                f"{_table_cell(ktru_code)}<br>{_table_cell(okpd2_code)} | "
+                f"{_table_cell(regime)} | {count} | "
                 f"{decision_labels.get(str(item['decision']), 'ТРЕБУЕТ ПРОВЕРКИ')} |"
             )
-    quotes = list(dict.fromkeys(
-        str(justification["quote"])
-        for assessment, _row in indexed_assessments
-        if isinstance(assessment.get("justification"), dict)
-        for justification in [assessment["justification"]]
-        if justification.get("quote")
-    ))
-    if not quotes and ooz_state.get("quote"):
-        quotes = [str(ooz_state["quote"])]
-    if quotes:
-        lines.append("")
-        lines.append(f"  - Краткая цитата обоснования: {_human_text(quotes[0][:240])}")
+        for (item_name, ktru_code, okpd2_code), item in grouped.items():
+            count = int(item["count"]) or 1
+            sample = _human_text(str(item.get("sample_characteristic") or "")).strip()
+            rule_reason = _human_text(str(item.get("rule_reason") or "")).strip()
+            fallback_quote = ooz_state.get("quote") if len(grouped) == 1 else None
+            quote = _human_text(str(item.get("quote") or fallback_quote or "")).strip()
+            source = item.get("justification_source")
+            justification_status = item.get("justification_status")
+
+            lines.extend(["", f"<b>{_human_text(item_name)}</b>"])
+            lines.append(f"  - КТРУ: <b>{_human_text(ktru_code)}</b>; ОКПД2: <b>{_human_text(okpd2_code)}</b>.")
+            if sample and count > 1:
+                remaining = count - 1
+                lines.append(
+                    f"  - Дополнительные характеристики: {_human_text(sample)}; "
+                    f"ещё {remaining} {_characteristic_word(remaining)}."
+                )
+            elif sample:
+                lines.append(f"  - Дополнительная характеристика: {_human_text(sample)}.")
+            else:
+                lines.append(f"  - Дополнительных характеристик: <b>{count}</b>.")
+            if count > 5:
+                lines.append("  - Полный перечень характеристик сохранён в <b>checks.json</b>.")
+            if rule_reason:
+                lines.append(f"  - ПП №1875: {_human_text(rule_reason)}")
+            if item.get("field_value"):
+                lines.append(
+                    f"  - План-график, поле {item.get('field_code') or '17.1/17.2'}: "
+                    f"{_human_text(str(item['field_value']))}."
+                )
+            if quote:
+                lines.append(f"  - Обоснование из ООЗ: {_human_text(quote[:240])}")
+            elif source == "ooz" or justification_status == "partial":
+                lines.append("  - Обоснование найдено в ООЗ, но не привязано к этой позиции.")
+            else:
+                lines.append("  - Обоснование в ООЗ не найдено.")
+            lines.append(
+                "  - Итог: <b>"
+                f"{decision_labels.get(str(item['decision']), 'ТРЕБУЕТ ПРОВЕРКИ')}"
+                "</b>."
+            )
     return lines
+
+
+def _characteristic_word(count: int) -> str:
+    if 11 <= count % 100 <= 14:
+        return "характеристик"
+    last_digit = count % 10
+    if last_digit == 1:
+        return "характеристика"
+    if 2 <= last_digit <= 4:
+        return "характеристики"
+    return "характеристик"
+
+
+def _compact_pp1875_regime(item: dict[str, object]) -> str:
+    table_id = str(item.get("table_id") or "")
+    appendix = {"table_01": "Прил. №1", "table_02": "Прил. №2"}.get(table_id)
+    position = str(item.get("position") or "")
+    field_code = str(item.get("field_code") or "")
+    status = str(item.get("regime_status") or "")
+    regime = str(item.get("regime") or "")
+
+    if not appendix:
+        status_label = {
+            "confirmed": "подтверждён",
+            "not_required": "не требуется",
+            "missing": "не заполнен",
+            "ambiguous": "неоднозначен",
+            "registry_unavailable": "реестр недоступен",
+        }.get(status, "режим не подтверждён")
+        return f"{field_code}: {status_label}" if field_code else status_label
+    position_text = f", поз. {position}" if position else ""
+    special = _is_special_pp1875_position(table_id, position)
+    if not special:
+        return f"{appendix}{position_text}: специальный запрет не применяется"
+    regime_label = regime or ("запрет" if table_id == "table_01" else "ограничение")
+    adjective = "специальное" if regime_label == "ограничение" else "специальный"
+    status_label = {
+        "confirmed": "подтверждён",
+        "missing": "не подтверждён",
+        "ambiguous": "неоднозначен",
+        "registry_unavailable": "не проверен",
+    }.get(status, "не подтверждён")
+    field_text = f"; {field_code} {status_label}" if field_code else ""
+    return f"{appendix}{position_text}: {adjective} {regime_label}{field_text}"
+
+
+def _is_special_pp1875_position(table_id: str, position: str) -> bool:
+    match = re.search(r"\d+", position)
+    if not match:
+        return False
+    number = int(match.group(0))
+    if table_id == "table_01":
+        return number in {25, 26, 32}
+    return table_id == "table_02" and 191 <= number <= 361
 
 
 def _is_reportable_additional_characteristic(

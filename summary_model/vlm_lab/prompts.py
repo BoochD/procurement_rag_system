@@ -3,7 +3,7 @@ from __future__ import annotations
 from summary_model.vlm_lab.models import VlmTableRole
 
 
-VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.0"
+VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.1"
 
 
 ROLE_NOTES: dict[VlmTableRole, str] = {
@@ -36,13 +36,16 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
         "Extract only explicit justifications from the selected justification table or block. "
         "For this role, explanatory reasons belong in justifications, not item notes. "
         "Put the visible table title or application area into scope_text. Create one "
-        "justification for each visible row or bullet, preserve the full reason in "
+        "justification for each visible row or bullet. If the block contains three bullets, "
+        "return three justifications; never collapse several visible reasons into one record. "
+        "Preserve the full reason in "
         "justification_text, linked visible characteristic names in characteristic_names, "
         "and a short exact quote in evidence_text. Link each reason to a visible item "
         "using item_name, item_row_number, item_okpd2_code and item_ktru_code. The payload "
         "may contain known_items from other item tables in the same OOZ; use them only "
         "when the link is explicit or uniquely determined. If several items are possible, "
-        "leave the item link empty and add a warning instead of guessing. Exclude normative preambles, PP 145 "
+        "leave the item link empty and add a warning instead of guessing. When the table has one visible "
+        "item and several reasons, link every reason to that item. Exclude normative preambles, PP 145 "
         "references and text outside the selected justification block. Do not evaluate "
         "whether the reason is legally sufficient."
     ),

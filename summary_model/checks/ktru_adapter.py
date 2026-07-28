@@ -682,15 +682,7 @@ def _can_add_extra_characteristics(
     ktru_okpd = _okpd2_from_ktru(ktru_code)
     okpd2_source = "карточка КТРУ" if primary_okpd in official_candidates else (item_okpd2_source or "префикс КТРУ")
     if item_okpd2_code and primary_okpd and item_okpd2_code != primary_okpd:
-        code_diff_note = (
-            f" Код позиции в ПГ/ООЗ: {item_okpd2_code}; официальный ОКПД2 карточки КТРУ: "
-            f"{primary_okpd}; правило проверено по официальному коду карточки."
-        )
-    elif item_okpd2_code and ktru_okpd and item_okpd2_code != ktru_okpd and not official_candidates:
-        code_diff_note = (
-            f" Код позиции в ПГ/ООЗ: {item_okpd2_code}; префикс КТРУ: {ktru_okpd}; "
-            "официальный ОКПД2 карточки не извлечён, использован код позиции."
-        )
+        code_diff_note = f" Для проверки ПП №1875 использован ОКПД2 {primary_okpd}."
 
     resolution = resolve_plan_national_regime(
         schedule,

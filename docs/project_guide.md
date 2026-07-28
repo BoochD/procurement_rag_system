@@ -177,12 +177,15 @@ Commercial-offer arithmetic:
   and quantities that can be confirmed from ONMCK supplier totals. The text LLM
   receives only pairs left unresolved by those rules and cannot replace an
   already established deterministic match.
-- The commercial-offer report explicitly summarizes five checks: purchase
+- The commercial-offer report explicitly summarizes six checks: purchase
   subject against OOZ; quantity against OOZ and ONMCK; supplier unit price
   against ONMCK; unit against OOZ and ONMCK; and row/offer totals when the VLM
-  extracted enough numeric data. Missing reference values produce manual
-  review rather than a silent pass. The trademark table is rendered in the
-  commercial-offer section and remains informational only.
+  extracted enough numeric data; plus basic VAT arithmetic when the tax base,
+  rate, amount, and inclusion mode are explicit. Missing or ambiguous VAT data
+  and arithmetic differences produce manual review rather than a hard failure.
+  Missing reference values likewise produce manual review rather than a silent
+  pass. The trademark table is rendered in the commercial-offer section and
+  remains informational only.
 - Supplier IDs present in ONMCK price rows remain authoritative even when the
   corresponding `price_sources` entry is missing or its letter number is
   truncated. A positional offer fallback is allowed only for the expected,

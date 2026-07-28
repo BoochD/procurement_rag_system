@@ -172,7 +172,13 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
                         "ktru_code": "26.20.14.000-00000189",
                         "characteristic": "RAID 0",
                         "okpd_rule": {"code": "26.20.14.000"},
-                        "plan_regime": {"field_code": "17.2", "status": "confirmed"},
+                        "plan_regime": {
+                            "field_code": "17.2",
+                            "regime": "ограничение",
+                            "status": "confirmed",
+                            "table_id": "table_02",
+                            "position": "198",
+                        },
                         "justification": {"status": "found", "source": "ooz"},
                         "decision": "restricted",
                     },
@@ -196,9 +202,10 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     assert "Не указаны в документе либо не распознаны:" in text
     assert "КП №1: поставщик, ИНН, срок, место, НДС." in text
     assert "Распознаны товарные знаки: DEPO, YADRO." in text
-    assert "| Сервер / 26.20.14.000-00000189 |" in text
-    assert "| 17.2: подтверждено | 2 | найдено в ООЗ | ПРЕДУПРЕЖДЕНИЕ |" in text
-    assert "Краткая цитата обоснования: Совместимость" in text
+    assert "| Сервер | 26.20.14.000-00000189<br>26.20.14.000 | Прил. №2, поз. 198: специальное ограничение; 17.2 подтверждён | 2 | ПРЕДУПРЕЖДЕНИЕ |" in text
+    assert "<b>Сервер</b>" in text
+    assert "Дополнительные характеристики: RAID 0; ещё 1 характеристика." in text
+    assert "Обоснование из ООЗ: Совместимость" in text
 
 
 def test_report_renders_commercial_offer_comparison_as_one_compact_table():
@@ -303,7 +310,13 @@ def test_report_keeps_allowed_ktru_rows_detailed_beside_restricted_summary():
                         "ktru_code": "26.20.14.000-00000189",
                         "characteristic": "RAID 0",
                         "okpd_rule": {"code": "26.20.14.120"},
-                        "plan_regime": {"field_code": "17.2", "status": "confirmed"},
+                        "plan_regime": {
+                            "field_code": "17.2",
+                            "regime": "ограничение",
+                            "status": "confirmed",
+                            "table_id": "table_02",
+                            "position": "198",
+                        },
                         "justification": {"status": "found", "source": "ooz"},
                         "decision": "restricted",
                     },
@@ -312,7 +325,12 @@ def test_report_keeps_allowed_ktru_rows_detailed_beside_restricted_summary():
                         "ktru_code": "58.29.11.000-00000003",
                         "characteristic": "Централизованное управление",
                         "okpd_rule": {"code": "58.29.31.000"},
-                        "plan_regime": {"status": "not_required"},
+                        "plan_regime": {
+                            "regime": "запрет",
+                            "status": "not_required",
+                            "table_id": "table_01",
+                            "position": "146",
+                        },
                         "justification": {"status": "found", "source": "ooz"},
                         "decision": "allowed",
                     },
@@ -327,8 +345,47 @@ def test_report_keeps_allowed_ktru_rows_detailed_beside_restricted_summary():
 
     text = build_checks_report_text(report)
 
-    assert "| Сервер / 26.20.14.000-00000189 | 26.20.14.120 | 17.2: подтверждено | 1 |" in text
-    assert "| Программное обеспечение / 58.29.11.000-00000003 | Централизованное управление | Наличие | логическое | найдено в ООЗ | ОК |" in text
+    assert "| Сервер | 26.20.14.000-00000189<br>26.20.14.120 | Прил. №2, поз. 198: специальное ограничение; 17.2 подтверждён | 1 | ПРЕДУПРЕЖДЕНИЕ |" in text
+    assert "| Программное обеспечение | 58.29.11.000-00000003<br>58.29.31.000 | Прил. №1, поз. 146: специальный запрет не применяется | 1 | ОК |" in text
+
+
+def test_report_compacts_ktru_values_and_keeps_successful_matches_visible():
+    report = _report(
+        _check_result(
+            "manual.ktru.characteristics",
+            "КТРУ-характеристики",
+            "failed",
+            "Найдены ошибки в значениях или обязательных характеристиках КТРУ.",
+            details={
+                "summary_lines": ["проверено характеристик: 2", "отсутствующих обязательных: 1"],
+                "characteristic_rows": [
+                    {
+                        "item_name": "Сервер",
+                        "ktru_code": "26.20.14.000-00000189",
+                        "characteristic_name": "Аппаратная поддержка виртуализации",
+                        "status": "passed",
+                        "ooz_value": "Да",
+                        "ktru_allowed_values": ["Да", "Нет", "Опционально"],
+                    },
+                    {
+                        "item_name": "Программное обеспечение",
+                        "ktru_code": "58.29.11.000-00000003",
+                        "characteristic_name": "Способ предоставления",
+                        "status": "failed",
+                        "message": "обязательная характеристика не найдена в ООЗ",
+                    },
+                ],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Способ предоставления" in text
+    assert "обязательная характеристика не найдена в ООЗ" in text
+    assert "Аппаратная поддержка виртуализации" in text
+    assert "Значение допустимо в КТРУ" in text
+    assert "Допустимые значения КТРУ" not in text
 
 
 def test_report_localizes_public_technical_terms_and_hides_service_rows():
@@ -380,8 +437,7 @@ def test_report_localizes_public_technical_terms_and_hides_service_rows():
     assert "ОКПД2 и КТРУ" in text
     assert "приложение №2 позиция 198" in text
     assert "17.2: confirmed" not in text
-    assert "| Программное обеспечение / 58.29.11.000-00000003 | Дополнительные характеристики" not in text
-    assert "| Программное обеспечение / 58.29.11.000-00000003 | Централизованное управление |" in text
+    assert "| Программное обеспечение | 58.29.11.000-00000003<br>не найден | режим не подтверждён | 1 | ОК |" in text
 
 
 def test_report_renders_onmck_minimum_prices_as_readable_blocks():
@@ -540,3 +596,71 @@ def test_report_keeps_strict_result_when_semantic_call_is_unavailable():
     assert text.count("Строгое сравнение гарантий требует проверки") == 1
     assert "Semantic LLM check не выполнен" not in text
     assert "Предупреждений: 1. Требуют проверки: 0." in text
+
+
+def test_report_explains_non_passing_commercial_offer_criteria():
+    report = _report(
+        _check_result(
+            "manual.commercial_offers.onmck",
+            "Сверка КП с ОНМЦК",
+            "manual_review",
+            "Часть строк требует проверки.",
+            details={
+                "criteria": [
+                    {
+                        "key": "quantity",
+                        "label": "Количество ТРУ",
+                        "status": "manual_review",
+                        "issues": ["Сервер: в КП №2 количество не распознано"],
+                    },
+                    {
+                        "key": "subject",
+                        "label": "Соответствие предмета закупки ООЗ",
+                        "status": "failed",
+                        "issues": ["КП №3: предмет относится к другой закупке"],
+                    },
+                ]
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Количество ТРУ — <b>ТРЕБУЕТ ПРОВЕРКИ</b>." in text
+    assert "Сервер: в КП №2 количество не распознано" in text
+    assert "КП №3: предмет относится к другой закупке" in text
+
+
+def test_report_renders_vat_formula_inside_commercial_offer_section():
+    report = _report(
+        _check_result(
+            "manual.commercial_offers.content",
+            "Проверка КП",
+            "passed",
+            "КП распознаны.",
+            details={
+                "offer_summaries": [{"label": "КП №1", "items_count": 1}],
+                "vat_criterion": {
+                    "key": "vat",
+                    "label": "Правильность расчёта НДС",
+                    "status": "passed",
+                    "issues": [],
+                    "calculations": [
+                        {
+                            "label": "КП №1",
+                            "base": "10000",
+                            "rate_fraction": "0.22",
+                            "calculated": "2200",
+                            "declared": "2200",
+                        }
+                    ],
+                },
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "6) Коммерческие предложения:" in text
+    assert "Правильность расчёта НДС — <b>ОК</b>." in text
+    assert "10 000,00 руб.</b> × 0,22 = <b>2 200,00 руб." in text

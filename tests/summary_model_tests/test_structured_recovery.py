@@ -28,6 +28,68 @@ class RequiredRow(BaseModel):
     quantity: Decimal | None = None
 
 
+def test_recovery_converts_numeric_string_fields_and_ignores_empty_list_rows():
+    from summary_model.vlm_lab.models import VlmTableExtraction
+
+    recovery = recover_model(
+        VlmTableExtraction,
+        {
+            "table_role": "purchase_description",
+            "items": [{"row_number": 94, "name": "Сервер"}],
+            "totals": [{}],
+        },
+    )
+
+    assert recovery.value is not None
+    assert recovery.value.items[0].row_number == "94"
+    assert recovery.value.totals == []
+    assert recovery.lossy_warnings == []
+
+
+def test_recovery_unwraps_code_reference_despite_wrapper_evidence():
+    recovery = recover_model(
+        ScheduleApplicationSchema,
+        {
+            "subject_codes": [
+                {
+                    "raw_value": "62.09.10.000 - Услуги",
+                    "normalized_value": {
+                        "code_type": "okpd2",
+                        "code": "62.09.10.000",
+                        "name": "Услуги",
+                    },
+                    "confidence": 0.9,
+                    "evidence": [{"block_id": "block-1"}],
+                }
+            ]
+        },
+    )
+
+    assert recovery.value is not None
+    assert recovery.value.subject_codes[0].code == "62.09.10.000"
+    assert recovery.lossy_warnings == []
+
+
+def test_recovery_keeps_all_delivery_term_variants():
+    recovery = recover_model(
+        ScheduleApplicationSchema,
+        {
+            "delivery_term": [
+                {"raw_value": "1 этап: по 13.07.2026"},
+                {"raw_value": "2 этап: по 10.08.2026"},
+                {"raw_value": "3 этап: по 21.08.2026"},
+            ]
+        },
+    )
+
+    assert recovery.value is not None
+    assert recovery.value.delivery_term is not None
+    assert recovery.value.delivery_term.raw == (
+        "1 этап: по 13.07.2026; 2 этап: по 10.08.2026; 3 этап: по 21.08.2026"
+    )
+    assert recovery.lossy_warnings == []
+
+
 class RequiredRows(BaseModel):
     rows: list[RequiredRow] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

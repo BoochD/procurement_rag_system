@@ -83,7 +83,16 @@ def build_assessments(
             },
             "plan_regime": {
                 key: regime.get(key)
-                for key in ("field_code", "field_value", "regime", "status")
+                for key in (
+                    "field_code",
+                    "field_value",
+                    "regime",
+                    "status",
+                    "table_id",
+                    "position",
+                    "reference_name",
+                    "matched_code",
+                )
                 if regime.get(key) is not None
             },
             "justification": _justification_reference(row_state),
@@ -189,16 +198,24 @@ def _record_matches_row(
     record: AdditionalCharacteristicsJustification,
     row: dict[str, Any],
 ) -> bool:
-    pairs = (
-        (record.item_ktru_code, row.get("ktru_code")),
-        (record.item_okpd2_code, row.get("okpd2_code") or row.get("rule_okpd2_code")),
-        (record.item_row_number, row.get("item_row_number")),
-    )
-    if any(_clean(left) and _clean(left) == _clean(right) for left, right in pairs):
-        return True
+    record_row = _clean(record.item_row_number)
+    row_number = _clean(row.get("item_row_number"))
+    if record_row and row_number:
+        return record_row == row_number
+
     record_name = _clean(record.item_name).casefold()
     row_name = _clean(row.get("item_name")).casefold()
-    return bool(record_name and row_name and (record_name in row_name or row_name in record_name))
+    if record_name and row_name:
+        return record_name in row_name or row_name in record_name
+
+    record_okpd2 = _clean(record.item_okpd2_code)
+    row_okpd2 = _clean(row.get("okpd2_code") or row.get("rule_okpd2_code"))
+    if record_okpd2 and row_okpd2:
+        return record_okpd2 == row_okpd2
+
+    record_ktru = _clean(record.item_ktru_code)
+    row_ktru = _clean(row.get("ktru_code"))
+    return bool(record_ktru and row_ktru and record_ktru == row_ktru)
 
 
 def _characteristic_matches(
