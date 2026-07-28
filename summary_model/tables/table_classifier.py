@@ -77,11 +77,28 @@ def _looks_like_staged_nmck(text: str) -> bool:
     return has_stage_rows and has_child_rows and has_nmck_prices
 
 
-def _looks_like_stage_table(text: str) -> bool:
+def _looks_like_nmck_matrix(table: TableIR) -> bool:
+    """Recognize price-source matrices without relying on a perfect header inference."""
+    header_text = " ".join(
+        " ".join(row)
+        for row in table.matrix()[: min(table.row_count, 4)]
+    ).casefold()
+    has_sources = bool(re.search(r"(?:поставщик|исполнитель)\s*\d+", header_text))
+    has_price_pair = (
+        "цена за ед" in header_text
+        or "цена за единицу" in header_text
+    ) and ("стоимость" in header_text or "сумма" in header_text)
+    has_result = "минимальная цена" in header_text or "цена контракта" in header_text
+    has_item_columns = "количество" in header_text or "кол-во" in header_text
+    return has_sources and has_price_pair and has_result and has_item_columns
+
+
+def _looks_like_stage_table(table: TableIR, text: str) -> bool:
     """Require stage columns, not just a plan field mentioning stages."""
+    header_text = " ".join(table.header_labels()).casefold()
     has_stage_number = bool(
-        re.search(r"(?:№|номер)\s*этап", text)
-        or re.search(r"(?:^|\|)\s*этап\s*(?:\||$)", text)
+        re.search(r"(?:№|номер)\s*этап", header_text)
+        or re.search(r"(?:^|\s)этап(?:\s|$)", header_text)
     )
     detail_groups = (
         ("дата начала", "начало исполнения", "начало этапа"),
@@ -90,7 +107,7 @@ def _looks_like_stage_table(text: str) -> bool:
         ("цена этапа", "стоимость этапа", "сумма этапа"),
         ("наименование этапа", "результат выполнения", "результат этапа"),
     )
-    detail_count = sum(1 for markers in detail_groups if _has_any(text, markers))
+    detail_count = sum(1 for markers in detail_groups if _has_any(header_text, markers))
     return has_stage_number and detail_count >= 2
 
 
@@ -101,8 +118,7 @@ def classify_parsed_table(
     text = _joined(table)
     if _looks_like_signature_table(text):
         return "signature_table"
-    if _looks_like_stage_table(text):
-        return "contract_stages_table"
+
     if document_type == DocumentType.PLAN and _has_any(
         text,
         (
@@ -115,20 +131,26 @@ def classify_parsed_table(
         return "schedule_application_table"
     if document_type == DocumentType.PLAN and table.kind == "key_value":
         return "schedule_application_table"
+
     if document_type == DocumentType.ONMCK and _looks_like_staged_nmck(text):
         return "nmck_staged_calculation_table"
-    if document_type == DocumentType.ONMCK and table.kind == "supplier_matrix":
+    if document_type == DocumentType.ONMCK and _looks_like_nmck_matrix(table):
         return "nmck_calculation_table"
+
     if document_type == DocumentType.OOZ and table.kind in {"characteristics", "item_list"}:
         return "ooz_items_table"
+
+    if document_type in {DocumentType.OOZ, DocumentType.CONTRACT} and _looks_like_stage_table(table, text):
+        return "contract_stages_table"
+
     if document_type == DocumentType.CONTRACT and _looks_like_contract_specification(text):
         return "contract_specification_table"
-    if document_type == DocumentType.CONTRACT and table.kind in {
-        "characteristics",
-        "item_list",
-    }:
-        return "ooz_items_table"
-    if "приложение" in text and any(
+
+    if document_type in {
+        DocumentType.REQUEST,
+        DocumentType.EXPLANATORY_NOTE,
+        DocumentType.CONTRACT,
+    } and "приложение" in text and any(
         marker in text
         for marker in (
             "заявка",
@@ -145,14 +167,4 @@ def classify_parsed_table(
             if document_type == DocumentType.CONTRACT
             else "request_attachments_table"
         )
-    if any(marker in text for marker in ("этап", "срок исполнения этап")):
-        return "contract_stages_table"
-    if table.kind == "key_value":
-        return "schedule_application_table" if "план-график" in text else "generic_table"
-    if table.kind == "supplier_matrix":
-        return "nmck_calculation_table"
-    if table.kind == "characteristics":
-        return "ooz_items_table"
-    if table.kind in {"item_list", "specification"}:
-        return "generic_table"
-    return "unknown"
+    return "generic_table"

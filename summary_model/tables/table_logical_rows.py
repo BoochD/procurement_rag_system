@@ -458,6 +458,12 @@ def _nmck_cells_by_header(
         supplier = _supplier_ref(joined)
         if supplier is None or path.col_index >= len(row):
             continue
+        supplier_header = next(
+            (part for part in path.parts if _supplier_ref(part.casefold()) == supplier),
+            None,
+        )
+        if supplier_header:
+            cells_by_header[f"{supplier}.raw_header"] = supplier_header
         value = clean_text(row[path.col_index])
         if not value:
             continue
@@ -465,7 +471,10 @@ def _nmck_cells_by_header(
             cells_by_header[f"{supplier}.unit_price"] = value
         elif _is_supplier_total_header(joined):
             cells_by_header[f"{supplier}.row_total"] = value
-    if not any(key.startswith("supplier_") for key in cells_by_header):
+    if not any(
+        key.startswith("supplier_") and key.rsplit(".", 1)[-1] in {"unit_price", "row_total"}
+        for key in cells_by_header
+    ):
         supplier_start = max(
             index
             for index in (name_index, quantity_index, unit_index)

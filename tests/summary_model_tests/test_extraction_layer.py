@@ -7,6 +7,7 @@ from summary_model.domain.models import DocumentType, InputDocument
 from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import extract_package
 from summary_model.ingestion import read_docx
+from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
 from summary_model.tables.utils import extract_money
 
@@ -660,7 +661,7 @@ def test_ooz_logical_rows_attach_characteristics_to_items(tmp_path):
     ]
 
 
-def test_ooz_combined_name_and_ktru_rows_group_into_one_item(tmp_path):
+def test_contract_does_not_duplicate_embedded_ooz_characteristics(tmp_path):
     path = tmp_path / "combined_ooz.docx"
     _save_combined_ooz(path)
     package = extract_package(
@@ -669,17 +670,18 @@ def test_ooz_combined_name_and_ktru_rows_group_into_one_item(tmp_path):
 
     contract = package.contract_draft
     assert contract is not None
-    assert len(contract.items) == 1
-    item = contract.items[0]
-    assert item.name == "Программное обеспечение"
-    assert item.ktru_code == "58.29.11.000-00000003"
-    assert item.quantity == 506
-    assert len(item.characteristics) == 3
-    assert [characteristic.name for characteristic in item.characteristics] == [
-        "Класс программ для электронных вычислительных машин и баз данных",
-        "Способ предоставления",
-        "Вид лицензии",
+    assert contract.items == []
+
+
+def test_supplier_header_rows_with_dates_are_not_data_rows():
+    matrix = [
+        ["№ п/п", "Наименование", "Ед. изм.", "Кол-во", "Цена товара"],
+        ["№ п/п", "Наименование", "Ед. изм.", "Кол-во", "Поставщик 1 (письмо от 20.03.2026)"],
+        ["№ п/п", "Наименование", "Ед. изм.", "Кол-во", "Цена за ед. товара"],
+        ["1", "Трансивер", "шт.", "50", "519,54"],
     ]
+
+    assert infer_header_rows(matrix) == [0, 1, 2]
 
 
 def test_onmck_table_extracts_supplier_prices_and_recalculates(tmp_path):
@@ -699,6 +701,8 @@ def test_onmck_table_extracts_supplier_prices_and_recalculates(tmp_path):
     assert item.quantity == 10
     assert item.selected_min_unit_price == 90
     assert item.row_total_declared == 900
+    assert onmck.total_amount is not None
+    assert onmck.total_amount.amount == 900
     assert item.calculated_min_unit_price == 90
     assert item.row_total_calculated == 900
     assert item.is_declared_min_price_correct is True
@@ -761,7 +765,7 @@ def test_staged_onmck_keeps_stage_rows_and_leaf_items_separate(tmp_path):
     ]
 
 
-def test_contract_keeps_description_and_specification_separate(tmp_path):
+def test_contract_keeps_specification_without_duplicating_ooz_items(tmp_path):
     path = tmp_path / "contract.docx"
     _save_contract(path)
     package = extract_package(
@@ -770,8 +774,7 @@ def test_contract_keeps_description_and_specification_separate(tmp_path):
 
     contract = package.contract_draft
     assert contract is not None
-    assert len(contract.items) == 1
-    assert contract.items[0].name == "Картридж"
+    assert contract.items == []
     assert len(contract.specification_items) == 1
     specification = contract.specification_items[0]
     assert specification.name == "Картридж"
@@ -822,7 +825,6 @@ def test_contract_extracts_text_referenced_attachments_and_warns_when_tables_mis
     assert contract.contract_execution_term.days == 70
     assert contract.items == []
     assert contract.specification_items == []
-    assert any("Описание объекта закупки" in warning for warning in contract.parser_warnings)
     assert any("Спецификация" in warning for warning in contract.parser_warnings)
 
 

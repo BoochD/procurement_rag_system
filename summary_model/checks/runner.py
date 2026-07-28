@@ -792,8 +792,15 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
     item_calc_lines: list[str] = []
     for item in onmck.items:
         quantity = normalize_decimal(item.quantity)
-        unit_price = normalize_decimal(item.selected_min_unit_price) or normalize_decimal(item.unit_price)
-        declared = normalize_decimal(item.row_total_declared) or normalize_decimal(item.total_price)
+        unit_price = normalize_decimal(item.selected_min_unit_price)
+        if unit_price is None:
+            supplier_prices = [
+                normalize_decimal(price.unit_price)
+                for price in item.supplier_prices
+                if normalize_decimal(price.unit_price) is not None
+            ]
+            unit_price = min(supplier_prices) if supplier_prices else None
+        declared = normalize_decimal(item.row_total_declared)
         name = _item_label(item)
         unit_str = f" {item.unit}" if item.unit else ""
         if quantity is not None and unit_price is not None:
@@ -3368,8 +3375,8 @@ def _check_contract_attachments(package: ProcurementPackageExtraction) -> list[C
         ]
     failures = []
     for attachment in contract.referenced_attachments:
-        if attachment.attachment_kind == "purchase_description" and not contract.items:
-            failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует таблицу ООЗ.")
+        if attachment.attachment_kind == "purchase_description" and package.purchase_description is None:
+            failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует отдельный документ ООЗ.")
         elif attachment.attachment_kind == "contract_specification" and not contract.specification_items:
             failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует таблицу спецификации.")
     if failures:
@@ -3388,7 +3395,7 @@ def _check_contract_attachments(package: ProcurementPackageExtraction) -> list[C
             documents=["contract_draft"],
             fields=[
                 "contract_draft.referenced_attachments",
-                "contract_draft.items",
+                "purchase_description",
                 "contract_draft.specification_items",
             ],
             details={

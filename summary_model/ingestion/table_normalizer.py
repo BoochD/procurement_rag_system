@@ -57,6 +57,24 @@ def _header_score(row: list[str]) -> int:
     return sum(marker.casefold() in text for marker in HEADER_MARKERS)
 
 
+def _looks_like_header_continuation(row: list[str]) -> bool:
+    """Keep multi-row headers intact even when supplier labels contain dates."""
+    text = " ".join(_nonempty(row)).casefold()
+    if _header_score(row) < 2:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "поставщик",
+            "исполнитель",
+            "цена за ед",
+            "цена за единицу",
+            "стоимость",
+            "минимальная цена",
+        )
+    )
+
+
 def _looks_like_key_value(matrix: list[list[str]]) -> bool:
     if len(matrix) < 3 or not matrix or len(matrix[0]) > 4:
         return False
@@ -82,6 +100,9 @@ def infer_header_rows(matrix: list[list[str]], max_rows: int = 8) -> list[int]:
         return []
     rows = [0]
     for index, row in enumerate(matrix[1:max_rows], start=1):
+        if _looks_like_header_continuation(row):
+            rows.append(index)
+            continue
         if _looks_like_data(row):
             break
         if _header_score(row) == 0:

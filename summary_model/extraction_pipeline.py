@@ -1190,23 +1190,13 @@ def _contract_referenced_attachments(text: str) -> list[RequestAttachment]:
 
 def _contract_attachment_warnings(
     referenced: list[RequestAttachment],
-    description_items: list[PurchaseItem],
     specification_items: list[ContractSpecificationItem],
 ) -> list[str]:
     warnings: list[str] = []
-    expects_description = any(
-        item.attachment_kind == "purchase_description"
-        for item in referenced
-    )
     expects_specification = any(
         item.attachment_kind == "contract_specification"
         for item in referenced
     )
-    if expects_description and not description_items:
-        warnings.append(
-            "В контракте указано приложение 'Описание объекта закупки', "
-            "но заполненная таблица описания объекта закупки внутри контракта не найдена."
-        )
     if expects_specification and not specification_items:
         warnings.append(
             "В контракте указано приложение 'Спецификация', "
@@ -1669,6 +1659,17 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
             )
             _calculate_nmck_item(item)
             items.append(item)
+    total_amount = _money_value(text)
+    if total_amount is None and items and all(item.row_total_declared is not None for item in items):
+        calculated_total = sum(
+            item.row_total_declared
+            for item in items
+            if item.row_total_declared is not None
+        )
+        total_amount = MoneyValue(
+            raw=f"Сумма заявленных итогов строк: {calculated_total}",
+            amount=calculated_total,
+        )
     return NmckJustificationSchema(
         document_title=_title(ir),
         nmck_method=_line_after_marker(text, "метод"),
@@ -1676,8 +1677,8 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
         okpd2_codes=unique_codes(OKPD2_RE, text),
         ktru_codes=unique_codes(KTRU_RE, text),
         subject_codes=_subject_codes_from_document_text(text, evidence="nmck_text:codes"),
-        total_amount=_money_value(text),
-        total_amount_text=(_money_value(text).raw if _money_value(text) else None),
+        total_amount=total_amount,
+        total_amount_text=(total_amount.raw if total_amount else None),
         price_sources=sources,
         items=items,
         stages=stages,
@@ -1750,27 +1751,16 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     funding_source = _contract_funding_source(text)
     smp_subcontract_text = _contract_smp_sonko_clause(text)
     responsibility_section = _contract_responsibility_section(text)
-    description_items = _purchase_items_from_tables(tables)
     subject_codes = _subject_codes_from_document_text(text, evidence="contract_text:codes")
-    _link_codes_to_items_from_text(description_items, subject_codes)
     specification_items = _contract_specification_items_from_tables(tables)
     stages = _stages_from_tables(tables)
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
     embedded_subject = _purchase_subject_from_ooz_section(text)
-    embedded_justifications, embedded_justification_text = collect_additional_justifications(
-        ir,
-        DocumentType.CONTRACT,
-        tables,
-        text,
-    )
     embedded = PurchaseDescriptionSchema(
         purchase_subject=embedded_subject,
         stages=stages,
-        items=description_items,
-        additional_characteristics_justification_text=embedded_justification_text,
-        additional_characteristics_justifications=embedded_justifications,
-        parser_warnings=["Embedded purchase description inferred from contract tables."],
+        parser_warnings=["Embedded purchase description inferred from contract text."],
     )
     return ContractDraftSchema(
         document_title=_title(ir),
@@ -1802,16 +1792,13 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         embedded_purchase_description=(
             embedded
             if embedded.purchase_subject
-            or embedded.items
             or embedded.stages
-            or embedded.additional_characteristics_justifications
             else None
         ),
-        items=description_items,
+        items=[],
         specification_items=specification_items,
         parser_warnings=_contract_attachment_warnings(
             referenced_attachments,
-            description_items,
             specification_items,
         ),
     )

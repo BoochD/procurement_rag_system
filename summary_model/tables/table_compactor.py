@@ -166,17 +166,19 @@ def _items_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
 
 def _nmck_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     source_ids: set[str] = set()
+    source_headers: dict[str, str] = {}
     items = []
     for row in rows:
         if row.row_type != "item":
             continue
         payload = _nmck_item_payload(row)
         source_ids.update(_source_ids_from_payload(payload))
+        source_headers.update(payload.pop("supplier_headers", {}))
         items.append(payload)
     price_sources = [
         {
             "source_id": source_id,
-            "raw_header": _source_label(source_id),
+            "raw_header": source_headers.get(source_id) or _source_label(source_id),
         }
         for source_id in sorted(source_ids, key=_source_sort_key)
     ]
@@ -185,6 +187,7 @@ def _nmck_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
 
 def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     source_ids: set[str] = set()
+    source_headers: dict[str, str] = {}
     section_rows = [row for row in rows if row.row_type == "section"]
     child_rows = [row for row in rows if row.row_type == "item"]
     totals = [
@@ -199,6 +202,7 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     for row in child_rows:
         payload = _nmck_item_payload(row)
         source_ids.update(_source_ids_from_payload(payload))
+        source_headers.update(payload.pop("supplier_headers", {}))
         row_number = clean_text(payload.get("row_number"))
         prefix = row_number.split(".", 1)[0] if "." in row_number else ""
         child_by_prefix.setdefault(prefix, []).append(payload)
@@ -208,6 +212,7 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     for row in section_rows:
         payload = _nmck_item_payload(row)
         source_ids.update(_source_ids_from_payload(payload))
+        source_headers.update(payload.pop("supplier_headers", {}))
         stage_number = clean_text(payload.get("row_number")).rstrip(".")
         children = child_by_prefix.get(stage_number, [])
         stage_payload = {
@@ -239,7 +244,7 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     price_sources = [
         {
             "source_id": source_id,
-            "raw_header": _source_label(source_id),
+            "raw_header": source_headers.get(source_id) or _source_label(source_id),
         }
         for source_id in sorted(source_ids, key=_source_sort_key)
     ]
@@ -253,6 +258,7 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
 
 def _nmck_item_payload(row: LogicalTableRow) -> dict[str, Any]:
     by_supplier: dict[str, dict[str, Any]] = {}
+    supplier_headers: dict[str, str] = {}
     for key, value in row.cells_by_header.items():
         if "." not in key or not value:
             continue
@@ -260,7 +266,9 @@ def _nmck_item_payload(row: LogicalTableRow) -> dict[str, Any]:
         if not source_id.startswith("supplier_"):
             continue
         supplier = by_supplier.setdefault(source_id, {"source_id": source_id})
-        if field == "unit_price":
+        if field == "raw_header":
+            supplier_headers[source_id] = value
+        elif field == "unit_price":
             supplier["unit_price"] = _decimal_json(value)
             supplier["raw_unit_price"] = value
         elif field == "row_total":
@@ -280,6 +288,7 @@ def _nmck_item_payload(row: LogicalTableRow) -> dict[str, Any]:
         "quantity_raw": quantity,
         "quantity": _decimal_json(quantity),
         "supplier_prices": supplier_prices,
+        "supplier_headers": supplier_headers,
         "selected_min_unit_price": _decimal_json(selected),
         "selected_min_unit_price_raw": selected,
         "row_total_declared": _decimal_json(total),

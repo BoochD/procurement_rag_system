@@ -74,8 +74,7 @@ class VlmFallbackRepairer:
         ranked = [
             candidate
             for candidate in rank_table_candidates(tables)
-            if supports_justifications
-            or candidate.role != "additional_characteristics_justification"
+            if _role_allowed_for_document(document_type, candidate.role)
         ]
         forced = []
         forced_ids: set[str] = set()
@@ -270,6 +269,28 @@ def _should_send_to_vlm(
     if compact.get("fallback_rows"):
         return True
     return table_complexity_score(table) >= min_complexity_score and _has_suspicious_compact_json(table, role)
+
+
+def _role_allowed_for_document(
+    document_type: DocumentType,
+    role: VlmTableRole,
+) -> bool:
+    allowed_roles = {
+        DocumentType.ONMCK: {"nmck_calculation"},
+        DocumentType.OOZ: {
+            "purchase_description",
+            "contract_stages",
+            "additional_characteristics_justification",
+        },
+        DocumentType.CONTRACT: {
+            "contract_stages",
+            "contract_specification",
+            "attachments",
+        },
+        DocumentType.REQUEST: {"attachments"},
+        DocumentType.EXPLANATORY_NOTE: {"attachments"},
+    }
+    return role in allowed_roles.get(document_type, set())
 
 
 def _role_payload_empty(table: ParsedTable, role: VlmTableRole) -> bool:
