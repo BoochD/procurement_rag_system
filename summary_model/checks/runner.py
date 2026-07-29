@@ -980,11 +980,25 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "status": "manual_review",
             })
             incomplete.append(name)
-    row_sum = sum((_money(item.row_total_declared) or Decimal("0.00")) for item in onmck.items)
+    declared_totals = [_money(item.row_total_declared) for item in onmck.items]
+    row_sum = sum((value for value in declared_totals if value is not None), Decimal("0.00"))
+    rows_complete = all(value is not None for value in declared_totals)
     total = _money_amount(onmck.total_amount)
     plan_total = _money_amount(package.schedule_application.nmck if package.schedule_application else None)
-    total_mismatch = total is not None and _money(row_sum) != total
-    plan_mismatch = plan_total is not None and _money(row_sum) != plan_total
+    total_mismatch = rows_complete and total is not None and _money(row_sum) != total
+    plan_mismatch = rows_complete and plan_total is not None and _money(row_sum) != plan_total
+    if not rows_complete:
+        incomplete.append("не у всех строк ОНМЦК извлечён заявленный итог")
+
+    total_rows = list(getattr(onmck, "totals", []) or [])
+    quantity_total_mismatches = _nmck_total_quantity_mismatches(onmck.items, total_rows)
+    supplier_total_mismatches = _nmck_supplier_total_mismatches(
+        onmck.items,
+        onmck.price_sources,
+        total_rows,
+    )
+    failed.extend(quantity_total_mismatches)
+    failed.extend(supplier_total_mismatches)
     if failed or total_mismatch or plan_mismatch:
         status = "failed"
         message = "В арифметике ОНМЦК найдены расхождения."
@@ -1012,19 +1026,71 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
             details={
                 "failed_items": failed,
                 "incomplete_items": incomplete,
-                "row_sum": str(row_sum),
+                "row_sum": str(row_sum) if rows_complete else None,
                 "onmck_total": str(total) if total is not None else None,
                 "plan_nmck": str(plan_total) if plan_total is not None else None,
+                "quantity_total_mismatches": quantity_total_mismatches,
+                "supplier_total_mismatches": supplier_total_mismatches,
                 "arithmetic_rows": arithmetic_rows,
                 "summary_lines": [
                     f"строк ОНМЦК: {len(onmck.items)}",
-                    f"сумма строк: {_format_money(row_sum)}",
+                    f"сумма строк: {_format_money(row_sum)}" if rows_complete else "сумма строк: не рассчитана",
                     f"итог ОНМЦК: {_format_money(total)}" if total is not None else "итог ОНМЦК: не найден",
                     f"НМЦК в заявке: {_format_money(plan_total)}" if plan_total is not None else "НМЦК в заявке: не найден",
+                    *quantity_total_mismatches,
+                    *supplier_total_mismatches,
                 ],
             },
         )
     ]
+
+
+def _nmck_total_quantity_mismatches(items: list[NmckItem], totals: list[Any]) -> list[str]:
+    quantities = [normalize_decimal(item.quantity) for item in items]
+    if not totals or not quantities or any(quantity is None for quantity in quantities):
+        return []
+    item_quantity = sum((quantity for quantity in quantities if quantity is not None), Decimal("0"))
+    mismatches = []
+    for total in totals:
+        declared = normalize_decimal(getattr(total, "quantity", None))
+        if declared is not None and declared != item_quantity:
+            mismatches.append(
+                "Количество в строках ОНМЦК "
+                f"{_format_decimal(item_quantity)} отличается от строки «Итого» {_format_decimal(declared)}."
+            )
+    return mismatches
+
+
+def _nmck_supplier_total_mismatches(
+    items: list[NmckItem],
+    sources: list[PriceSource],
+    totals: list[Any],
+) -> list[str]:
+    if not totals or not sources:
+        return []
+    source_totals: list[Decimal] = []
+    for source in sources:
+        values = [
+            normalize_decimal(price.row_total)
+            for item in items
+            for price in item.supplier_prices
+            if price.source_id == source.source_id
+        ]
+        if not values or any(value is None for value in values):
+            return []
+        source_totals.append(sum((value for value in values if value is not None), Decimal("0.00")))
+    mismatches = []
+    for total in totals:
+        declared = list(getattr(total, "supplier_totals", []) or [])
+        if len(declared) != len(source_totals) or any(value is None for value in declared):
+            continue
+        for source, expected, actual in zip(sources, source_totals, declared):
+            if _money(expected) != _money(actual):
+                label = _supplier_label(source.supplier_name_raw or source.raw_header or source.source_id)
+                mismatches.append(
+                    f"Итог {label}: по строкам {_format_money(expected)}, в строке «Итого» {_format_money(actual)}."
+                )
+    return mismatches
 
 
 def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[CheckResult]:
@@ -1233,7 +1299,9 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
 
     items_by_stage: dict[str, list[NmckItem]] = defaultdict(list)
     for item in items:
-        stage_number = _stage_prefix(getattr(item, "row_number", None))
+        stage_number = clean_stage_number(getattr(item, "parent_stage_number", None)) or _stage_prefix(
+            getattr(item, "row_number", None)
+        )
         if stage_number:
             items_by_stage[stage_number].append(item)
 
@@ -1244,10 +1312,8 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
         number = clean_stage_number(getattr(stage, "stage_number", None))
         declared = _money_amount(getattr(stage, "price", None))
         child_items = items_by_stage.get(number or "", [])
-        child_sum = sum(
-            (_money(getattr(item, "row_total_declared", None)) or Decimal("0.00"))
-            for item in child_items
-        )
+        child_totals = [_money(getattr(item, "row_total_declared", None)) for item in child_items]
+        child_sum = sum((value for value in child_totals if value is not None), Decimal("0.00"))
         label = f"Этап {number or '?'}"
         if getattr(stage, "stage_name", None):
             label += f": {_short_report_text(getattr(stage, 'stage_name'), limit=80)}"
@@ -1259,6 +1325,12 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
             incomplete.append(f"{label}: цена этапа не найдена")
             summary_lines.append(f"{label}: сумма вложенных строк {_format_money(child_sum)}, цена этапа не найдена")
             continue
+        if any(value is None for value in child_totals):
+            incomplete.append(f"{label}: не у всех вложенных строк извлечена цена")
+            summary_lines.append(
+                f"{label}: сумма вложенных строк не рассчитана, цена этапа {_format_money(declared)}"
+            )
+            continue
         if _money(child_sum) != declared:
             failed.append(f"{label}: ожидалось {_format_money(child_sum)}, указано {_format_money(declared)}")
         summary_lines.append(
@@ -1266,11 +1338,16 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
         )
 
     total = _money_amount(getattr(onmck, "total_amount", None))
-    stage_total = sum((_money_amount(getattr(stage, "price", None)) or Decimal("0.00")) for stage in stages)
-    if total is not None and _money(stage_total) != total:
+    stage_prices = [_money_amount(getattr(stage, "price", None)) for stage in stages]
+    stage_total = sum((value for value in stage_prices if value is not None), Decimal("0.00"))
+    if any(value is None for value in stage_prices):
+        incomplete.append("не у всех этапов извлечена цена")
+    elif total is not None and _money(stage_total) != total:
         failed.append(f"Итог этапов: ожидалось {_format_money(total)}, сумма этапов {_format_money(stage_total)}")
     summary_lines.append(
         f"Итого по этапам: {_format_money(stage_total)}; итог ОНМЦК: {_format_money(total)}"
+        if all(value is not None for value in stage_prices)
+        else f"Итого по этапам: не рассчитано; итог ОНМЦК: {_format_money(total)}"
     )
 
     if failed:

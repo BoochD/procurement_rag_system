@@ -31,6 +31,7 @@ def _looks_like_signature_table(text: str) -> bool:
             "ктру",
             "количество",
             "кол-во",
+            "кол-в",
             "цена",
             "характеристик",
         ),
@@ -56,6 +57,7 @@ def _looks_like_signature_table(text: str) -> bool:
             "ктру",
             "количество",
             "кол-во",
+            "кол-в",
             "цена товара",
             "цена за ед",
             "характеристик",
@@ -102,7 +104,7 @@ def _looks_like_nmck_matrix(table: TableIR) -> bool:
         or "цена за единицу" in header_text
     ) and ("стоимость" in header_text or "сумма" in header_text)
     has_result = "минимальная цена" in header_text or "цена контракта" in header_text
-    has_item_columns = "количество" in header_text or "кол-во" in header_text
+    has_item_columns = any(marker in header_text for marker in ("количество", "кол-во", "кол-в"))
     return has_sources and has_price_pair and has_result and has_item_columns
 
 

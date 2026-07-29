@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ class VlmFallbackOptions:
     min_complexity_score: int = 35
     max_width: int = 2600
     font_size: int = 18
+    force_roles: set[VlmTableRole] = field(default_factory=set)
 
 
 @dataclass
@@ -103,6 +105,7 @@ class VlmFallbackRepairer:
                 by_id[candidate.table_id],
                 candidate.role,
                 min_complexity_score=self.options.min_complexity_score,
+                force=candidate.role in self.options.force_roles,
             )
         ][: self.options.max_tables_per_document]
         candidates = _unique_candidates([*dual_base, *regular, *forced])
@@ -270,6 +273,7 @@ def _should_send_to_vlm(
     role: VlmTableRole,
     *,
     min_complexity_score: int,
+    force: bool = False,
 ) -> bool:
     if table.table_type in {"signature_table", "ignored_table"}:
         return False
@@ -277,6 +281,8 @@ def _should_send_to_vlm(
         return False
     if role in {"generic", "unknown"}:
         return False
+    if force:
+        return True
     if table.parser_warnings:
         return True
     if table.table_type in {"generic_table", "unknown"}:
@@ -442,6 +448,8 @@ def _parse_response(
         data["table_role"] = role
         if table_title:
             data.setdefault("table_title", table_title)
+        if role == "nmck_calculation":
+            _normalize_nmck_response(data)
     recovery = recover_model(VlmTableExtraction, data)
     if not isinstance(recovery.value, VlmTableExtraction):
         raise ValueError(
@@ -449,6 +457,36 @@ def _parse_response(
             f"{recovery.error or 'неизвестная ошибка валидации'}"
         )
     return recovery.value, recovery
+
+
+def _normalize_nmck_response(data: dict[str, Any]) -> None:
+    """Move legacy NMCK summary objects out of the generic totals list."""
+    normalized_totals: list[dict[str, Any]] = []
+    existing = data.get("nmck_totals")
+    if isinstance(existing, dict):
+        normalized_totals.append(existing)
+    elif isinstance(existing, list):
+        normalized_totals.extend(item for item in existing if isinstance(item, dict))
+
+    legacy_totals = data.get("totals")
+    legacy_text: list[str] = []
+    if isinstance(legacy_totals, dict):
+        legacy_totals = [legacy_totals]
+    elif legacy_totals is None:
+        legacy_totals = []
+    elif not isinstance(legacy_totals, list):
+        legacy_totals = [legacy_totals]
+    for value in legacy_totals:
+        if isinstance(value, dict) and any(
+            key in value
+            for key in ("quantity_raw", "supplier_totals_raw", "nmck_total_raw")
+        ):
+            normalized_totals.append(value)
+        elif value is not None:
+            legacy_text.append(str(value))
+
+    data["nmck_totals"] = normalized_totals
+    data["totals"] = legacy_text
 
 
 def _compact_json_from_vlm(
@@ -478,6 +516,17 @@ def _compact_json_from_vlm(
                 for source_id in source_ids
             ],
             "items": items,
+            "nmck_totals": [
+                {
+                    "label": total.label,
+                    "unit": total.unit,
+                    "quantity_raw": total.quantity_raw,
+                    "supplier_totals_raw": total.supplier_totals_raw,
+                    "nmck_total_raw": total.nmck_total_raw,
+                    "notes": total.notes,
+                }
+                for total in extraction.nmck_totals
+            ],
             "totals": [{"raw_text": total} for total in extraction.totals],
         }
     if role == "contract_specification":
@@ -620,9 +669,9 @@ def _specification_item_payload(item) -> dict[str, Any]:
 
 def _supplier_source_id(label: str | None, index: int) -> str:
     text = clean_text(label).casefold()
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if digits:
-        return f"supplier_{digits}"
+    match = re.search(r"(?:поставщик|исполнитель)\s*(\d+)", text)
+    if match:
+        return f"supplier_{match.group(1)}"
     return f"supplier_{index}"
 
 
@@ -711,6 +760,8 @@ def _merge_role_result(
     role: VlmTableRole,
 ) -> ParsedTable:
     """Merge only the keys owned by one VLM role into the physical table."""
+    if role == "nmck_calculation":
+        return _merge_nmck_role_result(base, role_result)
     if role != "additional_characteristics_justification":
         merged = role_result.model_copy(deep=True)
         if role == "purchase_description" and base.table_type == "ooz_items_table":
@@ -746,6 +797,89 @@ def _merge_role_result(
     ]))
     merged.compact_markdown = build_compact_markdown(merged)
     return merged
+
+
+def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedTable:
+    """Use VLM only to fill gaps in deterministic NMCK rows."""
+    merged = base.model_copy(deep=True)
+    base_items = [item for item in base.compact_json.get("items", []) if isinstance(item, dict)]
+    repaired_items = [item for item in repaired.compact_json.get("items", []) if isinstance(item, dict)]
+    matched: set[int] = set()
+    items: list[dict[str, Any]] = []
+    for base_item in base_items:
+        match_index = _find_nmck_item_match(base_item, repaired_items, matched)
+        if match_index is None:
+            items.append(dict(base_item))
+            continue
+        matched.add(match_index)
+        items.append(_merge_nmck_item(base_item, repaired_items[match_index]))
+    # A staged table already has its hierarchy from the deterministic parser.
+    # VLM can complete those rows, but must not add a stage aggregate as a new item.
+    if base.table_type != "nmck_staged_calculation_table" or not base_items:
+        items.extend(dict(item) for index, item in enumerate(repaired_items) if index not in matched)
+
+    repaired_sources = repaired.compact_json.get("price_sources") or []
+    merged.compact_json = {
+        **base.compact_json,
+        "items": items,
+        "price_sources": base.compact_json.get("price_sources") or repaired_sources,
+        "nmck_totals": repaired.compact_json.get("nmck_totals") or base.compact_json.get("nmck_totals", []),
+    }
+    merged.parser_warnings = list(dict.fromkeys([
+        *base.parser_warnings,
+        *repaired.parser_warnings,
+    ]))
+    merged.compact_markdown = build_compact_markdown(merged)
+    return merged
+
+
+def _find_nmck_item_match(
+    base_item: dict[str, Any],
+    repaired_items: list[dict[str, Any]],
+    matched: set[int],
+) -> int | None:
+    for key in ("row_index", "row_number"):
+        value = base_item.get(key)
+        if value is None:
+            continue
+        for index, repaired_item in enumerate(repaired_items):
+            if index not in matched and repaired_item.get(key) == value:
+                return index
+    return None
+
+
+def _merge_nmck_item(base_item: dict[str, Any], repaired_item: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base_item)
+    for key, value in repaired_item.items():
+        if key == "supplier_prices":
+            result[key] = _merge_nmck_supplier_prices(result.get(key), value)
+        elif not _has_value(result.get(key)) and _has_value(value):
+            result[key] = value
+    return result
+
+
+def _has_value(value: object) -> bool:
+    if value is None or value == "" or value == [] or value == {}:
+        return False
+    return bool(clean_text(str(value)))
+
+
+def _merge_nmck_supplier_prices(base_prices: object, repaired_prices: object) -> list[dict[str, Any]]:
+    base_rows = [dict(item) for item in base_prices or [] if isinstance(item, dict)]
+    repaired_rows = [item for item in repaired_prices or [] if isinstance(item, dict)]
+    by_source = {
+        str(item.get("source_id")): item
+        for item in repaired_rows
+        if item.get("source_id")
+    }
+    for item in base_rows:
+        repaired = by_source.pop(str(item.get("source_id")), None)
+        if repaired:
+            for key, value in repaired.items():
+                if not _has_value(item.get(key)) and _has_value(value):
+                    item[key] = value
+    base_rows.extend(by_source.values())
+    return base_rows
 
 
 def _preserve_coded_items(base_items: object, repaired_items: object) -> list[dict[str, Any]]:

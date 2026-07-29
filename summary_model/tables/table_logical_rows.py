@@ -58,6 +58,7 @@ def normalize_header_name(path: list[str]) -> str | None:
         ("trademark", ("товарн", "знак")),
         ("quantity", ("количество",)),
         ("quantity", ("кол-во",)),
+        ("quantity", ("кол-в",)),
         ("quantity", ("кол во",)),
         ("unit", ("единица измерения товара",)),
         ("unit", ("единица измерения",)),

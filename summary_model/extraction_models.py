@@ -295,6 +295,7 @@ class CommercialOfferItem(BaseModel):
 
 class NmckItem(BaseModel):
     row_number: int | str | None = None
+    parent_stage_number: str | None = None
     name: str | None = None
     okpd2_code: str | None = None
     ktru_code: str | None = None
@@ -311,6 +312,18 @@ class NmckItem(BaseModel):
     min_price_source_id: str | None = None
     is_declared_min_price_correct: bool | None = None
     is_row_total_correct: bool | None = None
+    evidence: str | None = None
+
+
+class NmckSummaryTotal(BaseModel):
+    label: str | None = None
+    unit: str | None = None
+    quantity_raw: str | None = None
+    quantity: Decimal | None = None
+    supplier_totals_raw: list[str] = Field(default_factory=list)
+    supplier_totals: list[Decimal | None] = Field(default_factory=list)
+    nmck_total_raw: str | None = None
+    nmck_total: Decimal | None = None
     evidence: str | None = None
 
 
@@ -405,6 +418,7 @@ class NmckJustificationSchema(BaseModel):
     total_amount_text: str | None = None
     price_sources: list[PriceSource] = Field(default_factory=list)
     items: list[NmckItem] = Field(default_factory=list)
+    totals: list[NmckSummaryTotal] = Field(default_factory=list)
     stages: list[ProcurementStage] = Field(default_factory=list)
     variation_coefficient_raw: str | None = None
     variation_coefficient: Decimal | None = None

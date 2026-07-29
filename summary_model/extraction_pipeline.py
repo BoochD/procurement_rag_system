@@ -21,6 +21,7 @@ from summary_model.extraction_models import (
     ExtractionDocumentType,
     MoneyValue,
     NmckItem,
+    NmckSummaryTotal,
     NmckJustificationSchema,
     PercentValue,
     CodeReference,
@@ -1747,6 +1748,7 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
             ]
             item = NmckItem(
                 row_number=payload.get("row_number"),
+                parent_stage_number=payload.get("parent_stage_number"),
                 name=payload.get("name"),
                 unit=payload.get("unit"),
                 quantity=parse_decimal(payload.get("quantity_raw")),
@@ -1760,6 +1762,7 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
             )
             _calculate_nmck_item(item)
             items.append(item)
+    totals = _nmck_summary_totals(tables)
     total_amount = _money_value(text)
     if total_amount is None and items and all(item.row_total_declared is not None for item in items):
         calculated_total = sum(
@@ -1782,10 +1785,40 @@ def _nmck_justification(ir: DocumentIR, tables: list[ParsedTable]) -> NmckJustif
         total_amount_text=(total_amount.raw if total_amount else None),
         price_sources=sources,
         items=items,
+        totals=totals,
         stages=stages,
         variation_coefficient_raw=_line_after_marker(text, "коэффициент вариации"),
         variation_coefficient=parse_decimal(_line_after_marker(text, "коэффициент вариации")),
     )
+
+
+def _nmck_summary_totals(tables: list[ParsedTable]) -> list[NmckSummaryTotal]:
+    totals: list[NmckSummaryTotal] = []
+    for table in tables:
+        if table.table_type not in {"nmck_calculation_table", "nmck_staged_calculation_table"}:
+            continue
+        for payload in table.compact_json.get("nmck_totals", []):
+            if not isinstance(payload, dict):
+                continue
+            supplier_totals_raw = [
+                str(value)
+                for value in payload.get("supplier_totals_raw", [])
+                if value is not None
+            ]
+            totals.append(
+                NmckSummaryTotal(
+                    label=payload.get("label"),
+                    unit=payload.get("unit"),
+                    quantity_raw=payload.get("quantity_raw"),
+                    quantity=parse_decimal(payload.get("quantity_raw")),
+                    supplier_totals_raw=supplier_totals_raw,
+                    supplier_totals=[parse_decimal(value) for value in supplier_totals_raw],
+                    nmck_total_raw=payload.get("nmck_total_raw"),
+                    nmck_total=parse_decimal(payload.get("nmck_total_raw")),
+                    evidence=f"{table.table_id}:total",
+                )
+            )
+    return totals
 
 
 def _calculate_nmck_item(item: NmckItem) -> None:

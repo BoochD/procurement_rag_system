@@ -160,6 +160,15 @@ Commercial-offer VLM lab:
   (`gpt-5.4-mini` by default). Lab `--model` remains an explicit per-run
   override and does not change production configuration.
 
+NMCK VLM lab:
+
+- `python -m summary_model.nmck_lab.run --input-root "doci_primery" --output-dir "runtime/nmck_lab_all"`
+- Add `--live` to send only ONMCK calculation tables to the production VLM.
+  The lab discovers ONMCK/OCK documents through `DocumentClassifier`, skips
+  temporary Word files, and writes one extraction/check artifact set per
+  document plus an aggregate `summary.json`. It does not run KTRU, semantic
+  checks, commercial-offer processing, or document-level LLM extraction.
+
 Commercial-offer arithmetic:
 
 - Every recognized row is checked as `quantity * unit price = row total`.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from summary_model.vlm_lab.models import VlmTableRole
 
 
-VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.1"
+VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.4"
 
 
 ROLE_NOTES: dict[VlmTableRole, str] = {
@@ -26,7 +26,30 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
     ),
     "nmck_calculation": (
         "Extract NMCK calculation rows, supplier/executor prices, selected "
-        "minimum unit prices, row totals, parent stage numbers, and totals."
+        "minimum unit prices, row totals, parent stage numbers, and summary rows. "
+        "Put product rows only into nmck_items. Put a visible 'Итого' row only into "
+        "nmck_totals, preserving its quantity, supplier totals, and NMCK total as raw text. "
+        "In a supplier block with two subcolumns, 'Цена за ед. товара' and "
+        "'Стоимость товаров', supplier_totals_raw contains ONLY the visible cell "
+        "in the second subcolumn 'Стоимость товаров' of the final 'Итого' row. "
+        "The cell under 'Цена за ед. товара' is NOT a supplier total, even if it "
+        "contains a number in the 'Итого' row: it may be the sum of unit prices. "
+        "For example, if the 'Итого' row shows 110 196 under 'Цена за ед. товара' "
+        "and 350 000 under 'Стоимость товаров', return 350 000, never 110 196. "
+        "Never copy unit prices, averages, coefficients, percentages, variation "
+        "calculations, or other intermediate numbers into supplier_totals_raw. "
+        "If the row does not visibly contain supplier total-cost columns, leave "
+        "supplier_totals_raw empty. "
+        "Do not put NMCK summary objects into the generic totals array.\n"
+        "Example product row: {\"row_number\": \"2.1\", \"parent_stage_number\": \"2\", "
+        "\"name\": \"Сервер\", \"unit\": \"шт.\", \"quantity_raw\": \"4\", "
+        "\"supplier_prices\": [{\"supplier_label\": \"Поставщик 1\", "
+        "\"unit_price_raw\": \"10 300 000,00\", \"row_total_raw\": \"41 200 000,00\"}], "
+        "\"selected_min_unit_price_raw\": \"10 245 000,00\", "
+        "\"row_total_declared_raw\": \"40 980 000,00\"}.\n"
+        "Example summary row: {\"label\": \"Итого\", \"unit\": \"шт.\", "
+        "\"quantity_raw\": \"11\", \"supplier_totals_raw\": [\"1 661 000,00\", "
+        "\"1 647 800,00\", \"1 652 200,00\"], \"nmck_total_raw\": \"1 647 800,00\"}."
     ),
     "contract_specification": (
         "Extract specification items with name, unit, quantity, unit price, "
@@ -69,7 +92,7 @@ Rules:
 - Fill only the fields relevant to the target role:
   purchase_description -> items with characteristics;
   contract_stages -> stages;
-  nmck_calculation -> nmck_items and totals;
+  nmck_calculation -> nmck_items and nmck_totals;
   contract_specification -> items and totals;
   additional_characteristics_justification -> justifications;
   attachments -> attachments;

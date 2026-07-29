@@ -17,7 +17,9 @@ from summary_model.tables import extract_tables
 from summary_model.vlm_fallback import (
     VlmFallbackOptions,
     VlmFallbackRepairer,
+    _merge_role_result,
     _parse_response,
+    _supplier_source_id,
     _unextracted_justification_table,
 )
 from summary_model.vlm_lab.candidates import justification_candidate_reasons
@@ -105,6 +107,121 @@ def test_recovery_keeps_valid_justification_rows():
     assert len(extraction.justifications) == 1
     assert extraction.justifications[0].characteristic_names == ["Централизованное управление"]
     assert recovery.status in {"recovered", "partial"}
+
+
+def test_nmck_legacy_total_object_is_recovered_as_structured_summary():
+    content = {
+        "table_role": "nmck_calculation",
+        "nmck_items": [{"row_number": "1", "name": "Моноблок", "quantity_raw": "12"}],
+        "totals": [{
+            "label": "Итого",
+            "unit": "шт.",
+            "quantity_raw": "11",
+            "supplier_totals_raw": ["1 661 000,00", "1 647 800,00", "1 652 200,00"],
+            "nmck_total_raw": "1 647 800,00",
+        }],
+    }
+    response = {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    extraction, recovery = _parse_response(response, role="nmck_calculation", table_title="ОНМЦК")
+
+    assert recovery.lossy_warnings == []
+    assert extraction.nmck_totals[0].quantity_raw == "11"
+    assert extraction.nmck_totals[0].nmck_total_raw == "1 647 800,00"
+
+
+def test_nmck_vlm_merge_fills_only_missing_deterministic_fields():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_calculation_table",
+        row_count=2,
+        col_count=4,
+        compact_json={
+            "price_sources": [{"source_id": "supplier_1", "raw_header": "Поставщик 1"}],
+            "items": [{
+                "row_index": 3,
+                "row_number": "1",
+                "name": "Моноблок",
+                "unit": "шт.",
+                "quantity_raw": None,
+                "supplier_prices": [{"source_id": "supplier_1", "raw_unit_price": "149 800,00"}],
+                "selected_min_unit_price_raw": "149 800,00",
+                "row_total_declared_raw": "1 647 800,00",
+            }],
+        },
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.compact_json = {
+        "items": [{
+            "row_index": 3,
+            "row_number": "1",
+            "name": "Моноблок",
+            "unit": "шт.",
+            "quantity_raw": "12",
+            "supplier_prices": [{"source_id": "supplier_1", "raw_unit_price": "149 800,00"}],
+            "selected_min_unit_price_raw": None,
+            "row_total_declared_raw": None,
+        }],
+        "nmck_totals": [{"label": "Итого", "quantity_raw": "11"}],
+    }
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+    item = merged.compact_json["items"][0]
+
+    assert item["quantity_raw"] == "12"
+    assert item["selected_min_unit_price_raw"] == "149 800,00"
+    assert item["row_total_declared_raw"] == "1 647 800,00"
+    assert merged.compact_json["nmck_totals"][0]["quantity_raw"] == "11"
+
+
+def test_nmck_supplier_id_ignores_letter_number_and_date():
+    assert _supplier_source_id("Исполнитель 2 (письмо № 280426/10 от 28.04.2026)", 2) == "supplier_2"
+
+
+def test_nmck_staged_merge_does_not_append_vlm_stage_aggregate():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_staged_calculation_table",
+        row_count=2,
+        col_count=4,
+        compact_json={"items": [{
+            "row_index": 3,
+            "row_number": "2.1",
+            "parent_stage_number": "2",
+            "name": "Сервер",
+            "quantity_raw": None,
+        }]},
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.compact_json = {"items": [
+        {
+            "row_index": 3,
+            "row_number": "2.1",
+            "parent_stage_number": "2",
+            "name": "Сервер",
+            "quantity_raw": "4",
+        },
+        {
+            "row_index": 4,
+            "row_number": "2",
+            "name": "Поставка оборудования (2 этап)",
+            "row_total_declared_raw": "106 212 006,00",
+        },
+    ]}
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+
+    assert merged.compact_json["items"] == [{
+        "row_index": 3,
+        "row_number": "2.1",
+        "parent_stage_number": "2",
+        "name": "Сервер",
+        "quantity_raw": "4",
+    }]
 
 
 def test_vlm_response_with_missing_final_brackets_is_recovered():

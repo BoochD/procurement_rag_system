@@ -287,6 +287,7 @@ def _nmck_item_payload(row: LogicalTableRow) -> dict[str, Any]:
     quantity = row.cells_by_header.get("quantity")
     return {
         "row_number": row.cells_by_header.get("row_number"),
+        "parent_stage_number": row.parent_item_number,
         "name": row.cells_by_header.get("name"),
         "unit": row.cells_by_header.get("unit"),
         "quantity_raw": quantity,

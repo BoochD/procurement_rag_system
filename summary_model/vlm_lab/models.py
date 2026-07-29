@@ -110,6 +110,22 @@ class VlmNmckItem(BaseModel):
         return _stringify_loose_values(value)
 
 
+class VlmNmckTotal(BaseModel):
+    """Visible summary row from an NMCK calculation table."""
+
+    label: str | None = None
+    unit: str | None = None
+    quantity_raw: str | None = None
+    supplier_totals_raw: list[str] = Field(default_factory=list)
+    nmck_total_raw: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("supplier_totals_raw", "notes", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: Any) -> list[str]:
+        return _stringify_loose_values(value)
+
+
 class VlmAdditionalJustification(BaseModel):
     item_name: str | None = None
     item_row_number: str | None = None
@@ -135,13 +151,14 @@ class VlmTableExtraction(BaseModel):
     items: list[VlmPurchaseItem] = Field(default_factory=list)
     stages: list[VlmStage] = Field(default_factory=list)
     nmck_items: list[VlmNmckItem] = Field(default_factory=list)
+    nmck_totals: list[VlmNmckTotal] = Field(default_factory=list)
     justifications: list[VlmAdditionalJustification] = Field(default_factory=list)
     totals: list[str] = Field(default_factory=list)
     attachments: list[str] = Field(default_factory=list)
     unparsed_rows: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
-    @field_validator("attachments", "unparsed_rows", mode="before")
+    @field_validator("totals", "attachments", "unparsed_rows", "warnings", mode="before")
     @classmethod
     def _stringify_loose_rows(cls, value: Any) -> list[str]:
         return _stringify_loose_values(value)

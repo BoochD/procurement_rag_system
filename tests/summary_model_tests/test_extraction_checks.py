@@ -21,6 +21,7 @@ from summary_model.extraction_models import (
     ExplanatoryNoteSchema,
     MoneyValue,
     NmckItem,
+    NmckSummaryTotal,
     PenaltyClause,
     NmckJustificationSchema,
     PriceSource,
@@ -1032,6 +1033,28 @@ def test_onmck_arithmetic_and_min_price_fail():
 
     assert checks["strict.onmck.arithmetic"].status == "failed"
     assert checks["strict.onmck.min_price"].status == "failed"
+
+
+def test_onmck_arithmetic_checks_summary_quantity_without_losing_money_check():
+    package = _base_package()
+    package.nmck_justification.totals = [
+        NmckSummaryTotal(quantity_raw="1", quantity=Decimal("1"), nmck_total=Decimal("200"))
+    ]
+
+    result = _by_id(run_checks(package))["strict.onmck.arithmetic"]
+
+    assert result.status == "failed"
+    assert "Количество в строках ОНМЦК 2 отличается от строки «Итого» 1." in result.details["summary_lines"]
+
+
+def test_onmck_arithmetic_is_manual_when_declared_row_total_is_missing():
+    package = _base_package()
+    package.nmck_justification.items[0].row_total_declared = None
+
+    result = _by_id(run_checks(package))["strict.onmck.arithmetic"]
+
+    assert result.status == "manual_review"
+    assert result.details["row_sum"] is None
 
 
 def test_onmck_supplier_price_report_contains_variation_and_supplier_labels():
