@@ -1394,6 +1394,25 @@ def test_contract_security_uses_fifty_million_boundary():
     schedule.contract_security = SecurityValue(raw="0.5%", value_percent=Decimal("0.5"))
     assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "passed"
 
+
+def test_zero_security_uses_existing_procurement_method():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.nmck = MoneyValue(amount=Decimal("2000000"))
+    schedule.procurement_method = "single_supplier"
+    schedule.application_security = SecurityValue(raw="0%", value_percent=Decimal("0"))
+    schedule.contract_security = SecurityValue(raw="0%", value_percent=Decimal("0"))
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.application_security"].status == "not_applicable"
+    assert checks["strict.plan.contract_security_limits"].status == "not_applicable"
+
+    schedule.procurement_method = None
+    checks = _by_id(run_checks(package))
+    assert checks["strict.application_security"].status == "manual_review"
+    assert checks["strict.plan.contract_security_limits"].status == "manual_review"
+
     schedule.contract_security = SecurityValue(raw="0.49%", value_percent=Decimal("0.49"))
     assert _by_id(run_checks(package))["strict.plan.contract_security_limits"].status == "failed"
 

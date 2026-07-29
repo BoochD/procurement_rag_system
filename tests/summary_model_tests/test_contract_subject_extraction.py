@@ -6,6 +6,7 @@ from summary_model.checks.runner import _check_subject_against_plan
 from summary_model.domain.models import DocumentType
 from summary_model.extraction_pipeline import (
     _contract_draft,
+    _delivery_place_from_ooz_section,
     _purchase_description,
     _purchase_subject_from_ooz_section,
 )
@@ -65,6 +66,20 @@ def test_purchase_subject_parser_ignores_attachment_list_reference():
 
     assert _purchase_subject_from_ooz_section(text) == (
         "поставка шин пневматических и комплектующих для автомобилей"
+    )
+
+
+def test_embedded_ooz_delivery_place_prefers_concrete_address():
+    text = """
+    Место оказания Услуг указывается в структурированном виде ЕИС.
+    ОПИСАНИЕ ОБЪЕКТА ЗАКУПКИ
+    Адрес поставки: Российская Федерация, Новосибирская область, г.о. город
+    Новосибирск, г. Новосибирск, ул. Октябрьская, д. 52, каб. 213.
+    """
+
+    assert _delivery_place_from_ooz_section(text) == (
+        "Российская Федерация, Новосибирская область, г.о. город Новосибирск, г. Новосибирск, "
+        "ул. Октябрьская, д. 52, каб. 213."
     )
 
 

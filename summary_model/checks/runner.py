@@ -2802,7 +2802,7 @@ def _check_securities(package: ProcurementPackageExtraction) -> list[CheckResult
     contract_exception = _security_exception_note(schedule, kind="contract")
     return [
         _check_application_security(application_security, nmck, method, application_exception),
-        _check_contract_security_limits(schedule_contract_security, nmck, contract_exception),
+        _check_contract_security_limits(schedule_contract_security, nmck, method, contract_exception),
         _check_warranty_security_limits(schedule_warranty_security, nmck),
     ]
 
@@ -2832,6 +2832,9 @@ def _check_application_security(
     elif percent is None:
         status = "manual_review"
         message = "Условие об обеспечении заявки найдено, но размер не распознан."
+    elif percent == 0 and method is None:
+        status = "manual_review"
+        message = "Указано 0%, но способ закупки не извлечён: применимость обеспечения заявки требует проверки."
     else:
         lower, upper = _application_security_limits(nmck)
         status = "passed" if lower <= percent <= upper else "failed"
@@ -2860,10 +2863,14 @@ def _check_application_security(
 def _check_contract_security_limits(
     value: Any,
     nmck: Decimal | None,
+    method: str | None,
     exception_note: str | None,
 ) -> CheckResult:
     percent = normalize_decimal(getattr(value, "value_percent", None)) if value else None
-    if value is None:
+    if method == "single_supplier":
+        status = "not_applicable"
+        message = "Для закупки у единственного поставщика базовая проверка обеспечения исполнения контракта не применяется."
+    elif value is None:
         status = "manual_review"
         message = "Размер обеспечения исполнения контракта не извлечён из заявки в план-график."
     elif exception_note:
@@ -2878,6 +2885,9 @@ def _check_contract_security_limits(
     elif percent is None:
         status = "manual_review"
         message = "Условие об обеспечении исполнения найдено, но размер не распознан."
+    elif percent == 0 and method is None:
+        status = "manual_review"
+        message = "Указано 0%, но способ закупки не извлечён: применимость обеспечения исполнения требует проверки."
     else:
         lower, upper = _contract_security_limits(nmck)
         status = "passed" if lower <= percent <= upper else "failed"

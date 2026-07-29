@@ -1292,6 +1292,41 @@ def _purchase_subject_from_ooz_section(text: str) -> str | None:
     return None
 
 
+def _delivery_place_from_ooz_section(text: str) -> str | None:
+    """Prefer a concrete delivery address from the embedded OOZ over EIS placeholders."""
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    for heading_index, line in enumerate(lines):
+        if not _is_ooz_heading(line):
+            continue
+        for index, candidate in enumerate(lines[heading_index + 1 : heading_index + 81]):
+            lowered = candidate.casefold()
+            if not any(marker in lowered for marker in (
+                "адрес поставки",
+                "место поставки товара",
+                "место поставки",
+                "место оказания услуг",
+            )):
+                continue
+            value = clean_text(candidate.split(":", 1)[1]) if ":" in candidate else None
+            if not value and heading_index + index + 2 < len(lines):
+                value = lines[heading_index + index + 2]
+            next_index = heading_index + index + 2
+            while value and next_index < len(lines):
+                continuation = lines[next_index]
+                if (
+                    _is_ooz_service_line(continuation)
+                    or re.match(r"^\d+(?:\.\d+)*[.)]?\s+[А-ЯЁA-Z]", continuation)
+                ):
+                    break
+                value = clean_text(f"{value} {continuation}")
+                next_index += 1
+                if continuation.rstrip().endswith((".", ";")):
+                    break
+            if value and not _is_structured_placeholder(value):
+                return value
+    return None
+
+
 def _is_ooz_heading(line: str) -> bool:
     normalized = _normalized_ooz_heading(line)
     return bool(
@@ -1897,9 +1932,11 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     table_attachments = _attachments(tables)
     referenced_attachments = _contract_referenced_attachments(text) or table_attachments
     embedded_subject = _purchase_subject_from_ooz_section(text)
+    embedded_delivery_place = _delivery_place_from_ooz_section(text)
     embedded_items = _purchase_items_from_tables(tables)
     embedded = PurchaseDescriptionSchema(
         purchase_subject=embedded_subject,
+        delivery_place=embedded_delivery_place,
         okpd2_codes=sorted({item.okpd2_code for item in embedded_items if item.okpd2_code}),
         ktru_codes=sorted({item.ktru_code for item in embedded_items if item.ktru_code}),
         items=embedded_items,
@@ -1920,7 +1957,10 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         subject_codes=subject_codes,
         price=_contract_price_value(text, specification_items),
         funding_source=funding_source,
-        delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
+        delivery_place=(
+            embedded_delivery_place
+            or _line_after_marker(text, "место поставки", "адрес поставки")
+        ),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
         contract_execution_term_text=contract_execution_text,
