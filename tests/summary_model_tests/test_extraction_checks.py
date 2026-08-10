@@ -1,6 +1,7 @@
 import json
 import shutil
 from contextlib import contextmanager
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -554,6 +555,7 @@ def test_stages_against_plan_handle_absence_missing_structure_and_mismatch():
     checks = _by_id(run_checks(package))
     assert checks["strict.plan.stages"].status == "failed"
     assert any("ООЗ" in line for line in checks["strict.plan.stages"].details["summary_lines"])
+    assert "Отсутствует этап 2" in checks["strict.plan.stages"].message
 
 
 def test_stage_results_argument_replaces_deterministic_stage_check():
@@ -845,6 +847,30 @@ def test_semantic_delivery_place_rejects_different_house_numbers():
     assert guarded.status == "failed"
     assert "001" not in guarded.message
     assert "1" in guarded.message and "14" in guarded.message
+
+
+def test_semantic_delivery_place_accepts_same_address_with_formatting_differences():
+    from summary_model.checks.semantic_llm import (
+        SemanticCheckFinding,
+        _apply_delivery_place_guard,
+    )
+
+    package = _base_package()
+    package.schedule_application.delivery_place = (
+        "Российская Федерация, г.о. город Новосибирск, г Новосибирск, ул Свердлова, д. 14"
+    )
+    package.purchase_description.delivery_place = "г. Новосибирск, ул. Свердлова, 14"
+    package.contract_draft.delivery_place = "Российская Федерация, Новосибирская область, г. Новосибирск, ул. Свердлова, д. 14"
+    finding = SemanticCheckFinding(
+        check_id="semantic.delivery_place",
+        status="failed",
+        message="Internal reasoning must not reach the report.",
+    )
+
+    guarded = _apply_delivery_place_guard(package, finding)
+
+    assert guarded.status == "passed"
+    assert "Internal" not in guarded.message
 
 
 def test_penalty_llm_is_not_called_without_usable_responsibility_section():
@@ -1175,6 +1201,11 @@ def test_commercial_offers_count_and_onmck_match_pass_with_three_offers():
         _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
         _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110")),
     ]
+    for index, source in enumerate(package.nmck_justification.price_sources, start=1):
+        source.outgoing_letter_number = f"К-{index}"
+        source.outgoing_letter_date = date(2026, 1, index)
+        package.commercial_offers[index - 1].outgoing_number = f"К-{index}"
+        package.commercial_offers[index - 1].offer_date = date(2026, 1, index)
 
     checks = _by_id(run_checks(package))
 
@@ -1256,9 +1287,35 @@ def test_commercial_offer_minimum_is_manual_when_one_offer_item_is_unmatched():
     checks = _by_id(run_checks(package))
 
     result = checks["manual.commercial_offers.onmck"]
-    assert result.status == "manual_review"
-    assert result.details["failures"] == []
+    assert result.status == "failed"
+    assert any("сумма КП не совпадает" in line for line in result.details["failures"])
     assert any("минимальную цену" in line for line in result.details["manual_review"])
+
+
+def test_request_attachments_reports_missing_unknown_attachment():
+    package = _base_package()
+    package.purchase_request.attachments.append(
+        RequestAttachment(
+            number="6",
+            title_raw="Инструкция по заполнению характеристик в заявке",
+            normalized_document_type="unknown",
+            attachment_kind="other",
+        )
+    )
+
+    result = _by_id(run_checks(package))["strict.request.attachments"]
+
+    assert result.status == "failed"
+    assert result.details["missing_unknown"] == [
+        "Инструкция по заполнению характеристик в заявке"
+    ]
+    assert result.details["listed_count"] == 6
+    assert result.details["uploaded_count"] == 5
+    text = build_checks_report_text(ProcurementChecksReport.from_results(
+        package_id=package.package_id,
+        results=[result],
+    ))
+    assert "В обращении указано приложение, но файл не загружен" in text
 
 
 def test_code_mismatch_fails_and_missing_codes_manual_review():

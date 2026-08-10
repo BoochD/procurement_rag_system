@@ -401,11 +401,11 @@ def _price_source_requisites(raw_header: str | None) -> tuple[str | None, date |
     if not text:
         return None, None
     match = re.search(
-        r"письм\w*\s*(?:№\s*)?([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9./-]*)",
+        r"письм\w*\s*(?:№\s*)?(.+?)(?=\s+от\s+\d{1,2}[.]\d{1,2}[.]\d{4}\b|\)|$)",
         text,
         flags=re.IGNORECASE,
     )
-    return (clean_text(match.group(1)) if match else None), _date_from_text(text)
+    return (clean_text(match.group(1)).rstrip(".,;") if match else None), _date_from_text(text)
 
 
 def _explicit_stage_start_date(text: str | None) -> date | None:
@@ -1052,6 +1052,8 @@ def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> Schedule
 
 def _attachment_type(title: str) -> ExtractionDocumentType:
     lowered = title.casefold()
+    if "инструкц" in lowered:
+        return "unknown"
     if "заявк" in lowered or "план-график" in lowered:
         return "schedule_application"
     if "определение цены" in lowered or "обоснование" in lowered or "нмцк" in lowered:

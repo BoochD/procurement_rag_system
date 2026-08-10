@@ -65,6 +65,9 @@ SEMANTIC_CHECKS_PROMPT = """
 Для semantic.delivery_place адрес сравнивай точно. Разные номера дома, корпуса,
 строения или помещения являются подтверждённым расхождением и дают failed;
 их нельзя считать отличием форматирования. Например, «д. 001» и «д. 14» — failed.
+Не выводи внутренние рассуждения, правила, английские фразы или вопросительные
+комментарии. Различия только в пунктуации, сокращениях, «г.о. город», «г.» и
+«город», а также повтор одного адреса в ООЗ не являются расхождением.
 Для semantic.delivery_term сравнивай только сроки поставки/оказания услуг/выполнения работ.
 Не считай срок исполнения Контракта, срок действия Контракта, дату начала/окончания исполнения или общий срок
 исполнения Контракта противоречием сроку поставки. Например, "поставка в течение 15 рабочих дней" и
@@ -199,6 +202,14 @@ def _apply_delivery_place_guard(
         if baseline_numbers.isdisjoint(numbers)
     ]
     if not conflicts:
+        if _same_address_core([value for _label, value in values if value]):
+            return SemanticCheckFinding(
+                check_id=finding.check_id,
+                status="passed",
+                message="Адреса совпадают по городу, улице и номеру дома; различается только формат записи.",
+                compared_values=finding.compared_values,
+                evidence=finding.evidence,
+            )
         return finding
 
     baseline = ", ".join(sorted(baseline_numbers))
@@ -223,6 +234,20 @@ def _house_numbers(value: object) -> set[str]:
         re.sub(r"^0+(?=\d)", "", match.casefold())
         for match in matches
     }
+
+
+def _same_address_core(values: list[object]) -> bool:
+    streets: set[str] = set()
+    cities: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        street_match = re.search(r"(?i)(?:ул[.]?|улица)\s*([^,;.]+)", text)
+        city_matches = re.findall(r"(?i)(?:город|г[.]?)\s+([а-яёa-z-]+)", text)
+        if not street_match or not city_matches:
+            return False
+        streets.add(re.sub(r"\s+", " ", street_match.group(1)).strip(" .").casefold())
+        cities.add(city_matches[-1].casefold())
+    return len(streets) == 1 and len(cities) == 1
 
 
 def _extract_check(client, schema, prompt: str, payload: str):

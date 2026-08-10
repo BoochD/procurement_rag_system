@@ -5,7 +5,7 @@ from docx import Document
 
 from summary_model.domain.models import DocumentType, InputDocument
 from summary_model.extraction_cli import main as extraction_cli_main
-from summary_model.extraction_pipeline import _price_source_requisites, extract_package
+from summary_model.extraction_pipeline import _attachment_type, _price_source_requisites, extract_package
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
@@ -691,6 +691,19 @@ def test_price_source_requisites_are_extracted_from_supplier_header():
 
     assert number == "24/03-2"
     assert str(outgoing_date) == "2026-03-24"
+
+
+def test_price_source_requisites_keep_spaces_inside_outgoing_number():
+    number, outgoing_date = _price_source_requisites(
+        "Исполнитель 3 (письмо № КС-КП 26-140 от 30.04.2026)"
+    )
+
+    assert number == "КС-КП 26-140"
+    assert str(outgoing_date) == "2026-04-30"
+
+
+def test_instruction_attachment_is_not_treated_as_schedule_application():
+    assert _attachment_type("Инструкция по заполнению характеристик в заявке") == "unknown"
 
 
 def test_onmck_table_extracts_supplier_prices_and_recalculates(tmp_path):

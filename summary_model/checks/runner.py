@@ -522,6 +522,14 @@ def _check_commercial_offers_against_onmck(
     summary_lines = list(source_warnings)
     failures: list[str] = []
     manual: list[str] = []
+    source_reference_rows, source_reference_failures, source_reference_manual = _offer_source_reference_rows(
+        offers,
+        onmck,
+        offer_by_source,
+        source_ids,
+    )
+    failures.extend(source_reference_failures)
+    manual.extend(source_reference_manual)
     criterion_failures: dict[str, list[str]] = defaultdict(list)
     criterion_manual: dict[str, list[str]] = defaultdict(list)
     comparison_rows: list[dict[str, Any]] = []
@@ -743,6 +751,7 @@ def _check_commercial_offers_against_onmck(
                 "source_warnings": source_warnings,
                 "comparison_rows": comparison_rows,
                 "quantity_unit_rows": quantity_unit_rows,
+                "source_reference_rows": source_reference_rows,
                 "failures": failures,
                 "manual_review": manual,
                 "llm_matches": llm_matches or [],
@@ -753,6 +762,80 @@ def _check_commercial_offers_against_onmck(
             },
         )
     ]
+
+
+def _offer_source_reference_rows(
+    offers: list[Any],
+    onmck: Any,
+    offer_by_source: dict[str, Any],
+    source_ids: list[str],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    sources = {str(source.source_id): source for source in (onmck.price_sources or [])}
+    source_totals = dict(_supplier_total_prices(onmck.items))
+    rows: list[dict[str, Any]] = []
+    failures: list[str] = []
+    manual: list[str] = []
+    for source_id in source_ids:
+        source = sources.get(source_id)
+        offer = offer_by_source.get(source_id)
+        label = _supplier_label(source_id)
+        source_number = getattr(source, "outgoing_letter_number", None) if source else None
+        source_date = getattr(source, "outgoing_letter_date", None) if source else None
+        offer_number = getattr(offer, "outgoing_number", None) if offer else None
+        offer_date = (getattr(offer, "outgoing_date", None) or getattr(offer, "offer_date", None)) if offer else None
+        source_total = source_totals.get(source_id)
+        offer_total = _money(getattr(getattr(offer, "total_amount", None), "amount", None)) if offer else None
+        status = "passed"
+        reasons: list[str] = []
+        if offer is None:
+            status = "manual_review"
+            reasons.append("соответствующее КП не найдено")
+        elif not source_number or not source_date:
+            status = "manual_review"
+            reasons.append("номер или дата источника в ОНМЦК не извлечены")
+        else:
+            if not _same_requisite_number(source_number, offer_number):
+                status = "failed"
+                reasons.append("исходящий номер не совпадает")
+            if source_date != offer_date:
+                status = "failed"
+                reasons.append("дата не совпадает")
+        if offer is not None:
+            if source_total is None or offer_total is None:
+                if status != "failed":
+                    status = "manual_review"
+                reasons.append("сумму КП или сумму источника ОНМЦК не удалось сравнить")
+            elif source_total != offer_total:
+                status = "failed"
+                reasons.append("сумма КП не совпадает с суммой источника ОНМЦК")
+        message = f"{label}: {', '.join(reasons)}" if reasons else ""
+        if status == "failed":
+            failures.append(message)
+        elif status == "manual_review":
+            manual.append(message)
+        rows.append(
+            {
+                "source": label,
+                "offer_requisites": _requisites_text(offer_number, offer_date),
+                "nmck_requisites": _requisites_text(source_number, source_date),
+                "offer_total": _format_money(offer_total) if offer_total is not None else None,
+                "nmck_total": _format_money(source_total) if source_total is not None else None,
+                "status": status,
+            }
+        )
+    return rows, failures, manual
+
+
+def _same_requisite_number(left: object, right: object) -> bool:
+    def compact(value: object) -> str:
+        return re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "", str(value or "")).casefold()
+
+    return bool(compact(left) and compact(left) == compact(right))
+
+
+def _requisites_text(number: object, outgoing_date: object) -> str:
+    number_text = str(number or "не найден")
+    return f"{number_text} / {_format_date(outgoing_date)}"
 
 
 def _commercial_offer_llm_decision(
@@ -808,12 +891,6 @@ def _check_request_attachments(package: ProcurementPackageExtraction) -> list[Ch
                 fields=["purchase_request.attachments", "files.document_type"],
             )
         ]
-    uploaded = {item.document_type for item in package.files if item.document_type != "unknown"}
-    listed = {
-        item.normalized_document_type
-        for item in request.attachments
-        if item.normalized_document_type != "unknown"
-    }
     if not request.attachments:
         return [
             _result(
@@ -826,9 +903,41 @@ def _check_request_attachments(package: ProcurementPackageExtraction) -> list[Ch
                 fields=["purchase_request.attachments"],
             )
         ]
-    missing = sorted(listed - uploaded)
-    extra = sorted(uploaded - listed - {"commercial_offer", "purchase_request"})
-    if missing:
+    uploaded_files = [
+        item for item in package.files
+        if item.document_type not in {"commercial_offer", "purchase_request"}
+    ]
+    uploaded = {item.document_type for item in uploaded_files if item.document_type != "unknown"}
+    listed = {
+        item.normalized_document_type
+        for item in request.attachments
+        if item.normalized_document_type != "unknown"
+    }
+    unmatched_files = list(uploaded_files)
+    missing_attachments: list[str] = []
+    for attachment in request.attachments:
+        matched_index = _request_attachment_match_index(attachment, unmatched_files)
+        if matched_index is None:
+            missing_attachments.append(_attachment_display_title(attachment.title_raw))
+        else:
+            unmatched_files.pop(matched_index)
+    missing = sorted(
+        attachment.normalized_document_type
+        for attachment in request.attachments
+        if attachment.normalized_document_type != "unknown"
+        and _attachment_display_title(attachment.title_raw) in missing_attachments
+    )
+    unknown_missing = [
+        title for title in missing_attachments
+        if not any(
+            attachment.normalized_document_type != "unknown"
+            and _attachment_display_title(attachment.title_raw) == title
+            for attachment in request.attachments
+        )
+    ]
+    extra = sorted({item.document_type for item in unmatched_files if item.document_type != "unknown"})
+    count_mismatch = len(request.attachments) != len(uploaded_files)
+    if missing_attachments or count_mismatch:
         status = "failed"
         message = "В обращении указаны приложения, но соответствующие файлы не найдены."
     elif extra:
@@ -846,9 +955,53 @@ def _check_request_attachments(package: ProcurementPackageExtraction) -> list[Ch
             message,
             documents=["purchase_request"],
             fields=["purchase_request.attachments", "files.document_type"],
-            details={"listed": sorted(listed), "uploaded": sorted(uploaded), "missing": missing, "extra": extra},
+            details={
+                "listed": sorted(listed),
+                "uploaded": sorted(uploaded),
+                "missing": missing,
+                "missing_unknown": unknown_missing,
+                "missing_attachments": missing_attachments,
+                "listed_count": len(request.attachments),
+                "uploaded_count": len(uploaded_files),
+                "extra": extra,
+                "summary_lines": [
+                    f"В обращении перечислено приложений: {len(request.attachments)}; "
+                    f"в пакете загружено документов-приложений: {len(uploaded_files)}."
+                ],
+            },
         )
     ]
+
+
+def _request_attachment_match_index(attachment: Any, files: list[Any]) -> int | None:
+    document_type = getattr(attachment, "normalized_document_type", "unknown")
+    if document_type != "unknown":
+        for index, item in enumerate(files):
+            if item.document_type == document_type:
+                return index
+    expected_tokens = _attachment_name_tokens(getattr(attachment, "title_raw", None))
+    if len(expected_tokens) < 2:
+        return None
+    for index, item in enumerate(files):
+        candidate_tokens = _attachment_name_tokens(
+            f"{getattr(item, 'file_name', '')} {getattr(item, 'document_title', '')}"
+        )
+        if len(expected_tokens & candidate_tokens) >= 2:
+            return index
+    return None
+
+
+def _attachment_name_tokens(value: str | None) -> set[str]:
+    ignored = {"приложение", "документ", "закупка", "закупки", "для", "по", "в", "на"}
+    return {
+        token
+        for token in re.findall(r"[а-яёa-z0-9]+", normalize_text(value))
+        if len(token) >= 3 and token not in ignored
+    }
+
+
+def _attachment_display_title(value: str | None) -> str:
+    return str(value or "").splitlines()[0].rstrip(".") or "без названия"
 
 
 def _check_schedule_completeness(package: ProcurementPackageExtraction) -> list[CheckResult]:
@@ -2436,6 +2589,8 @@ def _check_delivery_term_against_plan(
         schedule = package.schedule_application
         purchase_description = package.purchase_description
         contract = package.contract_draft
+        stage_details = stage_result.details or {}
+        difference_summary = str(stage_details.get("difference_summary") or "")
         return _result(
             "strict.plan.delivery_term",
             "Срок поставки / оказания услуг",
@@ -2443,6 +2598,7 @@ def _check_delivery_term_against_plan(
             stage_result.mode,
             (
                 "Сроки проверены по этапам; итог совпадает с проверкой этапов исполнения."
+                + (f" {difference_summary}" if difference_summary else "")
             ),
             documents=list(stage_result.documents),
             fields=[
@@ -2456,10 +2612,16 @@ def _check_delivery_term_against_plan(
                 "summary_lines": [
                     "Заявка в план-график: "
                     f"{getattr(schedule, 'delivery_term_text', None) or 'не найдено'}",
-                    "Описание объекта закупки (ООЗ): "
-                    f"{getattr(purchase_description, 'delivery_term_text', None) or 'не найдено'}",
-                    "Проект контракта: "
-                    f"{getattr(contract, 'delivery_term_text', None) or 'не найдено'}",
+                    _delivery_term_with_stage_difference(
+                        "Описание объекта закупки (ООЗ)",
+                        getattr(purchase_description, "delivery_term_text", None),
+                        getattr(schedule, "stages", []) or [],
+                    ),
+                    _delivery_term_with_stage_difference(
+                        "Проект контракта",
+                        getattr(contract, "delivery_term_text", None),
+                        getattr(schedule, "stages", []) or [],
+                    ),
                 ],
             },
         )
@@ -2503,6 +2665,19 @@ def _check_delivery_term_against_plan(
         ],
     )
     return direct_result
+
+
+def _delivery_term_with_stage_difference(label: str, value: str | None, plan_stages: list[Any]) -> str:
+    text = value or "не найдено"
+    plan_end = max(
+        (end for stage in plan_stages if (end := getattr(stage, "service_end_date", None))),
+        default=None,
+    )
+    dates = re.findall(r"\b(\d{2}[.]\d{2}[.]\d{4})\b", text)
+    value_end = dates[-1] if dates else None
+    if plan_end and value_end and value_end != plan_end.strftime("%d.%m.%Y"):
+        return f"{label}: {text}, вместо {plan_end:%d.%m.%Y} из ПГ"
+    return f"{label}: {text}"
 
 
 def _plan_has_stages(package: ProcurementPackageExtraction) -> bool:
@@ -2631,7 +2806,7 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
         summary_lines.extend(comparison["summary_lines"])
         if comparison["failed"]:
             status = "failed"
-            message = "Этапы исполнения расходятся с заявкой в план-график."
+            message = comparison["difference_summary"] or "Этапы исполнения расходятся с заявкой в план-график."
         elif comparison["manual"]:
             status = "manual_review"
             message = "Этапы исполнения требуют ручной проверки."
@@ -2654,6 +2829,7 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
         ],
         details={
             "summary_lines": summary_lines,
+            "difference_summary": comparison.get("difference_summary") if has_plan_stages and plan_stages else None,
             "stage_tables": _stage_tables(package),
         },
     )
@@ -2757,7 +2933,37 @@ def _compare_stage_sets(
             elif match_status == "unknown":
                 manual.append(f"{label}: срок этапа {number} не удалось сравнить")
         summary_lines.append(f"{label}: {_stage_match_summary(plan_by_number, doc_by_number)}")
-    return {"failed": failed, "manual": manual, "summary_lines": summary_lines}
+    return {
+        "failed": failed,
+        "manual": manual,
+        "summary_lines": summary_lines,
+        "difference_summary": _stage_difference_summary(plan_stages, docs),
+    }
+
+
+def _stage_difference_summary(plan_stages: list[Any], docs: list[tuple[str, list[Any]]]) -> str | None:
+    plan_numbers = [clean_stage_number(getattr(stage, "stage_number", None)) for stage in plan_stages]
+    plan_numbers = [number for number in plan_numbers if number]
+    if not plan_numbers:
+        return None
+    grouped: dict[tuple[int, tuple[str, ...]], list[str]] = defaultdict(list)
+    for document_name, stages in docs:
+        if not stages:
+            continue
+        numbers = [clean_stage_number(getattr(stage, "stage_number", None)) for stage in stages]
+        numbers = [number for number in numbers if number]
+        missing = tuple(number for number in plan_numbers if number not in numbers)
+        if missing:
+            grouped[(len(numbers), missing)].append(DOCUMENT_LABELS.get(document_name, document_name))
+    if not grouped:
+        return None
+    (count, missing), labels = next(iter(grouped.items()))
+    document_text = ", ".join(labels)
+    stage_text = ", ".join(missing)
+    return (
+        f"В ПГ предусмотрено {len(plan_numbers)} этапа; в {document_text} — по {count}. "
+        f"Отсутствует этап {stage_text}."
+    )
 
 
 def _stage_terms_match(plan_stage: Any, document_stage: Any) -> str:

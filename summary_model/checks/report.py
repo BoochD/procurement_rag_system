@@ -225,6 +225,9 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
     ]
 
     lines.extend(_render_document_presence(by_id))
+    attachment_result = by_id.get("strict.request.attachments")
+    if attachment_result is not None:
+        lines.extend(_render_titled_result(attachment_result))
     lines.append("")
     lines.extend(_render_plan_regulatory_section(by_id))
     lines.append("")
@@ -232,7 +235,12 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
     lines.append("")
     lines.extend(_render_pp1875_section(by_id))
     lines.append("")
-    lines.extend(_render_internal_section(by_id, hidden_check_ids=hidden_check_ids))
+    lines.extend(
+        _render_internal_section(
+            by_id,
+            hidden_check_ids=hidden_check_ids | {"strict.request.attachments"},
+        )
+    )
     lines.append("")
     lines.extend(_render_semantic_section(by_id, hidden_check_ids=hidden_check_ids))
     lines.append("")
@@ -666,6 +674,14 @@ def _render_titled_result(result: CheckResult) -> list[str]:
         lines.extend(_security_lines(result.details))
     if result.check_id == "strict.contract.attachments" and result.details:
         lines.extend(_attachment_lines(result.details))
+    if result.check_id == "strict.request.attachments" and result.details:
+        missing_attachments = result.details.get("missing_attachments")
+        if isinstance(missing_attachments, list):
+            for title in missing_attachments:
+                if title:
+                    lines.append(
+                        f"  - В обращении указано приложение, но файл не загружен: {_human_text(str(title))}."
+                    )
     return lines
 
 
@@ -893,10 +909,29 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
         return ["", *_render_result(result)]
     source_warnings = details.get("source_warnings")
     if isinstance(source_warnings, list) and source_warnings:
-        lines.append(
-            "  <warn>В ОНМЦК не извлечены реквизиты источников; КП сопоставлены "
-            "с поставщиками по порядку загрузки.</warn>"
-        )
+        lines.extend(f"  <warn>{_human_text(str(warning))}</warn>" for warning in source_warnings[:3])
+    source_reference_rows = details.get("source_reference_rows")
+    if isinstance(source_reference_rows, list) and source_reference_rows:
+        lines.extend([
+            "",
+            "  <b>Реквизиты и суммы КП в ОНМЦК:</b>",
+            "",
+            "| Источник | КП: номер / дата | ОНМЦК: номер / дата | Сумма КП | Сумма ОНМЦК | Статус |",
+            "| :--- | :--- | :--- | ---: | ---: | :---: |",
+        ])
+        for row in source_reference_rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "| {source} | {offer} | {nmck} | {offer_total} | {nmck_total} | {status} |".format(
+                    source=_table_cell(row.get("source")),
+                    offer=_table_cell(row.get("offer_requisites")),
+                    nmck=_table_cell(row.get("nmck_requisites")),
+                    offer_total=_table_cell(row.get("offer_total") or "—"),
+                    nmck_total=_table_cell(row.get("nmck_total") or "—"),
+                    status=STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or "")),
+                )
+            )
     if isinstance(comparison_rows, list) and comparison_rows:
         lines.extend([
             "",
