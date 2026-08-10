@@ -401,6 +401,24 @@ def test_report_compacts_ktru_values_and_keeps_successful_matches_visible():
     assert "Допустимые значения КТРУ" not in text
 
 
+def test_report_shows_missing_plan_ktru_card():
+    report = _report(
+        _check_result(
+            "manual.ktru.plan_registry",
+            "Коды КТРУ из заявки в план-график",
+            "failed",
+            "Коды КТРУ из заявки в план-график не найдены в каталоге zakupki.gov.ru.",
+            details={
+                "ktru_cards": [{"code": "52.69.67.228-00000228", "not_found": True}],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "КТРУ 52.69.67.228-00000228 не найден в каталоге zakupki.gov.ru." in text
+
+
 def test_report_localizes_public_technical_terms_and_hides_service_rows():
     report = _report(
         _check_result(

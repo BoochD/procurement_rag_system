@@ -1757,6 +1757,23 @@ class FakeKtruRegistry:
         return Result()
 
 
+class PlanKtruRegistry(FakeKtruRegistry):
+    def check_ktru(self, ktru_code, name=None):
+        class Result:
+            found = ktru_code != "52.69.67.228-00000228"
+            common_info_url = f"https://example.test/{ktru_code}"
+            reference_name = "Тестовая запись" if found else None
+            exact_name_match = False
+            normalized_name_match = False
+            message = (
+                "КТРУ найден."
+                if found
+                else f"Не удалось найти карточку КТРУ {ktru_code}"
+            )
+
+        return Result()
+
+
 class FallbackKtruRegistry(FakeKtruRegistry):
     def __init__(self):
         self.common_info_called = False
@@ -1794,6 +1811,24 @@ def test_ktru_adapter_checks_characteristics_without_docx_parsing():
     assert results["manual.ktru.additional"].details["extra_characteristics"]
     assert results["manual.ktru.characteristics"].details["characteristic_rows"]
     assert results["manual.ktru.additional"].details["additional_rows"]
+
+
+def test_ktru_live_registry_uses_codes_from_schedule_application():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    package.schedule_application.ktru_codes = ["52.69.67.228-00000228"]
+    package.purchase_description.items[0].ktru_code = "20.59.12.120-00000002"
+
+    results = {
+        item.check_id: item
+        for item in run_ktru_characteristic_checks(package, registry=PlanKtruRegistry())
+    }
+
+    plan_registry = results["manual.ktru.plan_registry"]
+    assert plan_registry.status == "failed"
+    assert plan_registry.details["not_found_ktru"] == ["52.69.67.228-00000228"]
+    assert results["manual.ktru.characteristics"].details["ktru_cards"][0]["code"] == "20.59.12.120-00000002"
 
 
 def test_ktru_adapter_uses_common_info_fallback_and_visual_aliases():

@@ -78,6 +78,7 @@ SPECIAL_CHECKS = set(DOCUMENT_CHECK_ORDER + PLAN_REGULATORY_CHECK_ORDER + INTERN
     "manual.commercial_offers.count",
     "manual.commercial_offers.content",
     "manual.commercial_offers.onmck",
+    "manual.ktru.plan_registry",
     "manual.ktru.characteristics",
     "manual.ktru.additional",
     "manual.ktru.trademarks",
@@ -313,7 +314,7 @@ def _render_plan_regulatory_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 
 def _render_ktru_registry_section(by_id: dict[str, CheckResult]) -> list[str]:
-    result = by_id.get("manual.ktru.characteristics")
+    result = by_id.get("manual.ktru.plan_registry") or by_id.get("manual.ktru.characteristics")
     lines = ["2) Проверка КТРУ через сервис zakupki.gov.ru:"]
     if result is None:
         lines.append("- не выполнялась")
@@ -335,6 +336,10 @@ def _render_ktru_cards(result: CheckResult) -> list[str]:
         if not isinstance(card, dict):
             continue
         code = card.get("code") or "?"
+        if card.get("not_found"):
+            lines.append(f"- <error>КТРУ {code} не найден в каталоге zakupki.gov.ru.</error>")
+            lines.append("")
+            continue
         if card.get("unavailable"):
             lines.append(f"- <warn>КТРУ {code} не удалось получить через zakupki.gov.ru.</warn>")
             lines.append("")
@@ -344,7 +349,9 @@ def _render_ktru_cards(result: CheckResult) -> list[str]:
             lines.append(f"  Ссылка на товар: {card['url']}")
         reference_name = card.get("reference_name") or "не найдено"
         item_names = card.get("item_names") or []
-        if card.get("name_matches"):
+        if not item_names:
+            lines.append("  Наименование в заявке в план-график не извлечено; карточка проверена по коду.")
+        elif card.get("name_matches"):
             lines.append("  <ok>Наименование совпадает с эталонной записью КТРУ.</ok>")
         else:
             lines.append("  <warn>Наименование отличается от эталонной записи КТРУ или требует проверки.</warn>")

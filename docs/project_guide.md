@@ -364,6 +364,10 @@ exact OKPD2 match. Contract item tables are parsed for code completeness only;
 KTRU characteristics and additional-characteristic justifications remain owned
 by the standalone OOZ.
 
+Live KTRU card availability is checked against the KTRU inventory extracted
+from the plan. OOZ positions remain the source only for characteristic and
+additional-characteristic comparison.
+
 Application, contract-performance and warranty-security legality are reported
 once from the plan and its NMCK. The report does not create duplicate numeric
 comparisons against contract text or structured-EIS placeholders.

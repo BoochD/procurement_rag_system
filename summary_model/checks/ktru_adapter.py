@@ -54,6 +54,7 @@ def run_ktru_characteristic_checks(
     registry = registry or ProcurementReferenceRegistry(registry_dir)
     if fetch_timeout_seconds is not None:
         _apply_fetch_timeout(registry, fetch_timeout_seconds)
+    plan_registry_result = _check_plan_ktru_registry(package, registry)
     items = [
         item
         for item in (package.purchase_description.items if package.purchase_description else [])
@@ -61,6 +62,7 @@ def run_ktru_characteristic_checks(
     ]
     if not items:
         return [
+            plan_registry_result,
             _result(
                 "manual.ktru.characteristics",
                 "КТРУ-характеристики",
@@ -221,6 +223,7 @@ def run_ktru_characteristic_checks(
     justification_text = first_justification(ooz_justifications)
 
     return [
+        plan_registry_result,
         _result(
             "manual.ktru.characteristics",
             "КТРУ-характеристики",
@@ -276,6 +279,106 @@ def run_ktru_characteristic_checks(
             },
         ),
     ]
+
+
+def _check_plan_ktru_registry(
+    package: ProcurementPackageExtraction,
+    registry: Any,
+) -> CheckResult:
+    schedule = package.schedule_application
+    codes = sorted(
+        {
+            normalized
+            for raw_code in (getattr(schedule, "ktru_codes", []) or [])
+            if (normalized := normalize_code(raw_code))
+        }
+    )
+    if not codes:
+        return _result(
+            "manual.ktru.plan_registry",
+            "Коды КТРУ из заявки в план-график",
+            "manual_review",
+            "В заявке в план-график не найдены коды КТРУ для проверки через zakupki.gov.ru.",
+            {"ktru_cards": [], "source_document": "schedule_application"},
+        )
+
+    names_by_code: dict[str, list[str]] = {code: [] for code in codes}
+    for item in getattr(schedule, "included_goods", []) or []:
+        code = normalize_code(getattr(item, "ktru_code", None))
+        name = str(getattr(item, "name", "") or "").strip()
+        if code in names_by_code and name:
+            _append_unique(names_by_code[code], name)
+
+    cards: list[dict[str, Any]] = []
+    for code in codes:
+        item_names = names_by_code[code]
+        query_name = item_names[0] if len(item_names) == 1 else None
+        check_ktru = getattr(registry, "check_ktru", None)
+        if callable(check_ktru):
+            result = check_ktru(code, query_name)
+            message = str(getattr(result, "message", "") or "")
+            found = bool(getattr(result, "found", False))
+            not_found = not found and "не удалось найти карточку" in normalize_text(message)
+            cards.append(
+                {
+                    "code": code,
+                    "url": getattr(result, "common_info_url", None),
+                    "reference_name": getattr(result, "reference_name", None),
+                    "item_names": item_names,
+                    "name_matches": bool(
+                        getattr(result, "exact_name_match", False)
+                        or getattr(result, "normalized_name_match", False)
+                    ),
+                    "not_found": not_found,
+                    "unavailable": not found and not not_found,
+                    "message": message,
+                }
+            )
+            continue
+
+        # Lightweight test registries expose only the same lower-level method
+        # that the characteristic check already uses.
+        common_info = _safe_common_info(registry, code)
+        cards.append(
+            {
+                "code": code,
+                "url": (common_info or {}).get("url"),
+                "reference_name": (common_info or {}).get("name"),
+                "item_names": item_names,
+                "name_matches": False,
+                "not_found": False,
+                "unavailable": common_info is None,
+            }
+        )
+
+    not_found = [card["code"] for card in cards if card.get("not_found")]
+    unavailable = [card["code"] for card in cards if card.get("unavailable")]
+    status = "failed" if not_found else "manual_review" if unavailable else "passed"
+    message = (
+        "Коды КТРУ из заявки в план-график не найдены в каталоге zakupki.gov.ru."
+        if not_found
+        else "Не удалось получить часть карточек КТРУ из zakupki.gov.ru."
+        if unavailable
+        else "Коды КТРУ из заявки в план-график найдены в каталоге zakupki.gov.ru."
+    )
+    return _result(
+        "manual.ktru.plan_registry",
+        "Коды КТРУ из заявки в план-график",
+        status,
+        message,
+        {
+            "ktru_cards": cards,
+            "source_document": "schedule_application",
+            "not_found_ktru": not_found,
+            "unavailable_ktru": unavailable,
+            "summary_lines": [
+                "источник кодов: заявка в план-график",
+                f"проверено КТРУ: {len(cards)}",
+                *([f"не найдены: {', '.join(not_found)}"] if not_found else []),
+                *([f"недоступны: {', '.join(unavailable)}"] if unavailable else []),
+            ],
+        },
+    )
 
 
 def run_pp1875_checks(
