@@ -1815,6 +1815,7 @@ def test_ktru_adapter_checks_characteristics_without_docx_parsing():
 
 def test_ktru_live_registry_uses_codes_from_schedule_application():
     from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+    from summary_model.checks.runner import external_manual_checks_with_replacements
 
     package = _base_package()
     package.schedule_application.ktru_codes = ["52.69.67.228-00000228"]
@@ -1829,6 +1830,8 @@ def test_ktru_live_registry_uses_codes_from_schedule_application():
     assert plan_registry.status == "failed"
     assert plan_registry.details["not_found_ktru"] == ["52.69.67.228-00000228"]
     assert results["manual.ktru.characteristics"].details["ktru_cards"][0]["code"] == "20.59.12.120-00000002"
+    external = external_manual_checks_with_replacements(package, list(results.values()))
+    assert {item.check_id for item in external} >= {"manual.ktru.plan_registry"}
 
 
 def test_ktru_adapter_uses_common_info_fallback_and_visual_aliases():

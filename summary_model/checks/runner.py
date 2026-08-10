@@ -4288,6 +4288,7 @@ def _semantic_manual_checks(package: ProcurementPackageExtraction) -> list[Check
 
 def _external_manual_checks(package: ProcurementPackageExtraction) -> list[CheckResult]:
     checks = [
+        ("manual.ktru.plan_registry", "Коды КТРУ из заявки в план-график", ["schedule_application.ktru_codes"]),
         ("manual.ktru.characteristics", "КТРУ-характеристики", ["purchase_description.items[].characteristics"]),
         ("manual.ktru.additional", "Дополнительные характеристики КТРУ", ["purchase_description.items[].characteristics"]),
         ("manual.national_regime_1875", "Национальный режим / ПП №1875", ["schedule_application.national_regime_raw"]),
