@@ -7,6 +7,7 @@ from summary_model.domain.models import DocumentType
 from summary_model.extraction_pipeline import (
     _contract_draft,
     _delivery_place_from_ooz_section,
+    _line_after_marker,
     _purchase_description,
     _purchase_subject_from_ooz_section,
 )
@@ -81,6 +82,22 @@ def test_embedded_ooz_delivery_place_prefers_concrete_address():
         "Российская Федерация, Новосибирская область, г.о. город Новосибирск, г. Новосибирск, "
         "ул. Октябрьская, д. 52, каб. 213."
     )
+
+
+def test_contract_parser_extracts_service_term_separately_from_execution_placeholder():
+    text = """
+    3.3. Срок оказания Услуг Исполнителем по Контракту: с даты заключения Контракта по 21.08.2026.
+    9.2. Срок исполнения Контракта: указывается в структурированном виде (цифровой форме)
+    электронного контракта, сформированного с использованием единой информационной системы.
+    """
+
+    assert _line_after_marker(
+        text,
+        "срок оказания услуг",
+        "срок оказания",
+        "срок поставки",
+        "срок выполнения",
+    ) == "с даты заключения Контракта по 21.08.2026."
 
 
 CONTRACT_FIXTURES = [

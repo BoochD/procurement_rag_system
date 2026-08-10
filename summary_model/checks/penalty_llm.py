@@ -55,6 +55,9 @@ PENALTY_CHECK_PROMPT = """
 - пеня за просрочку;
 - штраф за непривлечение СМП/СОНКО, только если он ожидается.
 
+Если expected не содержит штраф за непривлечение СМП/СОНКО, не возвращай finding
+о нём: при отсутствии обязанности в ПГ это условие не проверяется.
+
 Поле label должно дословно содержать одно из русских названий выше. Не возвращай
 английские идентификаторы вида supplier_value_obligation_percent.
 
@@ -128,8 +131,6 @@ def _extract_check(client, schema, prompt: str, payload: str):
 
 
 def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object]) -> CheckResult:
-    findings = result.findings
-    status = _aggregate_status(result, findings)
     expected_labels = {
         "Штраф заказчика",
         "Штраф поставщика за стоимостное обязательство",
@@ -139,6 +140,12 @@ def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object
     expected = payload.get("expected")
     if isinstance(expected, dict) and expected.get("smp_sonko_fine_percent"):
         expected_labels.add("Штраф за непривлечение СМП/СОНКО")
+    findings = [
+        finding
+        for finding in result.findings
+        if _finding_label(finding.label) in expected_labels
+    ]
+    status = _aggregate_status(result, findings)
     passed_labels = {
         _finding_label(finding.label)
         for finding in findings

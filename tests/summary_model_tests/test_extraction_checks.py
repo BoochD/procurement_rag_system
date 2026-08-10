@@ -499,6 +499,25 @@ def test_delivery_term_uses_matching_stages_only_when_direct_fields_are_missing(
     result = checks["strict.plan.delivery_term"]
     assert result.status == "passed"
     assert result.details["comparison_source"] == "stages"
+    assert result.details["summary_lines"] == [
+        "Заявка в план-график: оказание услуг по этапам",
+        "Описание объекта закупки (ООЗ): не найдено",
+        "Проект контракта: не найдено",
+    ]
+
+
+def test_contract_execution_eis_placeholder_requires_manual_review():
+    package = _base_package()
+    package.schedule_application.contract_execution_term_text = "С даты заключения контракта по 06.10.2026"
+    package.contract_draft.contract_execution_term_text = (
+        "указывается в структурированном виде (цифровой форме) электронного контракта, "
+        "сформированного с использованием единой информационной системы в сфере закупок"
+    )
+
+    result = _by_id(run_checks(package))["strict.plan.contract_execution_term"]
+
+    assert result.status == "manual_review"
+    assert "фактический срок в загруженном файле отсутствует" in result.message
 
 
 def test_funding_source_eis_reference_requires_manual_review():
@@ -738,6 +757,50 @@ def test_penalty_result_is_passed_when_every_expected_finding_passed():
     assert "соответствуют" in check.report_text
 
 
+def test_penalty_llm_ignores_smp_fine_when_plan_does_not_require_subcontractors():
+    from summary_model.checks.penalty_llm import (
+        ContractPenaltyLLMResult,
+        PenaltyCheckFinding,
+        _to_check_result,
+    )
+
+    result = ContractPenaltyLLMResult(
+        status="manual_review",
+        message="Требуется проверка.",
+        findings=[
+            PenaltyCheckFinding(label=label, status="passed", message="Найдено.")
+            for label in (
+                "Штраф заказчика",
+                "Штраф поставщика за стоимостное обязательство",
+                "Штраф поставщика за нестоимостное обязательство",
+                "Пеня за просрочку",
+            )
+        ]
+        + [
+            PenaltyCheckFinding(
+                label="Штраф за непривлечение СМП/СОНКО",
+                status="manual_review",
+                message="Не найдено.",
+            )
+        ],
+    )
+
+    check = _to_check_result(
+        result,
+        {
+            "nmck": "100000.00",
+            "expected": {
+                "fixed_fine_amount": "1000.00",
+                "supplier_value_obligation_percent": "10",
+                "smp_sonko_fine_percent": None,
+            },
+        },
+    )
+
+    assert check.status == "passed"
+    assert not any("непривлечение СМП/СОНКО" in line for line in check.details["summary_lines"])
+
+
 def test_penalty_result_shows_source_clauses_when_llm_returns_no_findings():
     from summary_model.checks.penalty_llm import ContractPenaltyLLMResult, _to_check_result
 
@@ -807,6 +870,7 @@ def test_penalty_llm_public_result_uses_russian_labels_and_worst_status():
     from summary_model.checks.penalty_llm import run_penalty_llm_checks
 
     package = _base_package()
+    package.schedule_application.subcontract_smp_sonko_required = True
     package.contract_draft.responsibility_section_text = (
         "7. Ответственность сторон. 7.4. Штраф 100000 рублей. "
         "7.5. Пеня составляет 1/300 ключевой ставки."

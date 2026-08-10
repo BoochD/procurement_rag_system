@@ -525,6 +525,7 @@ def _check_commercial_offers_against_onmck(
     criterion_failures: dict[str, list[str]] = defaultdict(list)
     criterion_manual: dict[str, list[str]] = defaultdict(list)
     comparison_rows: list[dict[str, Any]] = []
+    quantity_unit_rows: list[dict[str, Any]] = []
 
     ooz_subject = getattr(package.purchase_description, "purchase_subject", None)
     for offer in offers:
@@ -551,6 +552,13 @@ def _check_commercial_offers_against_onmck(
         offer_prices: list[tuple[str, Decimal]] = []
         row_manual_start = len(manual)
         row_failures_start = len(failures)
+        quantity_manual_start = len(criterion_manual["quantity"])
+        unit_manual_start = len(criterion_manual["unit"])
+        quantity_failures_start = len(criterion_failures["quantity"])
+        unit_failures_start = len(criterion_failures["unit"])
+        price_failed = False
+        price_manual = False
+        matched_offer_items: dict[str, CommercialOfferItem] = {}
         for supplier_price in nmck_item.supplier_prices:
             offer = offer_by_source.get(supplier_price.source_id)
             source_label = _supplier_label(supplier_price.source_id)
@@ -559,6 +567,7 @@ def _check_commercial_offers_against_onmck(
                 manual.append(message)
                 for criterion in ("quantity", "unit_price", "unit"):
                     criterion_manual[criterion].append(message)
+                price_manual = True
                 continue
             offer_item_index = item_matches.get(supplier_price.source_id, {}).get(nmck_item_index)
             offer_item = (
@@ -588,7 +597,9 @@ def _check_commercial_offers_against_onmck(
                     manual.append(message)
                     for criterion in ("quantity", "unit_price", "unit"):
                         criterion_manual[criterion].append(message)
+                    price_manual = True
                     continue
+            matched_offer_items[supplier_price.source_id] = offer_item
             offer_unit_price = _money(offer_item.unit_price)
             nmck_unit_price = _money(supplier_price.unit_price)
             if offer_unit_price is not None:
@@ -600,12 +611,14 @@ def _check_commercial_offers_against_onmck(
                 )
                 manual.append(message)
                 criterion_manual["unit_price"].append(message)
+                price_manual = True
             elif offer_unit_price != nmck_unit_price:
                 message = (
                     f"{item_label}: {_commercial_offer_name(offer)} цена за единицу {_format_money(offer_unit_price)} не совпадает с ОНМЦК {_format_money(nmck_unit_price)}"
                 )
                 failures.append(message)
                 criterion_failures["unit_price"].append(message)
+                price_failed = True
             _compare_offer_item_to_reference(
                 item_label=item_label,
                 offer=offer,
@@ -633,22 +646,25 @@ def _check_commercial_offers_against_onmck(
                     f"{item_label}: минимальную цену по КП нельзя подтвердить, "
                     f"сопоставлено цен {len(offer_prices)} из {expected_prices_count}"
                 )
+                price_manual = True
             elif selected != minimum:
                 failures.append(
                     f"{item_label}: в ОНМЦК выбрана минимальная цена {_format_money(selected)}, фактический минимум по КП {_format_money(minimum)}"
                 )
+                price_failed = True
             summary_lines.append(
                 f"{item_label}: выбранная минимальная цена ОНМЦК {_format_money(selected)}; цены КП: {price_text}"
             )
         coefficient = _variation_coefficient([price for _, price in offer_prices])
         if coefficient is None:
             manual.append(f"{item_label}: коэффициент вариации по КП не рассчитан, недостаточно цен")
+            price_manual = True
         else:
             summary_lines.append(f"{item_label}: коэффициент вариации по КП {coefficient:.2f}%")
 
         row_failures = failures[row_failures_start:]
         row_manual = manual[row_manual_start:]
-        row_status = "failed" if row_failures else "manual_review" if row_manual else "passed"
+        price_status = "failed" if price_failed else "manual_review" if price_manual else "passed"
         prices_by_column: dict[str, str] = {}
         for source_id, price in offer_prices:
             source_index = _source_index(source_id)
@@ -663,8 +679,39 @@ def _check_commercial_offers_against_onmck(
                 "selected_min": _format_money(selected) if selected is not None else None,
                 "actual_min": _format_money(minimum) if minimum is not None else None,
                 "coefficient": f"{coefficient:.2f}%" if coefficient is not None else None,
-                "status": row_status,
+                "status": price_status,
                 "issues": row_failures + row_manual,
+            }
+        )
+        quantity_unit_failures = [
+            *criterion_failures["quantity"][quantity_failures_start:],
+            *criterion_failures["unit"][unit_failures_start:],
+        ]
+        quantity_unit_manual = [
+            *criterion_manual["quantity"][quantity_manual_start:],
+            *criterion_manual["unit"][unit_manual_start:],
+        ]
+        ooz_item = _match_reference_purchase_item(nmck_item, ooz_items)
+        quantity_by_column = {
+            f"offer_{source_index}": _quantity_unit_cell(offer_item)
+            for source_id, offer_item in matched_offer_items.items()
+            if (source_index := _source_index(source_id)) is not None
+        }
+        quantity_unit_rows.append(
+            {
+                "item": _short_report_text(item_label, limit=90),
+                "nmck": _quantity_unit_cell(nmck_item),
+                "ooz": _quantity_unit_cell(ooz_item),
+                "offer_1": quantity_by_column.get("offer_1"),
+                "offer_2": quantity_by_column.get("offer_2"),
+                "offer_3": quantity_by_column.get("offer_3"),
+                "status": (
+                    "failed"
+                    if quantity_unit_failures
+                    else "manual_review"
+                    if quantity_unit_manual
+                    else "passed"
+                ),
             }
         )
 
@@ -695,6 +742,7 @@ def _check_commercial_offers_against_onmck(
                 "summary_lines": summary_lines + manual + failures,
                 "source_warnings": source_warnings,
                 "comparison_rows": comparison_rows,
+                "quantity_unit_rows": quantity_unit_rows,
                 "failures": failures,
                 "manual_review": manual,
                 "llm_matches": llm_matches or [],
@@ -2385,6 +2433,9 @@ def _check_delivery_term_against_plan(
     stage_result: CheckResult,
 ) -> CheckResult:
     if _plan_has_stages(package):
+        schedule = package.schedule_application
+        purchase_description = package.purchase_description
+        contract = package.contract_draft
         return _result(
             "strict.plan.delivery_term",
             "Срок поставки / оказания услуг",
@@ -2394,8 +2445,23 @@ def _check_delivery_term_against_plan(
                 "Сроки проверены по этапам; итог совпадает с проверкой этапов исполнения."
             ),
             documents=list(stage_result.documents),
-            fields=list(stage_result.fields_compared),
-            details={"comparison_source": "stages"},
+            fields=[
+                *stage_result.fields_compared,
+                "schedule_application.delivery_term_text",
+                "purchase_description.delivery_term_text",
+                "contract_draft.delivery_term_text",
+            ],
+            details={
+                "comparison_source": "stages",
+                "summary_lines": [
+                    "Заявка в план-график: "
+                    f"{getattr(schedule, 'delivery_term_text', None) or 'не найдено'}",
+                    "Описание объекта закупки (ООЗ): "
+                    f"{getattr(purchase_description, 'delivery_term_text', None) or 'не найдено'}",
+                    "Проект контракта: "
+                    f"{getattr(contract, 'delivery_term_text', None) or 'не найдено'}",
+                ],
+            },
         )
     direct_result = _check_text_against_plan(
         package,
@@ -2497,6 +2563,15 @@ def _check_text_against_plan(
     elif not present_candidates:
         status = "manual_review"
         message = f"В других документах не найдены значения для сверки с заявкой: {title.lower()}."
+    elif (
+        check_id == "strict.plan.contract_execution_term"
+        and any(_is_eis_structured_placeholder(value) for _name, value in present_candidates)
+    ):
+        status = "manual_review"
+        message = (
+            "В проекте контракта срок исполнения указан только в структурированной форме ЕИС; "
+            "фактический срок в загруженном файле отсутствует и не может быть сверён с заявкой."
+        )
     else:
         mismatches = [
             (name, value)
@@ -2527,6 +2602,10 @@ def _text_values_match(left: str | None, right: str | None) -> bool:
     if not left_norm or not right_norm:
         return False
     return left_norm == right_norm or left_norm in right_norm or right_norm in left_norm
+
+
+def _is_eis_structured_placeholder(value: str | None) -> bool:
+    return "указывается в структурированном виде" in normalize_text(value)
 
 
 def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
@@ -4033,3 +4112,12 @@ def external_manual_checks_with_replacements(
 
 def _item_label(item: PurchaseItem | NmckItem) -> str:
     return str(item.name or item.row_number or "позиция")
+
+
+def _quantity_unit_cell(item: PurchaseItem | NmckItem | CommercialOfferItem | None) -> str:
+    if item is None:
+        return "не сопоставлено"
+    quantity = normalize_decimal(getattr(item, "quantity", None))
+    unit = str(getattr(item, "unit", "") or "").strip()
+    quantity_text = _format_decimal(quantity) if quantity is not None else "кол-во не распознано"
+    return f"{quantity_text} {unit or 'ед. не распознана'}"

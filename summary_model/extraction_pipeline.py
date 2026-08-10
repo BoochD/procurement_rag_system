@@ -1881,7 +1881,13 @@ def _calculate_nmck_item(item: NmckItem) -> None:
 def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseDescriptionSchema:
     text = _document_text(ir)
     warranty_section = _warranty_requirements_section(text)
-    delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
+    delivery_text = _line_after_marker(
+        text,
+        "срок оказания услуг",
+        "срок оказания",
+        "срок поставки",
+        "срок выполнения",
+    )
     stages = _stages_from_tables(tables)
     subject_codes = _subject_codes_from_document_text(text, evidence="ooz_text:codes")
     items = _purchase_items_from_tables(tables)
@@ -1919,7 +1925,13 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
 def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftSchema:
     text = _document_text(ir)
     embedded_warranty_section = _warranty_requirements_section(text)
-    delivery_text = _line_after_marker(text, "срок поставки", "срок выполнения")
+    delivery_text = _line_after_marker(
+        text,
+        "срок оказания услуг",
+        "срок оказания",
+        "срок поставки",
+        "срок выполнения",
+    )
     contract_execution_text = _line_value_after_marker(text, "срок исполнения контракта")
     contract_security_text = _contract_security_text(text)
     warranty_security_text = _contract_warranty_security_text(text)

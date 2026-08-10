@@ -918,20 +918,51 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
                     status=STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or "")),
                 )
             )
+    quantity_unit_rows = details.get("quantity_unit_rows")
+    if isinstance(quantity_unit_rows, list) and quantity_unit_rows:
+        lines.extend([
+            "",
+            "  <b>Количество и единицы измерения:</b>",
+            "",
+            "| Позиция | ОНМЦК | ООЗ | КП №1 | КП №2 | КП №3 | Статус |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ])
+        for row in quantity_unit_rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "| {item} | {nmck} | {ooz} | {offer_1} | {offer_2} | {offer_3} | {status} |".format(
+                    item=_table_cell(row.get("item")),
+                    nmck=_table_cell(row.get("nmck")),
+                    ooz=_table_cell(row.get("ooz")),
+                    offer_1=_table_cell(row.get("offer_1") or "—"),
+                    offer_2=_table_cell(row.get("offer_2") or "—"),
+                    offer_3=_table_cell(row.get("offer_3") or "—"),
+                    status=STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or "")),
+                )
+            )
     manual = details.get("manual_review") or []
     failures = details.get("failures") or []
-    if isinstance(manual, list) and manual:
-        manual_rows = [row for row in comparison_rows or [] if isinstance(row, dict) and row.get("status") == "manual_review"]
-        lines.append(f"  Требуют ручной сверки: {len(manual_rows)} позиций.")
-        for reason in list(dict.fromkeys(_human_text(str(value)) for value in manual if value))[:5]:
+    criteria = details.get("criteria") or []
+    quantity_unit_issues = {
+        str(issue)
+        for criterion in criteria
+        if isinstance(criterion, dict) and criterion.get("key") in {"quantity", "unit"}
+        for issue in (criterion.get("issues") or [])
+    }
+    manual_to_render = [value for value in manual if str(value) not in quantity_unit_issues]
+    failures_to_render = [value for value in failures if str(value) not in quantity_unit_issues]
+    if isinstance(manual_to_render, list) and manual_to_render:
+        lines.append("  <b>Дополнительные причины ручной сверки:</b>")
+        for reason in list(dict.fromkeys(_human_text(str(value)) for value in manual_to_render if value))[:5]:
             lines.append(f"  - {reason}")
-        if len(set(str(value) for value in manual if value)) > 5:
+        if len(set(str(value) for value in manual_to_render if value)) > 5:
             lines.append("  - Остальные причины сохранены в файле подробных результатов.")
-    if isinstance(failures, list) and failures:
+    if isinstance(failures_to_render, list) and failures_to_render:
         lines.append("  <error>Подтверждённые расхождения:</error>")
-        lines.extend(f"  - {_human_text(value)}" for value in failures[:6])
-        if len(failures) > 6:
-            lines.append(f"  - ещё {len(failures) - 6}; полный список сохранён в файле подробных результатов.")
+        lines.extend(f"  - {_human_text(value)}" for value in failures_to_render[:6])
+        if len(failures_to_render) > 6:
+            lines.append(f"  - ещё {len(failures_to_render) - 6}; полный список сохранён в файле подробных результатов.")
     return lines
 
 

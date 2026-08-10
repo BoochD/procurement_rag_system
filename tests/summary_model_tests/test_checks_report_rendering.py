@@ -229,6 +229,17 @@ def test_report_renders_commercial_offer_comparison_as_one_compact_table():
                         "status": "passed",
                     }
                 ],
+                "quantity_unit_rows": [
+                    {
+                        "item": "Сервер",
+                        "nmck": "4 шт.",
+                        "ooz": "4 шт.",
+                        "offer_1": "4 шт.",
+                        "offer_2": "4 шт.",
+                        "offer_3": "4 шт.",
+                        "status": "passed",
+                    }
+                ],
                 "manual_review": [],
                 "failures": [],
             },
@@ -239,6 +250,8 @@ def test_report_renders_commercial_offer_comparison_as_one_compact_table():
 
     assert "| Позиция | КП №1 | КП №2 | КП №3 | Минимум ОНМЦК | Минимум КП | Коэф. вариации | Статус |" in text
     assert "| Сервер | 10300000.00 | 10470000.00 | 10245000.00 | 10245000.00 | 10245000.00 | 0.90% | ОК |" in text
+    assert "| Позиция | ОНМЦК | ООЗ | КП №1 | КП №2 | КП №3 | Статус |" in text
+    assert "| Сервер | 4 шт. | 4 шт. | 4 шт. | 4 шт. | 4 шт. | ОК |" in text
     assert "выбранная минимальная цена" not in text
 
 
