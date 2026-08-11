@@ -557,8 +557,7 @@ def _check_commercial_offers_against_onmck(
             criterion_failures["subject"].append(message)
 
     for nmck_item_index, nmck_item in enumerate(onmck.items):
-        if _is_nmck_stage_row(nmck_item, onmck.stages):
-            continue
+        is_stage_row = _is_nmck_stage_row(nmck_item, onmck.stages)
         item_label = _item_label(nmck_item)
         offer_prices: list[tuple[str, Decimal]] = []
         row_manual_start = len(manual)
@@ -630,17 +629,18 @@ def _check_commercial_offers_against_onmck(
                 failures.append(message)
                 criterion_failures["unit_price"].append(message)
                 price_failed = True
-            _compare_offer_item_to_reference(
-                item_label=item_label,
-                offer=offer,
-                offer_item=offer_item,
-                nmck_item=nmck_item,
-                ooz_items=ooz_items,
-                failures=failures,
-                manual=manual,
-                criterion_failures=criterion_failures,
-                criterion_manual=criterion_manual,
-            )
+            if not is_stage_row:
+                _compare_offer_item_to_reference(
+                    item_label=item_label,
+                    offer=offer,
+                    offer_item=offer_item,
+                    nmck_item=nmck_item,
+                    ooz_items=ooz_items,
+                    failures=failures,
+                    manual=manual,
+                    criterion_failures=criterion_failures,
+                    criterion_manual=criterion_manual,
+                )
             _check_offer_row_total(item_label, offer, offer_item, failures, manual)
 
         selected = _money(nmck_item.selected_min_unit_price)
@@ -690,10 +690,16 @@ def _check_commercial_offers_against_onmck(
                 "selected_min": _format_money(selected) if selected is not None else None,
                 "actual_min": _format_money(minimum) if minimum is not None else None,
                 "coefficient": f"{coefficient:.2f}%" if coefficient is not None else None,
+                "nmck_quantity": _quantity_unit_cell(nmck_item),
+                "offer_1_quantity": _quantity_unit_cell(matched_offer_items.get("supplier_1")),
+                "offer_2_quantity": _quantity_unit_cell(matched_offer_items.get("supplier_2")),
+                "offer_3_quantity": _quantity_unit_cell(matched_offer_items.get("supplier_3")),
                 "status": price_status,
                 "issues": row_failures + row_manual,
             }
         )
+        if is_stage_row:
+            continue
         quantity_unit_failures = [
             *criterion_failures["quantity"][quantity_failures_start:],
             *criterion_failures["unit"][unit_failures_start:],

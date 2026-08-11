@@ -1217,7 +1217,7 @@ def test_commercial_offers_count_and_onmck_match_pass_with_three_offers():
     assert checks["manual.commercial_offers.content"].details["total_criterion"]["status"] == "passed"
 
 
-def test_commercial_offer_product_check_skips_nmck_stage_rows():
+def test_commercial_offer_price_check_keeps_nmck_stage_rows_out_of_ooz_quantity_table():
     package = _base_package()
     package.commercial_offers_found_count = 3
     package.commercial_offers = [
@@ -1225,13 +1225,30 @@ def test_commercial_offer_product_check_skips_nmck_stage_rows():
         _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
         _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110")),
     ]
+    for offer, price in zip(package.commercial_offers, (Decimal("10"), Decimal("12"), Decimal("11"))):
+        offer.items.append(
+            CommercialOfferItem(
+                row_number="2",
+                name="Подготовка технической документации",
+                unit="усл. ед.",
+                quantity=Decimal("1"),
+                unit_price=price,
+                total_price=price,
+            )
+        )
     package.nmck_justification.items.insert(
         0,
         NmckItem(
             row_number="1",
             name="Подготовка технической документации",
+            unit="усл. ед.",
             quantity=Decimal("1"),
-            supplier_prices=[],
+            supplier_prices=[
+                SupplierPrice(source_id="supplier_1", unit_price=Decimal("10"), row_total=Decimal("10")),
+                SupplierPrice(source_id="supplier_2", unit_price=Decimal("12"), row_total=Decimal("12")),
+                SupplierPrice(source_id="supplier_3", unit_price=Decimal("11"), row_total=Decimal("11")),
+            ],
+            selected_min_unit_price=Decimal("10"),
         ),
     )
     package.nmck_justification.stages = [
@@ -1240,7 +1257,11 @@ def test_commercial_offer_product_check_skips_nmck_stage_rows():
 
     result = _by_id(run_checks(package))["manual.commercial_offers.onmck"]
 
-    assert [row["item"] for row in result.details["comparison_rows"]] == ["Картридж"]
+    assert [row["item"] for row in result.details["comparison_rows"]] == [
+        "Подготовка технической документации",
+        "Картридж",
+    ]
+    assert result.details["comparison_rows"][0]["offer_1_quantity"] == "1 усл. ед."
     assert [row["item"] for row in result.details["quantity_unit_rows"]] == ["Картридж"]
     assert not any("Подготовка технической документации" in line for line in result.details["manual_review"])
 

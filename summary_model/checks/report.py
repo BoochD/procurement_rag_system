@@ -979,10 +979,10 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
             lines.append(
                 "| {item} | {nmck} | {offer_1} | {offer_2} | {offer_3} | {status} |".format(
                     item=_table_cell(price_row.get("item")),
-                    nmck=_unit_price_with_quantity(price_row.get("selected_min"), quantity_row.get("nmck")),
-                    offer_1=_unit_price_with_quantity(price_row.get("offer_1"), quantity_row.get("offer_1")),
-                    offer_2=_unit_price_with_quantity(price_row.get("offer_2"), quantity_row.get("offer_2")),
-                    offer_3=_unit_price_with_quantity(price_row.get("offer_3"), quantity_row.get("offer_3")),
+                    nmck=_unit_price_with_quantity(price_row.get("selected_min"), price_row.get("nmck_quantity") or quantity_row.get("nmck")),
+                    offer_1=_unit_price_with_quantity(price_row.get("offer_1"), price_row.get("offer_1_quantity") or quantity_row.get("offer_1")),
+                    offer_2=_unit_price_with_quantity(price_row.get("offer_2"), price_row.get("offer_2_quantity") or quantity_row.get("offer_2")),
+                    offer_3=_unit_price_with_quantity(price_row.get("offer_3"), price_row.get("offer_3_quantity") or quantity_row.get("offer_3")),
                     status=STATUS_LABELS.get(str(price_row.get("status")), str(price_row.get("status") or "")),
                 )
             )
