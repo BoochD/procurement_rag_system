@@ -1217,6 +1217,34 @@ def test_commercial_offers_count_and_onmck_match_pass_with_three_offers():
     assert checks["manual.commercial_offers.content"].details["total_criterion"]["status"] == "passed"
 
 
+def test_commercial_offer_product_check_skips_nmck_stage_rows():
+    package = _base_package()
+    package.commercial_offers_found_count = 3
+    package.commercial_offers = [
+        _commercial_offer(supplier_name="Поставщик 1", unit_price=Decimal("100")),
+        _commercial_offer(supplier_name="Поставщик 2", unit_price=Decimal("120")),
+        _commercial_offer(supplier_name="Поставщик 3", unit_price=Decimal("110")),
+    ]
+    package.nmck_justification.items.insert(
+        0,
+        NmckItem(
+            row_number="1",
+            name="Подготовка технической документации",
+            quantity=Decimal("1"),
+            supplier_prices=[],
+        ),
+    )
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", stage_name="Подготовка технической документации")
+    ]
+
+    result = _by_id(run_checks(package))["manual.commercial_offers.onmck"]
+
+    assert [row["item"] for row in result.details["comparison_rows"]] == ["Картридж"]
+    assert [row["item"] for row in result.details["quantity_unit_rows"]] == ["Картридж"]
+    assert not any("Подготовка технической документации" in line for line in result.details["manual_review"])
+
+
 def test_commercial_offer_subject_is_compared_with_ooz():
     package = _base_package()
     package.commercial_offers_found_count = 3
@@ -1360,6 +1388,18 @@ def test_contract_attachment_missing_tables_fails():
     checks = _by_id(run_checks(package))
 
     assert checks["strict.contract.attachments"].status == "failed"
+
+
+def test_contract_attachment_accepts_embedded_purchase_description():
+    package = _base_package()
+    package.purchase_description = None
+    package.contract_draft.embedded_purchase_description = PurchaseDescriptionSchema(
+        purchase_subject="Картридж",
+    )
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.contract.attachments"].status == "passed"
 
 
 def test_security_checks_use_only_plan_values():
@@ -1506,6 +1546,20 @@ def test_application_security_uses_twenty_million_boundary():
     schedule.nmck = MoneyValue(amount=Decimal("20000000.01"))
     schedule.application_security = SecurityValue(raw="5%", value_percent=Decimal("5"))
     assert _by_id(run_checks(package))["strict.application_security"].status == "passed"
+
+
+def test_additional_participant_requirements_use_twenty_million_boundary():
+    package = _base_package()
+    schedule = package.schedule_application
+    schedule.nmck = MoneyValue(amount=Decimal("20000000"))
+    schedule.additional_requirements_raw = None
+    assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "not_applicable"
+
+    schedule.nmck = MoneyValue(amount=Decimal("20000000.01"))
+    assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "failed"
+
+    schedule.additional_requirements_raw = "Не установлены"
+    assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "passed"
 
 
 def test_contract_security_uses_fifty_million_boundary():

@@ -82,6 +82,7 @@ def run_checks(
     results.extend(_check_plan_ground_truth(package, stage_results=stage_results))
     results.extend(_check_funding_source(package))
     results.extend(_check_securities(package))
+    results.append(_check_additional_participant_requirements(package))
     results.extend(_check_plan_national_regime_fields(package, registry=pp1875_registry))
     results.extend(penalty_results if penalty_results is not None else _check_contract_penalties(package))
     results.extend(_check_smp_sonko_subcontract(package))
@@ -556,6 +557,8 @@ def _check_commercial_offers_against_onmck(
             criterion_failures["subject"].append(message)
 
     for nmck_item_index, nmck_item in enumerate(onmck.items):
+        if _is_nmck_stage_row(nmck_item, onmck.stages):
+            continue
         item_label = _item_label(nmck_item)
         offer_prices: list[tuple[str, Decimal]] = []
         row_manual_start = len(manual)
@@ -2176,6 +2179,15 @@ def _check_offer_row_total(
         )
 
 
+def _is_nmck_stage_row(item: NmckItem, stages: list[Any]) -> bool:
+    """Keep execution-stage rows out of the product-only commercial-offer check."""
+    return any(
+        _names_close(item.name, getattr(stage, "stage_name", None))
+        for stage in stages
+        if getattr(stage, "stage_name", None)
+    )
+
+
 def _match_reference_purchase_item(
     item: NmckItem,
     reference_items: list[PurchaseItem],
@@ -3090,6 +3102,47 @@ def _check_securities(package: ProcurementPackageExtraction) -> list[CheckResult
         _check_contract_security_limits(schedule_contract_security, nmck, method, contract_exception),
         _check_warranty_security_limits(schedule_warranty_security, nmck),
     ]
+
+
+def _check_additional_participant_requirements(
+    package: ProcurementPackageExtraction,
+) -> CheckResult:
+    schedule = package.schedule_application
+    nmck = _money_amount(schedule.nmck) if schedule else None
+    raw_value = str(getattr(schedule, "additional_requirements_raw", "") or "").strip()
+    threshold = Decimal("20000000")
+
+    if nmck is None:
+        status = "manual_review"
+        message = "НМЦК не извлечена из заявки в план-график; заполненность строки о дополнительных требованиях проверить нельзя."
+    elif nmck <= threshold:
+        status = "not_applicable"
+        message = "НМЦК не превышает 20 млн руб.; проверка заполненности строки о дополнительных требованиях не применяется."
+    elif raw_value:
+        status = "passed"
+        message = "Строка о дополнительных требованиях к участникам закупки заполнена в заявке в план-график."
+    else:
+        status = "failed"
+        message = "При НМЦК свыше 20 млн руб. строка о дополнительных требованиях к участникам закупки не заполнена или не извлечена из ПГ."
+
+    return _result(
+        "strict.plan.additional_participant_requirements",
+        "Дополнительные требования к участникам закупки",
+        status,
+        "strict",
+        message,
+        documents=["schedule_application"],
+        fields=[
+            "schedule_application.nmck",
+            "schedule_application.additional_requirements_raw",
+        ],
+        details={
+            "summary_lines": [
+                f"НМЦК: {_format_decimal(nmck) if nmck is not None else 'не извлечена'} руб.",
+                f"Заявка в план-график: {raw_value or 'не заполнено / не извлечено'}",
+            ],
+        },
+    )
 
 
 def _check_application_security(
@@ -4233,8 +4286,12 @@ def _check_contract_attachments(package: ProcurementPackageExtraction) -> list[C
         ]
     failures = []
     for attachment in contract.referenced_attachments:
-        if attachment.attachment_kind == "purchase_description" and package.purchase_description is None:
-            failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует отдельный документ ООЗ.")
+        if (
+            attachment.attachment_kind == "purchase_description"
+            and package.purchase_description is None
+            and contract.embedded_purchase_description is None
+        ):
+            failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' не найдено в проекте контракта.")
         elif attachment.attachment_kind == "contract_specification" and not contract.specification_items:
             failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует таблицу спецификации.")
     if failures:

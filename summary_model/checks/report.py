@@ -49,6 +49,7 @@ PLAN_REGULATORY_CHECK_ORDER = [
     "strict.application_security",
     "strict.plan.contract_security_limits",
     "strict.plan.warranty_security_limits",
+    "strict.plan.additional_participant_requirements",
     "strict.plan.national_regime_fields",
 ]
 
@@ -961,6 +962,30 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
                 )
             )
     quantity_unit_rows = details.get("quantity_unit_rows")
+    if isinstance(comparison_rows, list) and comparison_rows and isinstance(quantity_unit_rows, list):
+        lines.extend([
+            "",
+            "  <b>Цена за единицу и количество:</b>",
+            "",
+            "| Позиция | ОНМЦК | КП №1 | КП №2 | КП №3 | Статус |",
+            "| :--- | ---: | ---: | ---: | ---: | :---: |",
+        ])
+        for index, price_row in enumerate(comparison_rows):
+            if not isinstance(price_row, dict):
+                continue
+            quantity_row = quantity_unit_rows[index] if index < len(quantity_unit_rows) else {}
+            if not isinstance(quantity_row, dict):
+                quantity_row = {}
+            lines.append(
+                "| {item} | {nmck} | {offer_1} | {offer_2} | {offer_3} | {status} |".format(
+                    item=_table_cell(price_row.get("item")),
+                    nmck=_unit_price_with_quantity(price_row.get("selected_min"), quantity_row.get("nmck")),
+                    offer_1=_unit_price_with_quantity(price_row.get("offer_1"), quantity_row.get("offer_1")),
+                    offer_2=_unit_price_with_quantity(price_row.get("offer_2"), quantity_row.get("offer_2")),
+                    offer_3=_unit_price_with_quantity(price_row.get("offer_3"), quantity_row.get("offer_3")),
+                    status=STATUS_LABELS.get(str(price_row.get("status")), str(price_row.get("status") or "")),
+                )
+            )
     if isinstance(quantity_unit_rows, list) and quantity_unit_rows:
         lines.extend([
             "",
@@ -1070,6 +1095,12 @@ def _unique_issue_positions(values: list[object]) -> list[str]:
         if position and position not in result:
             result.append(position)
     return result
+
+
+def _unit_price_with_quantity(price: object, quantity: object) -> str:
+    if price in (None, "", "—") or quantity in (None, "", "—"):
+        return "—"
+    return f"{_table_cell(price)} × {_table_cell(quantity)}"
 
 
 def _table_cell(value: object) -> str:

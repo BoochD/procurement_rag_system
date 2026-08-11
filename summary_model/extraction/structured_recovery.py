@@ -579,6 +579,14 @@ def parse_json_object(value: Any) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
+        # Some providers close a valid root object and then append a malformed
+        # metadata field. Preserve the valid structured payload in that case.
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and text[end:].lstrip().startswith(","):
+            return parsed
         repaired = _close_truncated_json(text)
         if repaired is None:
             return None

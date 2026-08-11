@@ -12,6 +12,10 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
         "trademark justifications. Store a visible trademark separately in trademark "
         "and its explicit justification in trademark_justification_text. Leave both "
         "fields null when they are not visible. Do not turn explanatory "
+        "For each product, extract its quantity and unit: read a separate unit column "
+        "when present, or use the quantity-header qualifier (for example, 'Количество, "
+        "штук' means unit 'Штука'). Do not use units of technical characteristics as "
+        "the product unit. "
         "justification paragraphs into separate items. If a row only justifies "
         "additional characteristics, put it into notes or warnings. Formal rows "
         "such as 'Предоставляемые лицензии ... необходимы ...', compatibility "
@@ -102,6 +106,11 @@ Rules:
 - Preserve OKPD2 and KTRU codes exactly.
 - Preserve quantities, units, prices, dates, and stage numbers as raw text.
 - If a row continues the previous item, attach it to the previous item instead of creating a fake item.
+- Return only keys declared in the supplied schema. In particular, a
+  characteristic may contain only row_index, name, value, unit, is_additional,
+  and source_note: never add raw_text or warnings to each characteristic.
+- Do not add warnings to individual item rows. Use the single top-level warnings
+  array only when it is needed. Close each item object before starting the next item.
 - If the target role is additional_characteristics_justification, store explicit
   reasons in justifications. For other roles, explanatory text is not a product item.
 - Except for the additional_characteristics_justification role, formal explanatory rows are not items:

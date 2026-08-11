@@ -28,6 +28,10 @@ class RequiredRow(BaseModel):
     quantity: Decimal | None = None
 
 
+def test_parse_json_object_keeps_valid_root_before_malformed_metadata_tail():
+    assert parse_json_object('{"items": []}, "warnings": []}') == {"items": []}
+
+
 def test_recovery_converts_numeric_string_fields_and_ignores_empty_list_rows():
     from summary_model.vlm_lab.models import VlmTableExtraction
 

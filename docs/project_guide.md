@@ -372,6 +372,11 @@ Application, contract-performance and warranty-security legality are reported
 once from the plan and its NMCK. The report does not create duplicate numeric
 comparisons against contract text or structured-EIS placeholders.
 
+For a plan NMCK above 20 million rubles, the regulatory section also checks
+that the plan row for additional participant requirements is populated. This
+is a field-completeness check only; it does not assess the legal sufficiency of
+the stated requirements.
+
 PP No. 1875 plan-field resolution is shared by the early plan check and the
 KTRU additional-characteristic check. A special position (25, 26 or 32 of
 appendix 1; 191-361 of appendix 2) forbids additional characteristics only when
