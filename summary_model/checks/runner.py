@@ -677,6 +677,12 @@ def _check_commercial_offers_against_onmck(
         row_manual = manual[row_manual_start:]
         price_status = "failed" if price_failed else "manual_review" if price_manual else "passed"
         prices_by_column: dict[str, str] = {}
+        nmck_prices_by_column: dict[str, str] = {}
+        for supplier_price in nmck_item.supplier_prices:
+            source_index = _source_index(supplier_price.source_id)
+            unit_price = _money(supplier_price.unit_price)
+            if source_index is not None and unit_price is not None:
+                nmck_prices_by_column[f"nmck_{source_index}"] = _format_money(unit_price)
         for source_id, price in offer_prices:
             source_index = _source_index(source_id)
             if source_index is not None:
@@ -684,6 +690,9 @@ def _check_commercial_offers_against_onmck(
         comparison_rows.append(
             {
                 "item": _short_report_text(item_label, limit=90),
+                "nmck_1": nmck_prices_by_column.get("nmck_1"),
+                "nmck_2": nmck_prices_by_column.get("nmck_2"),
+                "nmck_3": nmck_prices_by_column.get("nmck_3"),
                 "offer_1": prices_by_column.get("offer_1"),
                 "offer_2": prices_by_column.get("offer_2"),
                 "offer_3": prices_by_column.get("offer_3"),

@@ -967,8 +967,8 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
             "",
             "  <b>Цена за единицу и количество:</b>",
             "",
-            "| Позиция | ОНМЦК | КП №1 | КП №2 | КП №3 | Статус |",
-            "| :--- | ---: | ---: | ---: | ---: | :---: |",
+            "| Позиция | ОНМЦК №1 | КП №1 | ОНМЦК №2 | КП №2 | ОНМЦК №3 | КП №3 | Статус |",
+            "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |",
         ])
         for index, price_row in enumerate(comparison_rows):
             if not isinstance(price_row, dict):
@@ -977,11 +977,13 @@ def _render_commercial_offer_comparison(result: CheckResult) -> list[str]:
             if not isinstance(quantity_row, dict):
                 quantity_row = {}
             lines.append(
-                "| {item} | {nmck} | {offer_1} | {offer_2} | {offer_3} | {status} |".format(
+                "| {item} | {nmck_1} | {offer_1} | {nmck_2} | {offer_2} | {nmck_3} | {offer_3} | {status} |".format(
                     item=_table_cell(price_row.get("item")),
-                    nmck=_unit_price_with_quantity(price_row.get("selected_min"), price_row.get("nmck_quantity") or quantity_row.get("nmck")),
+                    nmck_1=_unit_price_with_quantity(price_row.get("nmck_1"), price_row.get("nmck_quantity") or quantity_row.get("nmck")),
                     offer_1=_unit_price_with_quantity(price_row.get("offer_1"), price_row.get("offer_1_quantity") or quantity_row.get("offer_1")),
+                    nmck_2=_unit_price_with_quantity(price_row.get("nmck_2"), price_row.get("nmck_quantity") or quantity_row.get("nmck")),
                     offer_2=_unit_price_with_quantity(price_row.get("offer_2"), price_row.get("offer_2_quantity") or quantity_row.get("offer_2")),
+                    nmck_3=_unit_price_with_quantity(price_row.get("nmck_3"), price_row.get("nmck_quantity") or quantity_row.get("nmck")),
                     offer_3=_unit_price_with_quantity(price_row.get("offer_3"), price_row.get("offer_3_quantity") or quantity_row.get("offer_3")),
                     status=STATUS_LABELS.get(str(price_row.get("status")), str(price_row.get("status") or "")),
                 )
