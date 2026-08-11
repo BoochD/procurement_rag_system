@@ -3,7 +3,7 @@ from __future__ import annotations
 from summary_model.vlm_lab.models import VlmTableRole
 
 
-VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.4"
+VLM_TABLE_PROMPT_VERSION = "vlm-table-prompts-0.1.6"
 
 
 ROLE_NOTES: dict[VlmTableRole, str] = {
@@ -31,6 +31,11 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
     "nmck_calculation": (
         "Extract NMCK calculation rows, supplier/executor prices, selected "
         "minimum unit prices, row totals, parent stage numbers, and summary rows. "
+        "When every visible calculation row is itself a numbered service stage "
+        "(for example, '... (3 этап, с 06.11.2026 по 31.01.2027)'), return that "
+        "same row both in nmck_items and in stages. In stages preserve the number, "
+        "name, full term and selected minimum/contract price in price_raw. Do not "
+        "invent child goods rows for such a table. "
         "Put product rows only into nmck_items. Put a visible 'Итого' row only into "
         "nmck_totals, preserving its quantity, supplier totals, and NMCK total as raw text. "
         "In a supplier block with two subcolumns, 'Цена за ед. товара' and "
@@ -44,6 +49,20 @@ ROLE_NOTES: dict[VlmTableRole, str] = {
         "calculations, or other intermediate numbers into supplier_totals_raw. "
         "If the row does not visibly contain supplier total-cost columns, leave "
         "supplier_totals_raw empty. "
+        "Rare service-stage form: if every executor has exactly one visible column "
+        "named 'Цена услуги' and the row quantity is 1, that one visible number is "
+        "both unit_price_raw and row_total_raw for that SAME executor. There is no "
+        "second subcolumn in this form. Copy supplier_label exactly from the header, "
+        "keep executor columns in visible left-to-right order, and never take the "
+        "next executor's price as a row total. Example: columns Исполнитель 1 = "
+        "4 790,00, Исполнитель 2 = 4 700,00, Исполнитель 3 = 4 562,77 must return "
+        "three prices: (4 790,00, 4 790,00), (4 700,00, 4 700,00), and "
+        "(4 562,77, 4 562,77). "
+        "For the visible 'ИТОГО' row in this one-column service form, put one total "
+        "under every executor into supplier_totals_raw in the same left-to-right order. "
+        "Put the final value under 'Начальная (максимальная) цена контракта' separately "
+        "into nmck_total_raw. If the last executor total equals the NMCK total, preserve "
+        "both visible cells: the first as that executor's total and the second as NMCK. "
         "Do not put NMCK summary objects into the generic totals array.\n"
         "Example product row: {\"row_number\": \"2.1\", \"parent_stage_number\": \"2\", "
         "\"name\": \"Сервер\", \"unit\": \"шт.\", \"quantity_raw\": \"4\", "
@@ -96,7 +115,7 @@ Rules:
 - Fill only the fields relevant to the target role:
   purchase_description -> items with characteristics;
   contract_stages -> stages;
-  nmck_calculation -> nmck_items and nmck_totals;
+  nmck_calculation -> nmck_items, nmck_totals, and stages only when the NMCK rows are explicit stages;
   contract_specification -> items and totals;
   additional_characteristics_justification -> justifications;
   attachments -> attachments;

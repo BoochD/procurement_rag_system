@@ -507,7 +507,11 @@ def _stages_from_tables(tables: list[ParsedTable]) -> list[ProcurementStage]:
     stages: list[ProcurementStage] = []
     seen: set[tuple[str, str, str, str]] = set()
     for table in tables:
-        if table.table_type not in {"contract_stages_table", "nmck_staged_calculation_table"}:
+        if table.table_type not in {
+            "contract_stages_table",
+            "nmck_calculation_table",
+            "nmck_staged_calculation_table",
+        }:
             continue
         for payload in table.compact_json.get("stages", []):
             stage = _stage_from_payload(table, payload)
@@ -530,7 +534,7 @@ def _stage_fragments(text: str | None) -> list[tuple[str, str]]:
     text = clean_text(text)
     if not text:
         return []
-    matches = list(re.finditer(r"(\d+)\s*этап\s*[-:]", text, flags=re.IGNORECASE))
+    matches = list(re.finditer(r"(\d+)\s*этап\s*[-–—:]", text, flags=re.IGNORECASE))
     result: list[tuple[str, str]] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)

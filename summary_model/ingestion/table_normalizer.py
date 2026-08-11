@@ -99,7 +99,12 @@ def infer_header_rows(matrix: list[list[str]], max_rows: int = 8) -> list[int]:
     if not matrix or _looks_like_key_value(matrix):
         return []
     rows = [0]
+    first_row_is_stage_header = "этап" in " ".join(_nonempty(matrix[0])).casefold()
     for index, row in enumerate(matrix[1:max_rows], start=1):
+        # DOCX merged cells can repeat the "Этап" header into the first data row.
+        # A standalone ordinal in that row is still a row number, not a second header.
+        if first_row_is_stage_header and any(ORDINAL_RE.fullmatch(value) for value in _nonempty(row)):
+            break
         if _looks_like_header_continuation(row):
             rows.append(index)
             continue

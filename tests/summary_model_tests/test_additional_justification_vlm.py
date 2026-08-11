@@ -176,11 +176,70 @@ def test_nmck_vlm_merge_fills_only_missing_deterministic_fields():
     assert merged.compact_json["nmck_totals"][0]["quantity_raw"] == "11"
 
 
+def test_nmck_vlm_result_keeps_explicit_stages_from_direct_rows():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_calculation_table",
+        row_count=2,
+        col_count=4,
+        compact_json={"items": [], "price_sources": []},
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.compact_json = {
+        "items": [{"row_number": "1", "name": "Услуга (1 этап)", "quantity_raw": "1"}],
+        "stages": [{
+            "stage_number": "1",
+            "stage_name": "Услуга (1 этап)",
+            "service_term_text": "с 01.01.2026 по 10.01.2026",
+            "price_raw": "45 000,00",
+        }],
+    }
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+
+    assert merged.compact_json["stages"][0]["stage_number"] == "1"
+
+
+def test_staged_nmck_vlm_result_replaces_incomplete_deterministic_rows():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_staged_calculation_table",
+        row_count=2,
+        col_count=4,
+        compact_json={"price_sources": [{
+            "source_id": "supplier_1",
+            "raw_header": "Исполнитель 1 (письмо № К-056 от 03.08.2026 г.)",
+        }], "items": [{
+            "row_index": 2,
+            "row_number": "1",
+            "supplier_prices": [{"source_id": "supplier_1", "raw_unit_price": "4 790", "raw_row_total": "4 700"}],
+        }]},
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.compact_json = {"items": [{
+        "row_index": 2,
+        "row_number": "1",
+        "supplier_prices": [{"source_id": "supplier_1", "raw_unit_price": "4 700"}],
+        "selected_min_unit_price_raw": "4 700",
+        "row_total_declared_raw": "4 700",
+    }], "stages": [{"stage_number": "1", "price_raw": "4 700"}]}
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+
+    assert merged.compact_json["items"] == repaired.compact_json["items"]
+    assert merged.compact_json["stages"] == repaired.compact_json["stages"]
+    assert merged.compact_json["price_sources"] == base.compact_json["price_sources"]
+
+
 def test_nmck_supplier_id_ignores_letter_number_and_date():
     assert _supplier_source_id("Исполнитель 2 (письмо № 280426/10 от 28.04.2026)", 2) == "supplier_2"
 
 
-def test_nmck_staged_merge_does_not_append_vlm_stage_aggregate():
+def test_nmck_staged_merge_uses_full_vlm_result():
     base = ParsedTable(
         table_id="table-1",
         block_id="block-1",
@@ -215,13 +274,7 @@ def test_nmck_staged_merge_does_not_append_vlm_stage_aggregate():
 
     merged = _merge_role_result(base, repaired, "nmck_calculation")
 
-    assert merged.compact_json["items"] == [{
-        "row_index": 3,
-        "row_number": "2.1",
-        "parent_stage_number": "2",
-        "name": "Сервер",
-        "quantity_raw": "4",
-    }]
+    assert merged.compact_json == repaired.compact_json
 
 
 def test_vlm_response_with_missing_final_brackets_is_recovered():

@@ -2810,6 +2810,56 @@ def _is_eis_structured_placeholder(value: str | None) -> bool:
     return "указывается в структурированном виде" in normalize_text(value)
 
 
+def _national_regime_label_only(field_code: str, value: str | None) -> bool:
+    text = normalize_text(value)
+    label = normalize_text(FIELD_LABELS.get(field_code, ""))
+    return bool(text and label and text.rstrip(" .:;") == label)
+
+
+def _unscoped_prohibition(value: str | None) -> bool:
+    text = normalize_text(value)
+    if not text or not any(marker in text for marker in ("запрет", "да")):
+        return False
+    return not re.search(r"\d{2}(?:\.\d{2}){1,3}|приложен|позиц", text)
+
+
+def _plan_inline_stage_terms(value: str | None) -> list[tuple[str, str]]:
+    text = str(value or "")
+    matches = list(re.finditer(r"(\d+)\s*этап\s*[-–—:]", text, flags=re.IGNORECASE))
+    result: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        term = " ".join(text[match.end() : end].strip(" ;.").split())
+        if term:
+            result.append((match.group(1), term))
+    return result
+
+
+def _plan_stage_internal_differences(schedule: Any) -> list[str]:
+    """Compare the physical stage table in the plan with its inline delivery list."""
+    table_numbers = [
+        clean_stage_number(getattr(stage, "stage_number", None))
+        for stage in (getattr(schedule, "stages", []) or [])
+        if "schedule_application:raw_fields" not in str(getattr(stage, "evidence", ""))
+    ]
+    table_numbers = [number for number in table_numbers if number]
+    inline_terms = _plan_inline_stage_terms(getattr(schedule, "delivery_term_text", None))
+    inline_numbers = [number for number, _term in inline_terms]
+    if not table_numbers or not inline_numbers:
+        return []
+
+    differences: list[str] = []
+    if table_numbers != inline_numbers:
+        differences.append(
+            "В ПГ таблица этапов содержит "
+            f"{', '.join(table_numbers)}, а в сроке оказания услуг перечислены {', '.join(inline_numbers)}."
+        )
+    for number, term in inline_terms:
+        if not re.search(r"\b(?:по|до)\s+\d{2}\.\d{2}\.\d{4}\b", term, flags=re.IGNORECASE):
+            differences.append(f"В сроке оказания услуг ПГ у этапа {number} не указана дата окончания.")
+    return differences
+
+
 def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
     schedule = package.schedule_application
     plan_stages = list(getattr(schedule, "stages", []) or []) if schedule else []
@@ -2822,6 +2872,8 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
     ]
     summary_lines = [f"Заявка в план-график: {_stages_summary(has_plan_stages, plan_stages)}"]
     summary_lines.extend(f"{DOCUMENT_LABELS.get(name, name)}: {_stages_summary(bool(stages), stages)}" for name, stages in docs)
+    internal_differences = _plan_stage_internal_differences(schedule) if schedule else []
+    summary_lines.extend(f"ПГ: {difference}" for difference in internal_differences)
     if not has_plan_stages and not any(stages for _name, stages in docs):
         status = "passed"
         message = "Этапы исполнения не предусмотрены в извлечённых данных."
@@ -2831,7 +2883,10 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
     else:
         comparison = _compare_stage_sets(plan_stages, docs)
         summary_lines.extend(comparison["summary_lines"])
-        if comparison["failed"]:
+        if internal_differences:
+            status = "failed"
+            message = internal_differences[0]
+        elif comparison["failed"]:
             status = "failed"
             message = comparison["difference_summary"] or "Этапы исполнения расходятся с заявкой в план-график."
         elif comparison["manual"]:
@@ -2988,7 +3043,7 @@ def _stage_difference_summary(plan_stages: list[Any], docs: list[tuple[str, list
     document_text = ", ".join(labels)
     stage_text = ", ".join(missing)
     return (
-        f"В ПГ предусмотрено {len(plan_numbers)} этапа; в {document_text} — по {count}. "
+        f"В ПГ предусмотрено {len(plan_numbers)} этапов; в {document_text} — по {count}. "
         f"Отсутствует этап {stage_text}."
     )
 
@@ -3493,7 +3548,16 @@ def _check_plan_national_regime_fields(
     else:
         expected = FIELD_LABELS
         found = plan_national_regime_fields(schedule)
-        missing = [code for code in expected if not found.get(code)]
+        missing = [
+            code
+            for code in expected
+            if not found.get(code) or _national_regime_label_only(code, found.get(code))
+        ]
+        unscoped_prohibitions = [
+            code
+            for code, value in found.items()
+            if code == "17.1" and _unscoped_prohibition(value)
+        ]
         plan_codes = plan_okpd2_codes(schedule)
         expected_rows: list[dict[str, str]] = []
         registry_errors: list[str] = []
@@ -3538,6 +3602,9 @@ def _check_plan_national_regime_fields(
         elif failed_rows:
             status = "failed"
             message = "Для части ОКПД2 из ПГ не заполнены требуемые строки запретов или ограничений ПП №1875."
+        elif unscoped_prohibitions:
+            status = "manual_review"
+            message = "В ПГ указан запрет, но не приведён код или позиция ПП №1875, к которой он относится."
         elif unexpected_codes:
             status = "manual_review"
             message = "В строках национального режима ПГ указаны коды, которые не удалось объяснить локальным перечнем ПП №1875."
@@ -3558,6 +3625,10 @@ def _check_plan_national_regime_fields(
             f"ОКПД2 {row['code']}: требуется {row['regime']} ({row['field_code']}) — "
             f"{'указано в ПГ' if row['status'] == 'passed' else 'не указано в ПГ'}"
             for row in expected_rows
+        )
+        summary_lines.extend(
+            f"{field_code}: запрет указан без кода или позиции ПП №1875"
+            for field_code in unscoped_prohibitions
         )
         if registry_errors:
             summary_lines.append(f"ошибок локальной сверки: {len(registry_errors)}")

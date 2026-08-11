@@ -558,6 +558,25 @@ def test_stages_against_plan_handle_absence_missing_structure_and_mismatch():
     assert "Отсутствует этап 2" in checks["strict.plan.stages"].message
 
 
+def test_stages_against_plan_detects_conflict_inside_plan_delivery_term():
+    package = _base_package()
+    package.schedule_application.stages = [
+        ProcurementStage(stage_number="1", stage_name="1 этап", evidence="table-1:r1"),
+        ProcurementStage(stage_number="2", stage_name="2 этап", evidence="table-1:r2"),
+    ]
+    package.schedule_application.delivery_term_text = (
+        "1 этап – с 01.01.2026 по 10.01.2026; "
+        "2 этап – с 11.01.2026 по 20.01.2026; "
+        "3 этап – с 21.01.2026"
+    )
+
+    check = _by_id(run_checks(package))["strict.plan.stages"]
+
+    assert check.status == "failed"
+    assert "таблица этапов содержит 1, 2" in check.message
+    assert any("этапа 3 не указана дата окончания" in line for line in check.details["summary_lines"])
+
+
 def test_stage_results_argument_replaces_deterministic_stage_check():
     from summary_model.checks.models import CheckResult
 
@@ -1656,6 +1675,21 @@ def test_plan_national_regime_rows_are_checked_for_presence():
 
     assert checks["strict.plan.national_regime_fields"].status == "passed"
     assert len(checks["strict.plan.national_regime_fields"].details["summary_lines"]) == 3
+
+
+def test_plan_national_regime_warns_when_prohibition_has_no_scope():
+    package = _base_package()
+    package.schedule_application.okpd2_codes = []
+    package.schedule_application.national_regime_fields = [
+        RawField(key="17.1.", value="Запреты; да", is_empty=False),
+        RawField(key="17.2.", value="Ограничения", is_empty=False),
+        RawField(key="17.3.", value="Преимущества; Нет", is_empty=False),
+    ]
+
+    result = _by_id(run_checks(package))["strict.plan.national_regime_fields"]
+
+    assert result.status == "manual_review"
+    assert "не приведён код или позиция" in result.message
 
 
 def test_plan_national_regime_requires_matching_rows_for_plan_codes():

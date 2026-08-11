@@ -3,12 +3,13 @@ from decimal import Decimal
 
 from docx import Document
 
-from summary_model.domain.models import DocumentType, InputDocument
+from summary_model.domain.models import DocumentType, InputDocument, TableColumnIR, TableIR, TableRowIR
 from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import _attachment_type, _price_source_requisites, extract_package
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
+from summary_model.tables.table_classifier import classify_parsed_table
 from summary_model.tables.utils import extract_money
 
 
@@ -527,6 +528,53 @@ def test_key_value_table_preserves_all_raw_fields_and_negative_values(tmp_path):
         "schedule_application_table",
         "signature_table",
     ]
+
+
+def test_stage_table_wins_over_signature_words_and_service_price_nmck_is_calculation_table():
+    stages = TableIR(
+        table_id="stages",
+        row_count=2,
+        columns=[
+            TableColumnIR(index=0, alias="c0", header_path=["Этап"]),
+            TableColumnIR(index=1, alias="c1", header_path=["Наименование этапа"]),
+            TableColumnIR(index=2, alias="c2", header_path=["Результат выполнения этапа"]),
+            TableColumnIR(index=3, alias="c3", header_path=["Срок оказания услуг по этапу"]),
+        ],
+        rows=[
+            TableRowIR(row_id="r0", row=0, values={"c0": "Этап", "c1": "Наименование этапа", "c2": "Результат", "c3": "Срок"}),
+            TableRowIR(row_id="r1", row=1, values={"c0": "1", "c1": "Подготовка", "c2": "Передать Заказчику", "c3": "по 15.09.2026"}),
+        ],
+    )
+    nmck = TableIR(
+        table_id="nmck",
+        row_count=2,
+        columns=[
+            TableColumnIR(index=0, alias="c0", header_path=["№"]),
+            TableColumnIR(index=1, alias="c1", header_path=["Наименование"]),
+            TableColumnIR(index=2, alias="c2", header_path=["Количество, шт."]),
+            TableColumnIR(index=3, alias="c3", header_path=["Исполнитель 1", "Цена услуги"]),
+            TableColumnIR(index=4, alias="c4", header_path=["Исполнитель 2", "Цена услуги"]),
+            TableColumnIR(index=5, alias="c5", header_path=["Минимальная цена за ед."]),
+            TableColumnIR(index=6, alias="c6", header_path=["Начальная цена контракта"]),
+        ],
+        rows=[
+            TableRowIR(row_id="r0", row=0, values={"c0": "№", "c1": "Наименование", "c2": "Количество, шт.", "c3": "Исполнитель 1 Цена услуги", "c4": "Исполнитель 2 Цена услуги", "c5": "Минимальная цена", "c6": "Цена контракта"}),
+            TableRowIR(row_id="r1", row=1, values={"c0": "1", "c1": "Услуги (1 этап)", "c2": "1", "c3": "4 790", "c4": "4 700", "c5": "4 700", "c6": "4 700"}),
+        ],
+    )
+
+    assert classify_parsed_table(stages, DocumentType.OOZ) == "contract_stages_table"
+    assert classify_parsed_table(nmck, DocumentType.ONMCK) == "nmck_calculation_table"
+
+
+def test_stage_header_does_not_consume_first_numbered_row_after_merged_cell():
+    matrix = [
+        ["Этап", "Наименование этапа", "Результат выполнения этапа", "Срок оказания услуг по этапу"],
+        ["Этап", "1.", "Исполнитель передал Заказчику результат", "по 15.09.2026"],
+        ["Этап", "2.", "Исполнитель оказывает услуги", "по 05.11.2026"],
+    ]
+
+    assert infer_header_rows(matrix) == [0]
 
 
 def test_key_value_table_deduplicates_identical_value_columns(tmp_path):

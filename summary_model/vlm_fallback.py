@@ -281,6 +281,8 @@ def _should_send_to_vlm(
         return False
     if role in {"generic", "unknown"}:
         return False
+    if role == "nmck_calculation" and table.table_type == "nmck_staged_calculation_table":
+        return True
     if force:
         return True
     if table.parser_warnings:
@@ -516,6 +518,7 @@ def _compact_json_from_vlm(
                 for source_id in source_ids
             ],
             "items": items,
+            "stages": [_stage_payload(stage) for stage in extraction.stages],
             "nmck_totals": [
                 {
                     "label": total.label,
@@ -693,7 +696,9 @@ def _table_type_from_role(
     if role == "contract_stages":
         return "contract_stages_table"
     if role == "nmck_calculation":
-        if any(item.get("parent_stage_number") for item in compact_json.get("items", [])):
+        if compact_json.get("stages") or any(
+            item.get("parent_stage_number") for item in compact_json.get("items", [])
+        ):
             return "nmck_staged_calculation_table"
         return "nmck_calculation_table"
     if role == "contract_specification":
@@ -800,7 +805,22 @@ def _merge_role_result(
 
 
 def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedTable:
-    """Use VLM only to fill gaps in deterministic NMCK rows."""
+    """Keep basic NMCK parsing deterministic; make staged NMCK VLM-owned."""
+    if base.table_type == "nmck_staged_calculation_table":
+        # Stage rows often combine a service description, period and one price
+        # per supplier. The generic matrix parser has no reliable structure for
+        # that shape, so the dedicated VLM extraction owns this table entirely.
+        merged = repaired.model_copy(deep=True)
+        source_headers = base.compact_json.get("price_sources") or []
+        if source_headers:
+            merged.compact_json["price_sources"] = source_headers
+        merged.parser_warnings = list(dict.fromkeys([
+            *base.parser_warnings,
+            *repaired.parser_warnings,
+        ]))
+        merged.compact_markdown = build_compact_markdown(merged)
+        return merged
+
     merged = base.model_copy(deep=True)
     base_items = [item for item in base.compact_json.get("items", []) if isinstance(item, dict)]
     repaired_items = [item for item in repaired.compact_json.get("items", []) if isinstance(item, dict)]
@@ -823,6 +843,7 @@ def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedT
         **base.compact_json,
         "items": items,
         "price_sources": base.compact_json.get("price_sources") or repaired_sources,
+        "stages": base.compact_json.get("stages") or repaired.compact_json.get("stages", []),
         "nmck_totals": repaired.compact_json.get("nmck_totals") or base.compact_json.get("nmck_totals", []),
     }
     merged.parser_warnings = list(dict.fromkeys([

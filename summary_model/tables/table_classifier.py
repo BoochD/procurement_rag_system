@@ -86,10 +86,13 @@ def _looks_like_embedded_ooz_items(text: str) -> bool:
 
 
 def _looks_like_staged_nmck(text: str) -> bool:
-    has_stage_rows = bool(re.search(r"(?:^|\s)\d+\.\s+[^|.]{0,160}этап", text))
+    has_parent_stage_rows = bool(re.search(r"(?:^|\s)\d+\.\s+[^|.]{0,160}этап", text))
+    has_direct_stage_rows = len(re.findall(r"\(\s*\d+\s*этап\b", text)) >= 2
     has_child_rows = bool(re.search(r"(?:^|\s)\d+\.\d+\s+", text))
     has_nmck_prices = _has_any(text, ("минимальная цена", "начальная", "цена контракта"))
-    return has_stage_rows and has_child_rows and has_nmck_prices
+    return has_nmck_prices and (
+        has_direct_stage_rows or (has_parent_stage_rows and has_child_rows)
+    )
 
 
 def _looks_like_nmck_matrix(table: TableIR) -> bool:
@@ -103,9 +106,10 @@ def _looks_like_nmck_matrix(table: TableIR) -> bool:
         "цена за ед" in header_text
         or "цена за единицу" in header_text
     ) and ("стоимость" in header_text or "сумма" in header_text)
+    has_single_service_price = "цена услуги" in header_text
     has_result = "минимальная цена" in header_text or "цена контракта" in header_text
     has_item_columns = any(marker in header_text for marker in ("количество", "кол-во", "кол-в"))
-    return has_sources and has_price_pair and has_result and has_item_columns
+    return has_sources and (has_price_pair or has_single_service_price) and has_result and has_item_columns
 
 
 def _looks_like_stage_table(table: TableIR, text: str) -> bool:
@@ -131,11 +135,14 @@ def classify_parsed_table(
     document_type: DocumentType | None,
 ) -> ParsedTableType:
     text = _joined(table)
+
+    # A real stage header is stronger evidence than words such as "Заказчик"
+    # and "Исполнитель" in the stage result column.
+    if document_type in {DocumentType.PLAN, DocumentType.OOZ, DocumentType.CONTRACT} and _looks_like_stage_table(table, text):
+        return "contract_stages_table"
+
     if _looks_like_signature_table(text):
         return "signature_table"
-
-    if document_type == DocumentType.PLAN and _looks_like_stage_table(table, text):
-        return "contract_stages_table"
 
     if document_type == DocumentType.PLAN and _has_any(
         text,
@@ -154,9 +161,6 @@ def classify_parsed_table(
         return "nmck_staged_calculation_table"
     if document_type == DocumentType.ONMCK and _looks_like_nmck_matrix(table):
         return "nmck_calculation_table"
-
-    if document_type in {DocumentType.OOZ, DocumentType.CONTRACT} and _looks_like_stage_table(table, text):
-        return "contract_stages_table"
 
     if document_type == DocumentType.OOZ and table.kind in {"characteristics", "item_list"}:
         return "ooz_items_table"
