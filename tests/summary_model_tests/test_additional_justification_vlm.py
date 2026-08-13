@@ -18,6 +18,7 @@ from summary_model.vlm_fallback import (
     VlmFallbackOptions,
     VlmFallbackRepairer,
     _merge_role_result,
+    _normalize_single_price_service_rows,
     _parse_response,
     _supplier_source_id,
     _unextracted_justification_table,
@@ -233,6 +234,25 @@ def test_staged_nmck_vlm_result_replaces_incomplete_deterministic_rows():
     assert merged.compact_json["items"] == repaired.compact_json["items"]
     assert merged.compact_json["stages"] == repaired.compact_json["stages"]
     assert merged.compact_json["price_sources"] == base.compact_json["price_sources"]
+
+
+def test_single_price_service_stage_uses_the_same_value_as_row_total():
+    compact_json = {
+        "items": [{
+            "quantity_raw": "1",
+            "supplier_prices": [
+                {"raw_unit_price": "4 790,00", "raw_row_total": "4 700,00"},
+                {"raw_unit_price": "4 700,00", "raw_row_total": "4 700,00"},
+            ],
+        }]
+    }
+
+    _normalize_single_price_service_rows(compact_json)
+
+    assert [price["raw_row_total"] for price in compact_json["items"][0]["supplier_prices"]] == [
+        "4 790,00",
+        "4 700,00",
+    ]
 
 
 def test_nmck_supplier_id_ignores_letter_number_and_date():

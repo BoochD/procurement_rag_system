@@ -9,6 +9,7 @@ from summary_model.extraction_pipeline import _attachment_type, _price_source_re
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
+from summary_model.tables.models import HeaderPath
 from summary_model.tables.table_classifier import classify_parsed_table
 from summary_model.tables.utils import extract_money
 
@@ -803,6 +804,36 @@ def test_onmck_table_accepts_executor_price_sources(tmp_path):
     assert item.row_total_declared == 2109514
     assert item.is_declared_min_price_correct is True
     assert item.is_row_total_correct is True
+
+
+def test_nmck_single_service_price_columns_are_not_paired():
+    from summary_model.tables.table_logical_rows import _nmck_cells_by_header
+
+    paths = [
+        HeaderPath(col_index=0, parts=["№ п/п"], normalized_name="row_number"),
+        HeaderPath(col_index=1, parts=["Наименование"], normalized_name="name"),
+        HeaderPath(col_index=2, parts=["Кол-во"], normalized_name="quantity"),
+        HeaderPath(col_index=3, parts=["Цена услуги", "Исполнитель 1"]),
+        HeaderPath(col_index=4, parts=["Цена услуги", "Исполнитель 2"]),
+        HeaderPath(col_index=5, parts=["Цена услуги", "Исполнитель 3"]),
+        HeaderPath(col_index=6, parts=["Минимальная цена"], normalized_name="selected_min_unit_price"),
+        HeaderPath(col_index=7, parts=["Цена контракта"], normalized_name="row_total"),
+    ]
+    row = ["1", "Услуга (1 этап)", "1", "4 790,00", "4 700,00", "4 562,77", "4 562,77", "4 562,77"]
+
+    values = _nmck_cells_by_header(
+        row,
+        paths,
+        {"row_number": 0, "name": 1, "quantity": 2, "selected_min_unit_price": 6, "row_total": 7},
+        "1",
+    )
+
+    assert [values[f"supplier_{index}.unit_price"] for index in range(1, 4)] == [
+        "4 790,00", "4 700,00", "4 562,77"
+    ]
+    assert [values[f"supplier_{index}.row_total"] for index in range(1, 4)] == [
+        "4 790,00", "4 700,00", "4 562,77"
+    ]
 
 
 def test_staged_onmck_keeps_stage_rows_and_leaf_items_separate(tmp_path):

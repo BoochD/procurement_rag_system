@@ -227,6 +227,8 @@ class VlmFallbackRepairer:
             return None
 
         compact_json = _compact_json_from_vlm(extraction, document_type)
+        if _is_single_price_service_stage_table(table, source):
+            _normalize_single_price_service_rows(compact_json)
         if (
             extraction.table_role == "additional_characteristics_justification"
             and recovery.lossy_warnings
@@ -568,6 +570,30 @@ def _compact_json_from_vlm(
             ]
         }
     return {"rows": [{"raw_text": row} for row in extraction.unparsed_rows]}
+
+
+def _is_single_price_service_stage_table(table: ParsedTable, source: TableIR) -> bool:
+    if table.table_type != "nmck_staged_calculation_table":
+        return False
+    headers = " ".join(source.header_labels()).casefold()
+    return "цена услуги" in headers and "цена за ед" not in headers and "стоимость" not in headers
+
+
+def _normalize_single_price_service_rows(compact_json: dict[str, Any]) -> None:
+    """A single service-price cell is both unit and row total for quantity one."""
+    for item in compact_json.get("items", []):
+        if not isinstance(item, dict) or not _quantity_is_one(item.get("quantity_raw")):
+            continue
+        for price in item.get("supplier_prices", []):
+            if not isinstance(price, dict):
+                continue
+            unit_price = clean_text(price.get("raw_unit_price"))
+            if unit_price:
+                price["raw_row_total"] = unit_price
+
+
+def _quantity_is_one(value: object) -> bool:
+    return clean_text(value).replace(" ", "").replace(",", ".") in {"1", "1.0", "1.00"}
 
 
 def _empty_result_warning(

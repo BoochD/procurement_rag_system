@@ -462,6 +462,25 @@ def _nmck_cells_by_header(
         "selected_min_unit_price": _value(row, selected_index),
         "row_total_declared": _value(row, total_index),
     }
+    single_service_columns: list[tuple[str, int, str | None]] = []
+    for path in paths:
+        joined = " ".join(path.parts).casefold()
+        supplier = _supplier_ref(joined)
+        if supplier and "цена услуги" in joined:
+            supplier_header = next(
+                (part for part in path.parts if _supplier_ref(part.casefold()) == supplier),
+                None,
+            )
+            single_service_columns.append((supplier, path.col_index, supplier_header))
+    if single_service_columns:
+        for supplier, column_index, supplier_header in single_service_columns:
+            value = _value(row, column_index)
+            if supplier_header:
+                cells_by_header[f"{supplier}.raw_header"] = supplier_header
+            if value:
+                cells_by_header[f"{supplier}.unit_price"] = value
+                cells_by_header[f"{supplier}.row_total"] = value
+        return cells_by_header
     for path in paths:
         joined = " ".join(path.parts).casefold()
         supplier = _supplier_ref(joined)
