@@ -439,7 +439,7 @@ def _stage_from_payload(table: ParsedTable, payload: dict) -> ProcurementStage:
         result_text=clean_text(payload.get("result_text")) or None,
         start_text=start_text,
         service_term_text=service_term_text,
-        service_start_date=_date_from_text(service_term_text) or _date_from_text(start_text),
+        service_start_date=_date_from_text(start_text) or _date_from_text(service_term_text),
         service_end_date=_last_date_from_text(service_term_text),
         execution_end_date=_date_from_text(execution_end_text),
         price=price,
@@ -592,6 +592,7 @@ def _merge_schedule_stages(
     field_stages: list[ProcurementStage],
 ) -> list[ProcurementStage]:
     """Keep table evidence but fill sparse plan stages from named plan fields."""
+    has_table_stages = bool(table_stages)
     by_number = {
         clean_text(stage.stage_number): stage.model_copy(deep=True)
         for stage in table_stages
@@ -603,7 +604,8 @@ def _merge_schedule_stages(
             continue
         existing = by_number.get(number)
         if existing is None:
-            by_number[number] = field_stage
+            if not has_table_stages:
+                by_number[number] = field_stage
             continue
         for field_name in (
             "stage_name",

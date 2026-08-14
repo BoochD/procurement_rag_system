@@ -31,6 +31,19 @@ def _iter_blocks(document: DocumentObject):
             yield "table", Table(child, document)
 
 
+def _iter_nested_tables(table: Table):
+    seen: set[int] = set()
+    for row in table.rows:
+        for cell in row.cells:
+            for nested in cell.tables:
+                marker = id(nested._tbl)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                yield nested
+                yield from _iter_nested_tables(nested)
+
+
 def _table_ir(table: Table, table_id: str) -> TableIR:
     rows: list[list[tuple[str, object]]] = []
     width = 0
@@ -84,7 +97,8 @@ def read_docx(path: str | Path) -> DocumentIR:
     blocks: list[DocumentBlockIR] = []
     table_index = 0
 
-    for order, (kind, item) in enumerate(_iter_blocks(document)):
+    order = 0
+    for kind, item in _iter_blocks(document):
         block_id = f"{document_id}-block-{order}"
         if kind == "paragraph":
             text = _clean(item.text)
@@ -98,6 +112,7 @@ def read_docx(path: str | Path) -> DocumentIR:
                     text=text,
                 )
             )
+            order += 1
         else:
             table_index += 1
             blocks.append(
@@ -108,6 +123,18 @@ def read_docx(path: str | Path) -> DocumentIR:
                     table=_table_ir(item, f"{document_id}-table-{table_index}"),
                 )
             )
+            order += 1
+            for nested in _iter_nested_tables(item):
+                table_index += 1
+                blocks.append(
+                    DocumentBlockIR(
+                        block_id=f"{document_id}-block-{order}",
+                        order=order,
+                        type="table",
+                        table=_table_ir(nested, f"{document_id}-table-{table_index}"),
+                    )
+                )
+                order += 1
 
     _attach_table_context(blocks)
     return DocumentIR(

@@ -35,6 +35,33 @@ def _save_plan(path):
     document.save(path)
 
 
+def test_read_docx_exposes_nested_stage_table(tmp_path):
+    path = tmp_path / "nested-plan.docx"
+    document = Document()
+    outer = document.add_table(rows=1, cols=2)
+    outer.cell(0, 0).text = "Этапы исполнения контракта"
+    nested = outer.cell(0, 1).add_table(rows=2, cols=5)
+    headers = [
+        "№ этапа",
+        "Дата начала исполнения этапа",
+        "Срок оказания услуг по этапу",
+        "Дата окончания исполнения этапа",
+        "Цена этапа, руб.",
+    ]
+    values = ["1", "01.01.2027", "31.01.2027", "01.03.2027", "1000"]
+    for column, value in enumerate(headers):
+        nested.cell(0, column).text = value
+    for column, value in enumerate(values):
+        nested.cell(1, column).text = value
+    document.save(path)
+
+    ir = read_docx(path)
+    tables = [block.table for block in ir.blocks if block.table is not None]
+
+    assert len(tables) == 2
+    assert classify_parsed_table(tables[1], DocumentType.PLAN) == "contract_stages_table"
+
+
 def _save_plan_with_duplicate_value_columns(path):
     document = Document()
     document.add_paragraph("Заявка на внесение в план-график")

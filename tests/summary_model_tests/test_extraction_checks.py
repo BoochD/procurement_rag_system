@@ -328,6 +328,20 @@ def test_schedule_stage_merge_fills_sparse_table_rows_from_plan_fields():
     assert merged[0].quantity_text == "1 усл. ед."
 
 
+def test_schedule_stage_merge_does_not_add_inline_only_stage_to_table_stages():
+    from summary_model.extraction_pipeline import _merge_schedule_stages
+
+    merged = _merge_schedule_stages(
+        [ProcurementStage(stage_number="1", evidence="table")],
+        [
+            ProcurementStage(stage_number="1", service_term_text="по 31.01.2027", evidence="raw_fields"),
+            ProcurementStage(stage_number="2", service_term_text="с 01.02.2027", evidence="raw_fields"),
+        ],
+    )
+
+    assert [stage.stage_number for stage in merged] == ["1"]
+
+
 def test_vlm_notes_accept_string_dict_and_list_values():
     assert VlmPurchaseItem(notes="Пояснение").notes == ["Пояснение"]
     assert VlmStage(notes={"reason": "пустая строка"}).notes == ["пустая строка"]
@@ -624,32 +638,31 @@ def test_stages_against_plan_detects_conflict_inside_plan_delivery_term():
 
     assert check.status == "failed"
     assert "внутренние несоответствия" in check.message
-    assert any("таблица этапов содержит 1, 2" in line for line in check.details["internal_differences"])
-    assert any("этапа 3 не указана дата окончания" in line for line in check.details["summary_lines"])
+    assert any("поле «Этапы исполнения контракта»" in line for line in check.details["internal_differences"])
+    assert any("У этапа 3 не указана дата окончания" in line for line in check.details["internal_differences"])
+    assert any("явное внутреннее противоречие ПГ" in line for line in check.details["internal_differences"])
 
 
-def test_stages_exclude_incomplete_inline_plan_stage_from_document_comparison():
+def test_stages_compare_physical_plan_table_without_inline_extra_stage():
     package = _base_package()
     package.schedule_application.stages = [
         ProcurementStage(
             stage_number="1",
             stage_name="1 этап",
             service_term_text="с 01.01.2026 по 10.01.2026",
-            evidence="schedule_application:raw_fields",
+            evidence="plan-stage-table:r1",
         ),
         ProcurementStage(
             stage_number="2",
             stage_name="2 этап",
-            service_term_text="с 11.01.2026 по 31.01.2028",
-            evidence="schedule_application:raw_fields",
-        ),
-        ProcurementStage(
-            stage_number="3",
-            stage_name="3 этап",
-            service_term_text="с 01.02.2026",
-            evidence="schedule_application:raw_fields",
+            service_term_text="с 11.01.2026 по 31.01.2027",
+            evidence="plan-stage-table:r2",
         ),
     ]
+    package.schedule_application.delivery_term_text = (
+        "по 31.01.2027: 1 этап - с 01.01.2026 по 10.01.2026; "
+        "2 этап - с 11.01.2026 по 31.01.2028; 3 этап - с 01.02.2027"
+    )
     package.purchase_description.stages = [
         ProcurementStage(stage_number="1", stage_name="1 этап", service_term_text="с 01.01.2026 по 10.01.2026"),
         ProcurementStage(stage_number="2", stage_name="2 этап", service_term_text="с 11.01.2026 по 31.01.2027"),
@@ -658,9 +671,13 @@ def test_stages_exclude_incomplete_inline_plan_stage_from_document_comparison():
     check = _by_id(run_checks(package))["strict.plan.stages"]
 
     assert check.status == "failed"
-    assert any("этапа 3 не указана дата окончания" in line for line in check.details["internal_differences"])
-    assert any("срок этапа 2 отличается" in line for line in check.details["comparison_differences"])
+    assert any("У этапа 3 не указана дата окончания" in line for line in check.details["internal_differences"])
+    assert any(
+        "этапу 2" in line and "31.01.2028" in line and "31.01.2027" in line
+        for line in check.details["internal_differences"]
+    )
     assert not any("этап 3 не найден" in line for line in check.details["comparison_differences"])
+    assert not any("срок этапа 2 отличается" in line for line in check.details["comparison_differences"])
     assert [row["number"] for row in check.details["stage_tables"][0]["rows"]] == ["1", "2"]
 
 
@@ -864,7 +881,7 @@ def test_penalty_result_is_passed_when_every_expected_finding_passed():
     assert check.status == "passed"
 
 
-def test_delivery_term_stays_independent_from_inline_stage_conflict():
+def test_delivery_term_fails_on_inline_stage_conflict():
     package = _base_package()
     package.schedule_application.delivery_term_text = (
         "с даты заключения контракта по 31.01.2027, в соответствии с этапами: "
@@ -875,13 +892,10 @@ def test_delivery_term_stays_independent_from_inline_stage_conflict():
 
     check = _by_id(run_checks(package))["strict.plan.delivery_term"]
 
-    assert check.status == "passed"
-    assert check.details["summary_lines"] == [
-        "Заявка в план-график: с даты заключения контракта по 31.01.2027",
-        "ООЗ: с даты заключения контракта по 31.01.2027",
-        "Проект контракта: с даты заключения контракта по 31.01.2027",
-    ]
-    assert "совпадает с заявкой" in check.report_text
+    assert check.status == "failed"
+    assert "этап 2 заканчивается 31.01.2028" in check.report_text
+    assert "этапа 3 не указана дата окончания" in check.report_text
+    assert any("Общий срок указан по 31.01.2027" in line for line in check.details["summary_lines"])
 
 
 def test_penalty_llm_ignores_smp_fine_when_plan_does_not_require_subcontractors():
