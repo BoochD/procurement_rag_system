@@ -24,8 +24,19 @@ from summary_model.vlm_fallback import (
     _unextracted_justification_table,
 )
 from summary_model.vlm_lab.candidates import justification_candidate_reasons
+from summary_model.vlm_lab.prompts import vlm_table_prompt
 from summary_model.checks.additional_characteristics import build_assessments, justification_state
 from summary_model.extraction_models import AdditionalCharacteristicsJustification
+
+
+def test_nmck_prompt_separates_stage_rows_and_single_service_prices():
+    prompt = vlm_table_prompt("nmck_calculation")
+
+    assert "If a stage has child rows" in prompt
+    assert "one visible column named 'Цена услуги'" in prompt
+    assert "never move a price into the next executor block" in prompt.casefold()
+    assert "exactly one visible total for every executor" in prompt
+    assert "stages MUST contain one" in prompt
 
 
 def _table(title: str = "Обоснование дополнительных характеристик") -> tuple[ParsedTable, TableIR]:
@@ -234,6 +245,29 @@ def test_staged_nmck_vlm_result_replaces_incomplete_deterministic_rows():
     assert merged.compact_json["items"] == repaired.compact_json["items"]
     assert merged.compact_json["stages"] == repaired.compact_json["stages"]
     assert merged.compact_json["price_sources"] == base.compact_json["price_sources"]
+
+
+def test_staged_nmck_vlm_merge_keeps_parser_stages_when_vlm_omits_them():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_staged_calculation_table",
+        row_count=2,
+        col_count=4,
+        compact_json={
+            "price_sources": [{"source_id": "supplier_1", "raw_header": "Исполнитель 1"}],
+            "stages": [{"stage_number": "1", "stage_name": "Услуга (1 этап)", "price_raw": "4 700"}],
+        },
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.table_type = "nmck_calculation_table"
+    repaired.compact_json = {"items": [{"row_number": "1", "quantity_raw": "1"}], "stages": []}
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+
+    assert merged.table_type == "nmck_staged_calculation_table"
+    assert merged.compact_json["stages"] == base.compact_json["stages"]
 
 
 def test_single_price_service_stage_uses_the_same_value_as_row_total():

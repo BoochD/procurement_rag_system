@@ -840,6 +840,10 @@ def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedT
         source_headers = base.compact_json.get("price_sources") or []
         if source_headers:
             merged.compact_json["price_sources"] = source_headers
+        base_stages = base.compact_json.get("stages") or []
+        if base_stages and not merged.compact_json.get("stages"):
+            merged.compact_json["stages"] = base_stages
+            merged.table_type = "nmck_staged_calculation_table"
         merged.parser_warnings = list(dict.fromkeys([
             *base.parser_warnings,
             *repaired.parser_warnings,
