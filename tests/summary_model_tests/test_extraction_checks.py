@@ -443,6 +443,56 @@ def test_smp_sonko_plain_contract_clause_matches_plan_without_semantic_llm():
     assert "согласованы" in checks["strict.smp_sonko_subcontract"].message
 
 
+def test_smp_sonko_standard_terms_detected_only_when_required_by_plan():
+    from summary_model.extraction_pipeline import _contract_smp_sonko_standard_terms_section
+
+    contract_text = """
+    5.3.9. Осуществлять замену соисполнителя на другого соисполнителя в случае
+    неисполнения или ненадлежащего исполнения обязательств.
+    5.4.11. Привлечь к исполнению Контракта соисполнителей из числа субъектов
+    малого предпринимательства, социально ориентированных некоммерческих
+    организаций в объеме 90 процентов от цены Контракта.
+    5.4.11.2. В срок не более 5 рабочих дней представить Заказчику декларацию
+    о принадлежности соисполнителя к субъектам малого предпринимательства и копию договора.
+    5.4.11.3. В случае замены соисполнителя представить Заказчику документы
+    в течение 5 дней со дня заключения договора с новым соисполнителем.
+    5.4.11.4. В течение 10 рабочих дней со дня оплаты представить Заказчику
+    копии документов о приемке и платежных поручений.
+    5.4.11.5. Оплачивать услуги соисполнителя в течение 7 рабочих дней с даты
+    подписания документа о приемке.
+    Исполнитель несет гражданско-правовую ответственность за непредставление
+    документов и непривлечение соисполнителей в установленном объеме.
+    5.4.12. Исполнять иные обязанности.
+    """
+    section = _contract_smp_sonko_standard_terms_section(contract_text)
+
+    assert section is not None
+    assert "5.4.11.5" in section
+    assert "5.4.12" not in section
+    assert "Осуществлять замену" in section
+
+    package = _base_package()
+    package.schedule_application.subcontract_smp_sonko_required = True
+    package.schedule_application.subcontract_smp_sonko_percent = Decimal("90")
+    package.contract_draft.subcontract_smp_sonko_required = True
+    package.contract_draft.subcontract_smp_sonko_percent = Decimal("90")
+    package.contract_draft.smp_sonko_standard_terms_text = section
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.smp_sonko_standard_terms"].status == "passed"
+
+    package.contract_draft.smp_sonko_standard_terms_text = None
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.smp_sonko_standard_terms"].status == "failed"
+
+    package.schedule_application.subcontract_smp_sonko_required = False
+    checks = _by_id(run_checks(package))
+
+    assert "strict.smp_sonko_standard_terms" not in checks
+
+
 def test_plan_ground_truth_text_fields_warn_on_mismatch_and_pass_on_match():
     package = _base_package()
     package.schedule_application.purchase_subject = "Поставка картриджей"
@@ -573,8 +623,45 @@ def test_stages_against_plan_detects_conflict_inside_plan_delivery_term():
     check = _by_id(run_checks(package))["strict.plan.stages"]
 
     assert check.status == "failed"
-    assert "таблица этапов содержит 1, 2" in check.message
+    assert "внутренние несоответствия" in check.message
+    assert any("таблица этапов содержит 1, 2" in line for line in check.details["internal_differences"])
     assert any("этапа 3 не указана дата окончания" in line for line in check.details["summary_lines"])
+
+
+def test_stages_exclude_incomplete_inline_plan_stage_from_document_comparison():
+    package = _base_package()
+    package.schedule_application.stages = [
+        ProcurementStage(
+            stage_number="1",
+            stage_name="1 этап",
+            service_term_text="с 01.01.2026 по 10.01.2026",
+            evidence="schedule_application:raw_fields",
+        ),
+        ProcurementStage(
+            stage_number="2",
+            stage_name="2 этап",
+            service_term_text="с 11.01.2026 по 31.01.2028",
+            evidence="schedule_application:raw_fields",
+        ),
+        ProcurementStage(
+            stage_number="3",
+            stage_name="3 этап",
+            service_term_text="с 01.02.2026",
+            evidence="schedule_application:raw_fields",
+        ),
+    ]
+    package.purchase_description.stages = [
+        ProcurementStage(stage_number="1", stage_name="1 этап", service_term_text="с 01.01.2026 по 10.01.2026"),
+        ProcurementStage(stage_number="2", stage_name="2 этап", service_term_text="с 11.01.2026 по 31.01.2027"),
+    ]
+
+    check = _by_id(run_checks(package))["strict.plan.stages"]
+
+    assert check.status == "failed"
+    assert any("этапа 3 не указана дата окончания" in line for line in check.details["internal_differences"])
+    assert any("срок этапа 2 отличается" in line for line in check.details["comparison_differences"])
+    assert not any("этап 3 не найден" in line for line in check.details["comparison_differences"])
+    assert [row["number"] for row in check.details["stage_tables"][0]["rows"]] == ["1", "2"]
 
 
 def test_stage_results_argument_replaces_deterministic_stage_check():
@@ -775,7 +862,26 @@ def test_penalty_result_is_passed_when_every_expected_finding_passed():
     check = _to_check_result(result, payload)
 
     assert check.status == "passed"
-    assert "соответствуют" in check.report_text
+
+
+def test_delivery_term_stays_independent_from_inline_stage_conflict():
+    package = _base_package()
+    package.schedule_application.delivery_term_text = (
+        "с даты заключения контракта по 31.01.2027, в соответствии с этапами: "
+        "1 этап - по 15.09.2026; 2 этап - по 31.01.2028; 3 этап - с 01.02.2027"
+    )
+    package.purchase_description.delivery_term_text = "с даты заключения контракта по 31.01.2027"
+    package.contract_draft.delivery_term_text = "с даты заключения контракта по 31.01.2027"
+
+    check = _by_id(run_checks(package))["strict.plan.delivery_term"]
+
+    assert check.status == "passed"
+    assert check.details["summary_lines"] == [
+        "Заявка в план-график: с даты заключения контракта по 31.01.2027",
+        "ООЗ: с даты заключения контракта по 31.01.2027",
+        "Проект контракта: с даты заключения контракта по 31.01.2027",
+    ]
+    assert "совпадает с заявкой" in check.report_text
 
 
 def test_penalty_llm_ignores_smp_fine_when_plan_does_not_require_subcontractors():
@@ -2303,6 +2409,29 @@ def test_procurement_method_guard_rejects_plan_tender_against_auction():
     assert "различается между документами" in guarded.message
     assert "Конкурс" in guarded.message
     assert "Электронный аукцион" in guarded.message
+
+
+def test_procurement_method_guard_treats_electronic_store_as_single_supplier():
+    from summary_model.checks.semantic_llm import _apply_procurement_method_guard, SemanticCheckFinding
+    from summary_model.extraction_models import ProcurementPackageExtraction, ScheduleApplicationSchema
+
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(
+            procurement_method_raw="Электронный магазин (п. 4 ч. 1 ст. 93 Федерального закона №44-ФЗ)"
+        )
+    )
+    finding = SemanticCheckFinding(
+        check_id="semantic.procurement_method",
+        status="passed",
+        message="Способ закупки: Электронный аукцион.",
+        compared_values=[],
+    )
+
+    guarded = _apply_procurement_method_guard(package, finding)
+
+    assert guarded.status == "passed"
+    assert "единственный поставщик" in guarded.message
+    assert "электронный магазин" in guarded.message
 
 
 def test_smp_preference_guard_does_not_mix_subcontracting_requirement():

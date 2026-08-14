@@ -107,6 +107,32 @@ def test_report_keeps_stage_summary_as_readable_table():
     assert "[{" not in text
 
 
+def test_report_shows_plan_stage_inconsistency_before_stage_tables():
+    report = _report(
+        _check_result(
+            "strict.plan.stages",
+            "Этапы исполнения",
+            "failed",
+            "В ПГ выявлены внутренние несоответствия этапов; см. пояснения перед таблицами.",
+            details={
+                "internal_differences": ["В ПГ в поле срока перечислены этапы 1, 2, 3, а в таблице этапов ООЗ — 1, 2."],
+                "comparison_differences": ["Описание объекта закупки (ООЗ): срок этапа 2 отличается от ПГ."],
+                "stage_tables": [{
+                    "title": "Заявка в план-график (ПГ)",
+                    "kind": "standard",
+                    "rows": [{"number": "1", "name": "Этап", "term": "по 10.01.2026", "quantity": "не выделен", "price": "Не выделена"}],
+                }],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "<b>Внутреннее несоответствие ПГ:</b>" in text
+    assert "<b>Сверка этапов с документами:</b>" in text
+    assert text.index("Внутреннее несоответствие ПГ") < text.index("#### 📌 Таблица 1")
+
+
 def test_report_uses_russian_labels_for_commercial_offers():
     report = _report(
         _check_result(

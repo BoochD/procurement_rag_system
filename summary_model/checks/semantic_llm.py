@@ -313,6 +313,15 @@ def _apply_procurement_method_guard(
             evidence=finding.evidence,
         )
 
+    if kinds == {"single_supplier"}:
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="passed",
+            message="Способ закупки: единственный поставщик (электронный магазин).",
+            compared_values=cleaned_values,
+            evidence=finding.evidence,
+        )
+
     return SemanticCheckFinding(
         check_id=finding.check_id,
         status=finding.status,
@@ -324,6 +333,8 @@ def _apply_procurement_method_guard(
 
 def _procurement_method_kind(value: object) -> str | None:
     text = str(value or "").casefold().replace("ё", "е")
+    if "электрон" in text and "магазин" in text:
+        return "single_supplier"
     if "аукцион" in text or "auction" in text:
         return "auction"
     if "конкурс" in text or "tender" in text:
@@ -500,7 +511,7 @@ def _semantic_payload(package: ProcurementPackageExtraction) -> dict[str, object
 
 def _plan_has_stages(package: ProcurementPackageExtraction) -> bool:
     schedule = package.schedule_application
-    return bool(schedule and (getattr(schedule, "stages", []) or getattr(schedule, "has_stages", False)))
+    return bool(schedule and getattr(schedule, "stages", []))
 
 
 def _semantic_summary_lines(package: ProcurementPackageExtraction, check_id: str) -> list[str]:

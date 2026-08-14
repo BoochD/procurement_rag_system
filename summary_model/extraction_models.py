@@ -471,6 +471,7 @@ class ContractDraftSchema(BaseModel):
     subcontract_smp_sonko_required: bool | None = None
     subcontract_smp_sonko_percent_raw: str | None = None
     subcontract_smp_sonko_percent: Decimal | None = None
+    smp_sonko_standard_terms_text: str | None = None
     contract_security_raw: str | None = None
     contract_security: SecurityValue | None = None
     warranty_security_raw: str | None = None

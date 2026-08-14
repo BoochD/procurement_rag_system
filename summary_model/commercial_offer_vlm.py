@@ -12,6 +12,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from shared_modules.llm_models import OPENAI_VLM_MODEL, get_chatGPT_client
 from summary_model.checks.normalization import normalize_decimal, normalize_money
 from summary_model.extraction.structured_recovery import StructuredRecovery, recover_model
@@ -670,6 +672,9 @@ def _call_vlm(
     *,
     payload: dict[str, Any],
     model: str,
+    system_prompt: str = COMMERCIAL_OFFER_VLM_PROMPT,
+    schema: type[BaseModel] = CommercialOfferSchema,
+    schema_name: str = "commercial_offer_extraction",
 ) -> dict[str, Any]:
     client = get_chatGPT_client()
     content: list[dict[str, Any]] = [
@@ -686,14 +691,14 @@ def _call_vlm(
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": COMMERCIAL_OFFER_VLM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
         ],
         response_format={
             "type": "json_schema",
             "json_schema": {
-                "name": "commercial_offer_extraction",
-                "schema": CommercialOfferSchema.model_json_schema(),
+                "name": schema_name,
+                "schema": schema.model_json_schema(),
                 "strict": True,
             },
         },

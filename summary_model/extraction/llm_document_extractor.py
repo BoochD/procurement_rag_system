@@ -249,6 +249,7 @@ def _merge_with_deterministic_guard(
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_required", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_percent_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "subcontract_smp_sonko_percent", warnings, warn=False)
+        _preserve_scalar(merged, deterministic_schema, "smp_sonko_standard_terms_text", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_security_raw", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "contract_security", warnings, warn=False)
         _preserve_scalar(merged, deterministic_schema, "warranty_security_raw", warnings, warn=False)

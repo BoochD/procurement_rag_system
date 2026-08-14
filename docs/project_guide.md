@@ -53,9 +53,17 @@ Key document entities:
   overviews of codes, items, quantities, NMCK, delivery terms, addresses, and
   supplier prices. `Finding` supplies errors and manual-review details rather
   than a flat list of every successful low-level rule.
+- The web/CLI summary pipeline accepts PDF only for commercial offers, purchase
+  requests, and explanatory notes. Requests and explanatory notes are rendered
+  to short page images and extracted by dedicated VLM prompts into their
+  existing schemas.
 - Warranty comparison uses explicit terms from the OOZ warranty section,
   including an OOZ embedded in the contract. A contract clause that only
   refers to an appendix does not confirm that warranty terms match.
+- When the plan requires subcontractors from SMP/SONKO, the strict checks also
+  verify the deterministic contract section with the standard terms of
+  Government Decree No. 1466. The check is not emitted when the plan does not
+  require such subcontracting.
 - `latest_model/docs_parsing.py`: extracts plan, contract, OOZ, explanatory note, ONMCK, characteristics, and price information from documents.
 - `shared_modules/parser_functions.py`: low-level `.docx` parsing helpers, table normalization, OKPD/KTRU parsing, and ONMCK price extraction.
 - `latest_model/check_registry.py`: bridges parsed plan/OOZ data to registry checks and characteristic comparison.

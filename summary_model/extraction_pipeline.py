@@ -680,6 +680,44 @@ def _contract_smp_sonko_clause(text: str) -> str | None:
     return best_window[:1200] if best_window else None
 
 
+def _contract_smp_sonko_standard_terms_section(text: str) -> str | None:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    anchor = _best_smp_sonko_clause(_numbered_contract_clauses(lines))
+    if not anchor:
+        return None
+
+    number_match = re.match(r"^(\d+(?:\.\d+)+)\.?\s+", anchor)
+    if not number_match:
+        return anchor
+    prefix = number_match.group(1)
+    section: list[str] = []
+    started = False
+    marker = re.compile(r"^(\d+(?:\.\d+)+)\.?\s+")
+    for line in lines:
+        match = marker.match(line)
+        if match:
+            number = match.group(1)
+            if number == prefix or number.startswith(f"{prefix}."):
+                started = True
+            elif started:
+                break
+        if started:
+            section.append(line)
+
+    replacement = next(
+        (
+            clause
+            for clause in _numbered_contract_clauses(lines)
+            if "осуществлять замену" in clause.casefold()
+            and any(marker in clause.casefold() for marker in ("соисполн", "субподряд"))
+        ),
+        None,
+    )
+    if replacement and replacement not in section:
+        section.append(replacement)
+    return " ".join(section) or anchor
+
+
 def _numbered_contract_clauses(lines: list[str]) -> list[str]:
     clauses: list[str] = []
     current: list[str] = []
@@ -1247,6 +1285,8 @@ def _purchase_request(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseRequ
 
 def _procurement_method(text: str) -> str | None:
     lowered = text.casefold()
+    if "электрон" in lowered and "магазин" in lowered:
+        return "single_supplier"
     if "единствен" in lowered:
         return "single_supplier"
     if "аукцион" in lowered:
@@ -1943,6 +1983,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     warranty_security_text = _contract_warranty_security_text(text)
     funding_source = _contract_funding_source(text)
     smp_subcontract_text = _contract_smp_sonko_clause(text)
+    smp_standard_terms_text = _contract_smp_sonko_standard_terms_section(text)
     responsibility_section = _contract_responsibility_section(text)
     subject_codes = _subject_codes_from_document_text(text, evidence="contract_text:codes")
     specification_items = _contract_specification_items_from_tables(tables)
@@ -1990,6 +2031,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         subcontract_smp_sonko_required=_contract_smp_sonko_required(smp_subcontract_text),
         subcontract_smp_sonko_percent_raw=smp_subcontract_text,
         subcontract_smp_sonko_percent=_percent_from_text(smp_subcontract_text),
+        smp_sonko_standard_terms_text=smp_standard_terms_text,
         contract_security_raw=contract_security_text,
         contract_security=_security_value(contract_security_text),
         warranty_security_raw=warranty_security_text,

@@ -29,6 +29,7 @@ from summary_model.extraction_models import (
     NmckItem,
     PriceSource,
     ProcurementPackageExtraction,
+    ProcurementStage,
     PurchaseItem,
 )
 
@@ -86,6 +87,7 @@ def run_checks(
     results.extend(_check_plan_national_regime_fields(package, registry=pp1875_registry))
     results.extend(penalty_results if penalty_results is not None else _check_contract_penalties(package))
     results.extend(_check_smp_sonko_subcontract(package))
+    results.extend(_check_smp_sonko_standard_terms(package))
     results.extend(_check_contract_attachments(package))
     semantic = semantic_results if semantic_results is not None else _semantic_manual_checks(package)
     if _plan_has_stages(package):
@@ -2612,10 +2614,49 @@ def _check_delivery_term_against_plan(
     package: ProcurementPackageExtraction,
     stage_result: CheckResult,
 ) -> CheckResult:
+    schedule = package.schedule_application
+    purchase_description = package.purchase_description
+    contract = package.contract_draft
+    schedule_value = _general_delivery_term_text(
+        getattr(schedule, "delivery_term_text", None) if schedule else None
+    )
+    candidates = [
+        (
+            "purchase_request",
+            _general_delivery_term_text(
+                getattr(package.purchase_request, "delivery_term_text", None)
+                if package.purchase_request
+                else None
+            ),
+        ),
+        (
+            "purchase_description",
+            _general_delivery_term_text(
+                getattr(purchase_description, "delivery_term_text", None)
+                if purchase_description
+                else None
+            ),
+        ),
+        (
+            "contract_draft",
+            _general_delivery_term_text(getattr(contract, "delivery_term_text", None) if contract else None),
+        ),
+    ]
+    if schedule_value and any(value for _name, value in candidates):
+        return _check_text_against_plan(
+            package,
+            check_id="strict.plan.delivery_term",
+            title="Срок поставки / оказания услуг",
+            schedule_value=schedule_value,
+            candidates=candidates,
+            fields=[
+                "schedule_application.delivery_term_text",
+                "purchase_request.delivery_term_text",
+                "purchase_description.delivery_term_text",
+                "contract_draft.delivery_term_text",
+            ],
+        )
     if _plan_has_stages(package):
-        schedule = package.schedule_application
-        purchase_description = package.purchase_description
-        contract = package.contract_draft
         stage_details = stage_result.details or {}
         difference_summary = str(stage_details.get("difference_summary") or "")
         return _result(
@@ -2656,31 +2697,8 @@ def _check_delivery_term_against_plan(
         package,
         check_id="strict.plan.delivery_term",
         title="Срок поставки / оказания услуг",
-        schedule_value=(
-            getattr(package.schedule_application, "delivery_term_text", None)
-            if package.schedule_application
-            else None
-        ),
-        candidates=[
-            (
-                "purchase_request",
-                getattr(package.purchase_request, "delivery_term_text", None)
-                if package.purchase_request
-                else None,
-            ),
-            (
-                "purchase_description",
-                getattr(package.purchase_description, "delivery_term_text", None)
-                if package.purchase_description
-                else None,
-            ),
-            (
-                "contract_draft",
-                getattr(package.contract_draft, "delivery_term_text", None)
-                if package.contract_draft
-                else None,
-            ),
-        ],
+        schedule_value=schedule_value,
+        candidates=candidates,
         fields=[
             "schedule_application.delivery_term_text",
             "purchase_request.delivery_term_text",
@@ -2692,6 +2710,19 @@ def _check_delivery_term_against_plan(
         ],
     )
     return direct_result
+
+
+def _general_delivery_term_text(value: str | None) -> str | None:
+    """Keep the overall deadline separate from an inline enumeration of stages."""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    marker = re.search(
+        r"(?:[,.;]\s*)?(?:в\s+соответств\w*\s+с\s+этап|\d+\s*этап\b)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text[: marker.start()].strip(" ,.;") if marker else text
 
 
 def _delivery_term_with_stage_difference(label: str, value: str | None, plan_stages: list[Any]) -> str:
@@ -2709,7 +2740,7 @@ def _delivery_term_with_stage_difference(label: str, value: str | None, plan_sta
 
 def _plan_has_stages(package: ProcurementPackageExtraction) -> bool:
     schedule = package.schedule_application
-    return bool(schedule and (getattr(schedule, "stages", []) or getattr(schedule, "has_stages", False)))
+    return bool(schedule and getattr(schedule, "stages", []))
 
 
 def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
@@ -2817,7 +2848,7 @@ def _national_regime_label_only(field_code: str, value: str | None) -> bool:
 
 
 def _unscoped_prohibition(value: str | None) -> bool:
-    text = normalize_text(value)
+    text = str(value or "").casefold()
     if not text or not any(marker in text for marker in ("запрет", "да")):
         return False
     return not re.search(r"\d{2}(?:\.\d{2}){1,3}|приложен|позиц", text)
@@ -2835,57 +2866,125 @@ def _plan_inline_stage_terms(value: str | None) -> list[tuple[str, str]]:
     return result
 
 
-def _plan_stage_internal_differences(schedule: Any) -> list[str]:
-    """Compare the physical stage table in the plan with its inline delivery list."""
-    table_numbers = [
-        clean_stage_number(getattr(stage, "stage_number", None))
-        for stage in (getattr(schedule, "stages", []) or [])
+def _stage_has_explicit_end(stage: Any) -> bool:
+    """Do not mistake the only start date in a text fragment for an end date."""
+    text = str(getattr(stage, "service_term_text", None) or "")
+    return bool(re.search(r"\b(?:по|до)\s+\d{2}\.\d{2}\.\d{4}\b", text, flags=re.IGNORECASE))
+
+
+def _comparable_plan_stages(stages: list[Any]) -> list[Any]:
+    """Keep malformed inline plan fragments out of cross-document stage matching."""
+    return [
+        stage
+        for stage in stages
+        if "schedule_application:raw_fields" not in str(getattr(stage, "evidence", ""))
+        or _stage_has_explicit_end(stage)
+    ]
+
+
+def _plan_stage_internal_differences(
+    schedule: Any,
+    documents: list[tuple[str, list[Any]]],
+) -> list[str]:
+    """Compare the inline schedule term with the table it refers to, when available."""
+    schedule_stages = list(getattr(schedule, "stages", []) or [])
+    inline_stages = [
+        stage
+        for stage in schedule_stages
+        if "schedule_application:raw_fields" in str(getattr(stage, "evidence", ""))
+    ]
+    physical_plan_stages = [
+        stage
+        for stage in schedule_stages
         if "schedule_application:raw_fields" not in str(getattr(stage, "evidence", ""))
     ]
-    table_numbers = [number for number in table_numbers if number]
-    inline_terms = _plan_inline_stage_terms(getattr(schedule, "delivery_term_text", None))
-    inline_numbers = [number for number, _term in inline_terms]
-    if not table_numbers or not inline_numbers:
+    if not inline_stages:
+        inline_stages = [
+            ProcurementStage(stage_number=number, stage_name=f"{number} этап", service_term_text=term)
+            for number, term in _plan_inline_stage_terms(getattr(schedule, "delivery_term_text", None))
+        ]
+    inline_by_number = {
+        clean_stage_number(getattr(stage, "stage_number", None)): stage
+        for stage in inline_stages
+        if clean_stage_number(getattr(stage, "stage_number", None))
+    }
+    if not inline_by_number:
         return []
 
-    differences: list[str] = []
-    if table_numbers != inline_numbers:
-        differences.append(
-            "В ПГ таблица этапов содержит "
-            f"{', '.join(table_numbers)}, а в сроке оказания услуг перечислены {', '.join(inline_numbers)}."
+    if physical_plan_stages:
+        reference_name, reference_stages = "schedule_application", physical_plan_stages
+    else:
+        document_stages = dict(documents)
+        reference_name, reference_stages = next(
+            (
+                (name, document_stages[name])
+                for name in ("purchase_description", "contract_draft", "nmck_justification", "purchase_request")
+                if document_stages.get(name)
+            ),
+            (None, []),
         )
-    for number, term in inline_terms:
-        if not re.search(r"\b(?:по|до)\s+\d{2}\.\d{2}\.\d{4}\b", term, flags=re.IGNORECASE):
+    reference_by_number = {
+        clean_stage_number(getattr(stage, "stage_number", None)): stage
+        for stage in reference_stages
+        if clean_stage_number(getattr(stage, "stage_number", None))
+    }
+    differences: list[str] = []
+    inline_numbers = list(inline_by_number)
+    reference_numbers = list(reference_by_number)
+    if reference_numbers and inline_numbers != reference_numbers:
+        if reference_name == "schedule_application":
+            differences.append(
+                "В ПГ таблица этапов содержит "
+                f"{', '.join(reference_numbers)}, а в сроке оказания услуг перечислены {', '.join(inline_numbers)}."
+            )
+        else:
+            differences.append(
+                "В ПГ в поле срока перечислены этапы "
+                f"{', '.join(inline_numbers)}, а в таблице этапов "
+                f"{DOCUMENT_LABELS.get(reference_name or '', reference_name or 'документа')} — "
+                f"{', '.join(reference_numbers)}."
+            )
+    for number, stage in inline_by_number.items():
+        if not _stage_has_explicit_end(stage):
             differences.append(f"В сроке оказания услуг ПГ у этапа {number} не указана дата окончания.")
+        reference_stage = reference_by_number.get(number)
+        if reference_stage and _stage_terms_match(stage, reference_stage) == "mismatch":
+            differences.append(
+                f"В ПГ срок этапа {number}: {_stage_term_summary(stage)}; "
+                f"в таблице этапов {DOCUMENT_LABELS.get(reference_name or '', reference_name or 'документа')} — "
+                f"{_stage_term_summary(reference_stage)}."
+            )
     return differences
 
 
 def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckResult:
     schedule = package.schedule_application
     plan_stages = list(getattr(schedule, "stages", []) or []) if schedule else []
-    has_plan_stages = bool(plan_stages) or bool(getattr(schedule, "has_stages", None))
     docs = [
         ("purchase_request", list(getattr(package.purchase_request, "stages", []) or []) if package.purchase_request else []),
         ("purchase_description", list(getattr(package.purchase_description, "stages", []) or []) if package.purchase_description else []),
         ("contract_draft", list(getattr(package.contract_draft, "stages", []) or []) if package.contract_draft else []),
         ("nmck_justification", list(getattr(package.nmck_justification, "stages", []) or []) if package.nmck_justification else []),
     ]
-    summary_lines = [f"Заявка в план-график: {_stages_summary(has_plan_stages, plan_stages)}"]
+    comparable_plan_stages = _comparable_plan_stages(plan_stages)
+    has_plan_stages = bool(plan_stages) or bool(getattr(schedule, "has_stages", None))
+    summary_lines = [f"Заявка в план-график: {_stages_summary(has_plan_stages, comparable_plan_stages)}"]
     summary_lines.extend(f"{DOCUMENT_LABELS.get(name, name)}: {_stages_summary(bool(stages), stages)}" for name, stages in docs)
-    internal_differences = _plan_stage_internal_differences(schedule) if schedule else []
+    internal_differences = _plan_stage_internal_differences(schedule, docs) if schedule else []
     summary_lines.extend(f"ПГ: {difference}" for difference in internal_differences)
+    comparison: dict[str, Any] = {"failed": [], "manual": [], "summary_lines": [], "difference_summary": None}
     if not has_plan_stages and not any(stages for _name, stages in docs):
         status = "passed"
         message = "Этапы исполнения не предусмотрены в извлечённых данных."
-    elif has_plan_stages and not plan_stages:
+    elif has_plan_stages and not comparable_plan_stages:
         status = "manual_review"
         message = "В заявке есть признак этапов, но структурированный список этапов не извлечён."
     else:
-        comparison = _compare_stage_sets(plan_stages, docs)
+        comparison = _compare_stage_sets(comparable_plan_stages, docs)
         summary_lines.extend(comparison["summary_lines"])
         if internal_differences:
             status = "failed"
-            message = internal_differences[0]
+            message = "В ПГ выявлены внутренние несоответствия этапов; см. пояснения перед таблицами."
         elif comparison["failed"]:
             status = "failed"
             message = comparison["difference_summary"] or "Этапы исполнения расходятся с заявкой в план-график."
@@ -2911,13 +3010,19 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
         ],
         details={
             "summary_lines": summary_lines,
-            "difference_summary": comparison.get("difference_summary") if has_plan_stages and plan_stages else None,
-            "stage_tables": _stage_tables(package),
+            "difference_summary": comparison.get("difference_summary") if has_plan_stages and comparable_plan_stages else None,
+            "internal_differences": internal_differences,
+            "comparison_differences": comparison.get("failed", []),
+            "stage_tables": _stage_tables(package, plan_stages=comparable_plan_stages),
         },
     )
 
 
-def _stage_tables(package: ProcurementPackageExtraction) -> list[dict[str, Any]]:
+def _stage_tables(
+    package: ProcurementPackageExtraction,
+    *,
+    plan_stages: list[Any] | None = None,
+) -> list[dict[str, Any]]:
     """Build report-ready stage rows without serializing model objects into text."""
     documents = [
         ("schedule_application", "Заявка в план-график (ПГ)", package.schedule_application, "standard"),
@@ -2928,7 +3033,11 @@ def _stage_tables(package: ProcurementPackageExtraction) -> list[dict[str, Any]]
     total_nmck = _money_amount(package.nmck_justification.total_amount) if package.nmck_justification else None
     tables: list[dict[str, Any]] = []
     for document_key, title, document, table_kind in documents:
-        stages = list(getattr(document, "stages", []) or []) if document else []
+        stages = (
+            list(plan_stages)
+            if document_key == "schedule_application" and plan_stages is not None
+            else list(getattr(document, "stages", []) or []) if document else []
+        )
         if not stages:
             continue
         rows = []
@@ -3028,6 +3137,11 @@ def _stage_difference_summary(plan_stages: list[Any], docs: list[tuple[str, list
     plan_numbers = [number for number in plan_numbers if number]
     if not plan_numbers:
         return None
+    plan_by_number = {
+        clean_stage_number(getattr(stage, "stage_number", None)): stage
+        for stage in plan_stages
+        if clean_stage_number(getattr(stage, "stage_number", None))
+    }
     grouped: dict[tuple[int, tuple[str, ...]], list[str]] = defaultdict(list)
     for document_name, stages in docs:
         if not stages:
@@ -3038,6 +3152,20 @@ def _stage_difference_summary(plan_stages: list[Any], docs: list[tuple[str, list
         if missing:
             grouped[(len(numbers), missing)].append(DOCUMENT_LABELS.get(document_name, document_name))
     if not grouped:
+        for document_name, stages in docs:
+            doc_by_number = {
+                clean_stage_number(getattr(stage, "stage_number", None)): stage
+                for stage in stages
+                if clean_stage_number(getattr(stage, "stage_number", None))
+            }
+            for number, plan_stage in plan_by_number.items():
+                doc_stage = doc_by_number.get(number)
+                if doc_stage and _stage_terms_match(plan_stage, doc_stage) == "mismatch":
+                    return (
+                        f"Срок этапа {number} в ПГ {_stage_term_summary(plan_stage)}; "
+                        f"в {DOCUMENT_LABELS.get(document_name, document_name)} — "
+                        f"{_stage_term_summary(doc_stage)}."
+                    )
         return None
     (count, missing), labels = next(iter(grouped.items()))
     document_text = ", ".join(labels)
@@ -4184,7 +4312,11 @@ def _percent_in_text(text: str, expected: Decimal) -> bool:
 def _percent_values_in_text(text: str) -> list[Decimal]:
     values = [
         normalize_decimal(match)
-        for match in re.findall(r"(\d+(?:[,.]\d+)?)\s*(?:%|процент)", text, flags=re.IGNORECASE)
+        for match in re.findall(
+            r"(\d+(?:[,.]\d+)?)\s*(?:\([^)]*\)\s*)?(?:%|процент)",
+            text,
+            flags=re.IGNORECASE,
+        )
     ]
     return _unique_decimals([value for value in values if value is not None])
 
@@ -4327,6 +4459,101 @@ def _check_smp_sonko_subcontract(package: ProcurementPackageExtraction) -> list[
     ]
 
 
+def _check_smp_sonko_standard_terms(package: ProcurementPackageExtraction) -> list[CheckResult]:
+    schedule = package.schedule_application
+    contract = package.contract_draft
+    if schedule is None or getattr(schedule, "subcontract_smp_sonko_required", None) is not True:
+        return []
+    if contract is None:
+        return [
+            _result(
+                "strict.smp_sonko_standard_terms",
+                "Типовые условия привлечения СМП/СОНКО",
+                "manual_review",
+                "strict",
+                "Проект контракта отсутствует; типовые условия ПП №1466 проверить невозможно.",
+                documents=["schedule_application", "contract_draft"],
+            )
+        ]
+
+    text = str(getattr(contract, "smp_sonko_standard_terms_text", "") or "")
+    if not text:
+        return [
+            _result(
+                "strict.smp_sonko_standard_terms",
+                "Типовые условия привлечения СМП/СОНКО",
+                "failed",
+                "strict",
+                "В ПГ установлено привлечение СМП/СОНКО, но раздел с типовыми условиями ПП №1466 в проекте контракта не найден.",
+                documents=["schedule_application", "contract_draft"],
+                fields=["schedule_application.subcontract_smp_sonko_required"],
+            )
+        ]
+
+    lowered = normalize_text(text)
+    has_smp = any(marker in lowered for marker in ("смп", "сонко", "субъектов малого предпринимательства", "социально ориентирован"))
+    checks = [
+        (
+            "обязанность привлечь СМП/СОНКО в установленном проценте",
+            has_smp and "привлеч" in lowered and bool(_percent_values_in_text(text)),
+        ),
+        (
+            "декларация и копия договора в течение 5 рабочих дней",
+            all(marker in lowered for marker in ("декларац", "копи", "договор", "5", "рабоч")),
+        ),
+        (
+            "документы при замене соисполнителя в течение 5 дней",
+            all(marker in lowered for marker in ("замен", "документ", "5", "дн")),
+        ),
+        (
+            "документы о приемке и оплате в течение 10 рабочих дней",
+            all(marker in lowered for marker in ("10", "рабоч", "оплат", "приемк", "платеж")),
+        ),
+        (
+            "оплата соисполнителю в течение 7 рабочих дней после приемки",
+            all(marker in lowered for marker in ("оплач", "7", "рабоч", "приемк")),
+        ),
+        (
+            "ответственность за нарушение условий привлечения",
+            ("ответственност" in lowered or "гражданско-правов" in lowered)
+            and ("непривлеч" in lowered or "непредставлен" in lowered),
+        ),
+        (
+            "право заменить ненадлежащего соисполнителя",
+            "осуществлять замену" in lowered
+            and any(marker in lowered for marker in ("соисполн", "субподряд")),
+        ),
+    ]
+    missing = [label for label, found in checks if not found]
+    status = "passed" if not missing else "failed"
+    message = (
+        "Типовые условия ПП №1466 найдены в проекте контракта."
+        if not missing
+        else "В проекте контракта отсутствуют отдельные типовые условия ПП №1466."
+    )
+    summary_lines = [
+        f"Найдено: {label}." for label, found in checks if found
+    ] + [
+        f"Не найдено: {label}." for label in missing
+    ]
+    return [
+        _result(
+            "strict.smp_sonko_standard_terms",
+            "Типовые условия привлечения СМП/СОНКО",
+            status,
+            "strict",
+            message,
+            documents=["schedule_application", "contract_draft"],
+            fields=[
+                "schedule_application.subcontract_smp_sonko_required",
+                "contract_draft.smp_sonko_standard_terms_text",
+            ],
+            evidence=[_short_clause_text(text)],
+            details={"summary_lines": summary_lines, "missing_terms": missing},
+        )
+    ]
+
+
 def _smp_sonko_summary(required: bool | None, percent: Decimal | None, raw: str | None) -> str:
     if required is True:
         base = "обязанность установлена"
@@ -4370,6 +4597,10 @@ def _check_contract_attachments(package: ProcurementPackageExtraction) -> list[C
                 fields=["contract_draft.referenced_attachments"],
             )
         ]
+    actual_kinds = {
+        attachment.attachment_kind
+        for attachment in (contract.actual_attachments or [])
+    }
     failures = []
     for attachment in contract.referenced_attachments:
         if (
@@ -4378,7 +4609,11 @@ def _check_contract_attachments(package: ProcurementPackageExtraction) -> list[C
             and contract.embedded_purchase_description is None
         ):
             failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' не найдено в проекте контракта.")
-        elif attachment.attachment_kind == "contract_specification" and not contract.specification_items:
+        elif (
+            attachment.attachment_kind == "contract_specification"
+            and "contract_specification" not in actual_kinds
+            and not contract.specification_items
+        ):
             failures.append(f"Приложение №{attachment.number} '{attachment.title_raw}' требует таблицу спецификации.")
     if failures:
         status = "failed"

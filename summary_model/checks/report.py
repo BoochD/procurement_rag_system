@@ -42,6 +42,7 @@ INTERNAL_CHECK_ORDER = [
     "strict.funding_source",
     "strict.contract.penalties",
     "strict.smp_sonko_subcontract",
+    "strict.smp_sonko_standard_terms",
     "strict.contract.attachments",
 ]
 
@@ -574,8 +575,17 @@ def _render_semantic_result(result: CheckResult) -> list[str]:
 def _render_stage_table(result: CheckResult) -> list[str]:
     label = STATUS_LABELS[result.status]
     lines = [f"- <b>{_human_text(result.title)}</b> - {label}. {_human_text(result.report_text)}"]
+    details = result.details or {}
     stage_tables = result.details.get("stage_tables") if result.details else None
     if isinstance(stage_tables, list) and stage_tables:
+        internal_differences = details.get("internal_differences")
+        if isinstance(internal_differences, list) and internal_differences:
+            lines.extend(["", "<b>Внутреннее несоответствие ПГ:</b>"])
+            lines.extend(f"- {_human_text(str(item))}" for item in internal_differences)
+        comparison_differences = details.get("comparison_differences")
+        if isinstance(comparison_differences, list) and comparison_differences:
+            lines.extend(["", "<b>Сверка этапов с документами:</b>"])
+            lines.extend(f"- {_human_text(str(item))}" for item in comparison_differences)
         for index, table in enumerate(stage_tables, start=1):
             if not isinstance(table, dict) or not isinstance(table.get("rows"), list):
                 continue
