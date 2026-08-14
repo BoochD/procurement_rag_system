@@ -46,9 +46,12 @@
                                             class="form-control"
                                             id="{{ field_name }}"
                                             name="{{ field_name }}"
+                                            accept="{% if field_name == 'obrasheniye' or field_name == 'zapiska' %}.docx,.pdf{% else %}.docx{% endif %}"
                                             {% if field_name in required_document_keys %}required{% endif %}
                                         >
-                                        <div class="form-text">Форматы: .txt, .docx, .pdf</div>
+                                        <div class="form-text">
+                                            Форматы: {% if field_name == 'obrasheniye' or field_name == 'zapiska' %}.docx, .pdf{% else %}.docx{% endif %}
+                                        </div>
                                     </div>
                                     {% endfor %}
                                 </div>

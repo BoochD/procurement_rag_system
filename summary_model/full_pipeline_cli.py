@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ktru", action="store_true")
     parser.add_argument("--no-vlm-tables", action="store_true")
     parser.add_argument("--no-vlm-commercial-offers", action="store_true")
+    parser.add_argument("--no-vlm-short-documents", action="store_true")
     parser.add_argument(
         "--llm-concurrency",
         type=int,
@@ -73,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--vlm-max-offer-pages",
         type=int,
         default=int(os.getenv("SUMMARY_VLM_MAX_COMMERCIAL_OFFER_PAGES", "8")),
+    )
+    parser.add_argument(
+        "--vlm-max-short-document-pages",
+        type=int,
+        default=int(os.getenv("SUMMARY_VLM_MAX_SHORT_DOCUMENT_PAGES", "4")),
     )
     return parser
 
@@ -106,10 +112,12 @@ def main(argv: list[str] | None = None) -> int:
         with_ktru=not args.no_ktru,
         with_vlm_tables=not args.no_vlm_tables,
         with_vlm_commercial_offers=not args.no_vlm_commercial_offers,
+        with_vlm_short_documents=not args.no_vlm_short_documents,
         ktru_timeout_seconds=args.ktru_timeout,
         llm_concurrency=args.llm_concurrency,
         vlm_max_tables_per_document=args.vlm_max_tables,
         vlm_max_commercial_offer_pages=args.vlm_max_offer_pages,
+        vlm_max_short_document_pages=args.vlm_max_short_document_pages,
         vlm_output_dir=args.output_dir / "vlm_tables",
     )
     run_metadata = {
@@ -188,9 +196,13 @@ def discover_uploaded_documents(input_dir: Path) -> tuple[list[dict[str, Any]], 
         if role is None:
             ignored.append({"name": path.name, "reason": "document role not recognized"})
             continue
-        if path.suffix.casefold() != ".docx" and role != "commercial_offer":
+        if path.suffix.casefold() != ".docx" and role not in {
+            "commercial_offer",
+            "obrasheniye",
+            "zapiska",
+        }:
             ignored.append(
-                {"name": path.name, "reason": "only commercial offers use PDF/image ingestion"}
+                {"name": path.name, "reason": "PDF ingestion is supported only for commercial offers, requests, and explanatory notes"}
             )
             continue
         candidates.setdefault(role, []).append(path)
@@ -256,7 +268,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--llm-concurrency must be at least 1.")
     if args.ktru_timeout < 1:
         raise SystemExit("--ktru-timeout must be at least 1.")
-    if args.vlm_max_tables < 1 or args.vlm_max_offer_pages < 1:
+    if (
+        args.vlm_max_tables < 1
+        or args.vlm_max_offer_pages < 1
+        or args.vlm_max_short_document_pages < 1
+    ):
         raise SystemExit("VLM table/page limits must be at least 1.")
 
 

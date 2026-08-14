@@ -28,6 +28,10 @@ from summary_model.extraction.llm_document_extractor import (
 from summary_model.extraction.llm_payloads import build_document_llm_payload
 from summary_model.extraction_pipeline import RequiredDocumentExtractionError, extract_package
 from summary_model.ingestion import read_docx
+from summary_model.short_document_vlm import (
+    ShortDocumentVlmOptions,
+    extract_short_document_with_vlm,
+)
 from summary_model.tables import extract_tables
 from summary_model.vlm_fallback import VlmFallbackOptions, VlmFallbackRepairer
 
@@ -50,10 +54,12 @@ class WebPipelineOptions:
     with_ktru: bool = True
     with_vlm_tables: bool = False
     with_vlm_commercial_offers: bool = True
+    with_vlm_short_documents: bool = True
     ktru_timeout_seconds: int = 30
     llm_concurrency: int = 6
     vlm_max_tables_per_document: int = 4
     vlm_max_commercial_offer_pages: int = 8
+    vlm_max_short_document_pages: int = 4
     vlm_output_dir: Path | None = None
 
 
@@ -89,7 +95,12 @@ async def _aprocess_uploaded_documents(
 ) -> WebPipelineResult:
     options = options or WebPipelineOptions()
     input_documents = _input_documents(uploaded_documents)
-    docx_documents, media_commercial_offers, unsupported_documents = _split_input_documents(input_documents)
+    (
+        docx_documents,
+        media_commercial_offers,
+        media_short_documents,
+        unsupported_documents,
+    ) = _split_input_documents(input_documents)
     vlm_repairer = VlmFallbackRepairer(
         VlmFallbackOptions(
             enabled=options.with_vlm_tables,
@@ -151,6 +162,36 @@ async def _aprocess_uploaded_documents(
             package.commercial_offers_found_count < package.commercial_offers_required_count
         )
         metrics["commercial_offer_vlm"] = commercial_offer_metrics
+
+    short_document_metrics = []
+    for document in media_short_documents:
+        result = extract_short_document_with_vlm(
+            document.path,
+            document.type_hint,
+            options=ShortDocumentVlmOptions(
+                enabled=options.with_vlm_short_documents,
+                max_pages=options.vlm_max_short_document_pages,
+            ),
+        )
+        if document.type_hint == DocumentType.REQUEST:
+            package.purchase_request = result.document
+        else:
+            package.explanatory_note = result.document
+        package.files.append(
+            DocumentEnvelope(
+                file_name=document.path.name,
+                file_path=str(document.path),
+                document_type=document.type_hint.value,
+                confidence=0.75 if not result.document.parser_warnings else 0.35,
+                parser_warnings=result.document.parser_warnings,
+            )
+        )
+        short_document_metrics.append({"file_name": document.path.name, **result.metrics})
+        warnings.extend(_short_document_recovery_warnings(document.path.name, result.metrics))
+        if result.metrics.get("errors"):
+            warnings.append(f"{document.path.name}: VLM-разбор PDF не выполнен.")
+    if media_short_documents:
+        metrics["short_document_vlm"] = short_document_metrics
 
     if options.with_llm_extraction:
         llm_warnings, llm_metrics = await _apply_llm_extraction(
@@ -249,9 +290,10 @@ def _input_documents(uploaded_documents: list[dict[str, Any]]) -> list[InputDocu
 
 def _split_input_documents(
     documents: list[InputDocument],
-) -> tuple[list[InputDocument], list[InputDocument], list[InputDocument]]:
+) -> tuple[list[InputDocument], list[InputDocument], list[InputDocument], list[InputDocument]]:
     docx_documents: list[InputDocument] = []
     media_commercial_offers: list[InputDocument] = []
+    media_short_documents: list[InputDocument] = []
     unsupported_documents: list[InputDocument] = []
     for document in documents:
         suffix = document.path.suffix.casefold()
@@ -265,9 +307,11 @@ def _split_input_documents(
             ".webp",
         }:
             media_commercial_offers.append(document)
+        elif document.type_hint in {DocumentType.REQUEST, DocumentType.EXPLANATORY_NOTE} and suffix == ".pdf":
+            media_short_documents.append(document)
         else:
             unsupported_documents.append(document)
-    return docx_documents, media_commercial_offers, unsupported_documents
+    return docx_documents, media_commercial_offers, media_short_documents, unsupported_documents
 
 
 async def _apply_llm_extraction(
@@ -441,6 +485,23 @@ def _commercial_offer_recovery_warnings(
     return [
         f"{file_name}: VLM-разбор КП восстановлен частично; локальный fallback применён "
         f"к {len(warnings)} полям/строкам ({examples}). Подробности сохранены в метриках."
+    ]
+
+
+def _short_document_recovery_warnings(file_name: str, metrics: dict[str, Any]) -> list[str]:
+    recovery = metrics.get("structured_recovery")
+    if not isinstance(recovery, dict):
+        return []
+    warnings = [
+        str(warning)
+        for warning in recovery.get("lossy_warnings", [])
+        if not _is_evidence_only_recovery(str(warning))
+    ]
+    if not warnings:
+        return []
+    return [
+        f"{file_name}: VLM-разбор PDF восстановлен частично; "
+        f"локальный fallback применён к {len(warnings)} полям/строкам."
     ]
 
 

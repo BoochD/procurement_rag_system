@@ -1,6 +1,7 @@
 import os
 import base64
 from io import BytesIO
+from pathlib import Path
 
 from celery import Celery
 from celery.result import AsyncResult
@@ -18,6 +19,7 @@ DOCUMENT_FIELDS = (
 COMMERCIAL_OFFER_FIELD = "commercial_offers"
 COMMERCIAL_OFFER_LABEL = "Коммерческое предложение"
 REQUIRED_DOCUMENT_KEYS = {"plan"}
+PDF_DOCUMENT_KEYS = {"obrasheniye", "zapiska"}
 
 celery_app = Celery("django_client")
 celery_app.conf.broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
@@ -51,6 +53,14 @@ def upload_and_process(request):
                         f"fileprocessor:index?error=Please upload document: {field_label}."
                     )
                 continue
+
+            suffix = Path(uploaded_file.name).suffix.casefold()
+            allowed_suffixes = {".docx", ".pdf"} if field_name in PDF_DOCUMENT_KEYS else {".docx"}
+            if suffix not in allowed_suffixes:
+                expected = ".docx или .pdf" if field_name in PDF_DOCUMENT_KEYS else ".docx"
+                return redirect(
+                    f"fileprocessor:index?error=Для документа {field_label} допустим формат {expected}."
+                )
 
             documents.append({
                 "key": field_name,

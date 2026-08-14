@@ -222,10 +222,12 @@ def process_document_query(self, documents):
                     with_ktru=True,
                     with_vlm_tables=os.getenv("SUMMARY_WITH_VLM_TABLES", "0") == "1",
                     with_vlm_commercial_offers=os.getenv("SUMMARY_WITH_VLM_COMMERCIAL_OFFERS", "1") == "1",
+                    with_vlm_short_documents=os.getenv("SUMMARY_WITH_VLM_SHORT_DOCUMENTS", "1") == "1",
                     ktru_timeout_seconds=int(os.getenv("KTRU_TIMEOUT_SECONDS", "30")),
                     llm_concurrency=int(os.getenv("SUMMARY_LLM_CONCURRENCY", "6")),
                     vlm_max_tables_per_document=int(os.getenv("SUMMARY_VLM_MAX_TABLES_PER_DOCUMENT", "4")),
                     vlm_max_commercial_offer_pages=int(os.getenv("SUMMARY_VLM_MAX_COMMERCIAL_OFFER_PAGES", "8")),
+                    vlm_max_short_document_pages=int(os.getenv("SUMMARY_VLM_MAX_SHORT_DOCUMENT_PAGES", "4")),
                 ),
             )
             ai_response = mark_report_text(pipeline_result.report_text)
