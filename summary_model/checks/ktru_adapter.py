@@ -91,6 +91,7 @@ def run_ktru_characteristic_checks(
     forbidden_extra: list[str] = []
     extra_reasons: list[str] = []
     characteristic_rows: list[dict[str, Any]] = []
+    item_identity_rows: list[dict[str, Any]] = []
     additional_rows: list[dict[str, Any]] = []
     checked_characteristics = 0
 
@@ -107,6 +108,7 @@ def run_ktru_characteristic_checks(
         legal_lookup, required_names = _build_legal_lookup(legal_characteristics)
         present_required_names: set[str] = set()
         common_info = common_cache.get(ktru_code)
+        item_identity_rows.append(_item_identity_row(item, ktru_code, common_info))
         plan_okpd2_code, plan_okpd2_source = _plan_okpd2_for_item(package, item)
         rule_okpd2_code = item.okpd2_code or plan_okpd2_code
         rule_okpd2_source = (
@@ -213,6 +215,13 @@ def run_ktru_characteristic_checks(
     if invalid_values or missing_required:
         characteristic_status = "failed"
         characteristic_message = "Найдены ошибки в значениях или обязательных характеристиках КТРУ."
+    identity_statuses = {row["status"] for row in item_identity_rows}
+    if "failed" in identity_statuses:
+        characteristic_status = "failed"
+        characteristic_message = "Найдены ошибки в характеристиках или единицах измерения позиций КТРУ."
+    elif "manual_review" in identity_statuses and characteristic_status == "passed":
+        characteristic_status = "manual_review"
+        characteristic_message = "Наименование или единица измерения части позиций требуют проверки."
 
     assessments = build_assessments(
         additional_rows,
@@ -233,6 +242,7 @@ def run_ktru_characteristic_checks(
                 "ktru_cards": _ktru_card_summaries(item_names_by_ktru, common_cache, unavailable),
                 "checked_characteristics": checked_characteristics,
                 "characteristic_rows": characteristic_rows,
+                "item_identity_rows": item_identity_rows,
                 "invalid_values": invalid_values,
                 "missing_required": missing_required,
                 "unavailable_ktru": unavailable,
@@ -1036,7 +1046,72 @@ def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
 def _unit_status(ooz_unit: str | None, legal_unit: str | None) -> str:
     if not legal_unit or not ooz_unit:
         return "not_checked"
-    return "passed" if _name_key(ooz_unit) == _name_key(legal_unit) else "failed"
+    return "passed" if _unit_key(ooz_unit) == _unit_key(legal_unit) else "failed"
+
+
+def _unit_key(value: str | None) -> str:
+    normalized = _name_key(value)
+    aliases = (
+        (("шт", "штук"), "штука"),
+        (("комплект",), "комплект"),
+        (("пара",), "пара"),
+        (("усл ед", "условная единица"), "условная единица"),
+    )
+    for markers, canonical in aliases:
+        if any(marker in normalized for marker in markers):
+            return canonical
+    return normalized
+
+
+def _item_identity_row(
+    item: PurchaseItem,
+    ktru_code: str,
+    common_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not common_info:
+        return {
+            "ktru_code": ktru_code,
+            "item_name": item.name,
+            "ktru_name": None,
+            "ooz_unit": item.unit,
+            "ktru_unit": None,
+            "name_status": "not_checked",
+            "unit_status": "not_checked",
+            "status": "not_checked",
+        }
+    reference_name = (common_info or {}).get("name")
+    reference_unit = (common_info or {}).get("unit")
+    if reference_name:
+        name_status = (
+            "passed"
+            if item.name and _purchase_names_match(item.name, reference_name)
+            else "manual_review"
+        )
+    else:
+        name_status = "not_checked"
+    if reference_unit and not item.unit:
+        unit_status = "manual_review"
+    else:
+        unit_status = _unit_status(item.unit, reference_unit)
+    statuses = {name_status, unit_status}
+    if "failed" in statuses:
+        status = "failed"
+    elif "manual_review" in statuses:
+        status = "manual_review"
+    elif "passed" in statuses:
+        status = "passed"
+    else:
+        status = "not_checked"
+    return {
+        "ktru_code": ktru_code,
+        "item_name": item.name,
+        "ktru_name": reference_name,
+        "ooz_unit": item.unit,
+        "ktru_unit": reference_unit,
+        "name_status": name_status,
+        "unit_status": unit_status,
+        "status": status,
+    }
 
 
 def _characteristic_row_message(

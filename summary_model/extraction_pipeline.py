@@ -948,6 +948,16 @@ def _link_codes_to_items_from_text(
 ) -> None:
     if not items or not references:
         return
+    if len(items) == 1:
+        item = items[0]
+        ktru_codes = {reference.code for reference in references if reference.code_type == "ktru"}
+        okpd2_codes = {reference.code for reference in references if reference.code_type == "okpd2"}
+        if not item.ktru_code and len(ktru_codes) == 1:
+            item.ktru_code = next(iter(ktru_codes))
+            item.parser_warnings.append("КТРУ привязан к единственной позиции ООЗ из текста документа.")
+        if not item.okpd2_code and len(okpd2_codes) == 1:
+            item.okpd2_code = next(iter(okpd2_codes))
+            item.parser_warnings.append("ОКПД2 привязан к единственной позиции ООЗ из текста документа.")
     for item in items:
         item_name = clean_text(item.name)
         if not item_name:
@@ -1102,7 +1112,7 @@ def _attachment_type(title: str) -> ExtractionDocumentType:
         return "schedule_application"
     if "определение цены" in lowered or "обоснование" in lowered or "нмцк" in lowered:
         return "nmck_justification"
-    if "описание объекта" in lowered:
+    if "описани" in lowered and "объект" in lowered:
         return "purchase_description"
     if "проект контракта" in lowered or "контракт" in lowered:
         return "contract_draft"
@@ -1115,7 +1125,7 @@ def _attachment_type(title: str) -> ExtractionDocumentType:
 
 def _attachment_kind(title: str) -> str:
     lowered = title.casefold()
-    if "описание объекта" in lowered:
+    if "описани" in lowered and "объект" in lowered:
         return "purchase_description"
     if "акт" in lowered and ("приема" in lowered or "приём" in lowered or "передач" in lowered):
         return "acceptance_act_form"
@@ -1176,7 +1186,12 @@ def _table_rows_text(ir: DocumentIR) -> str:
 
 
 def _numbered_attachments_from_chunk(chunk: str) -> list[RequestAttachment]:
-    stop = re.search(r"обязательный пакет|с уважением|подпис", chunk, flags=re.IGNORECASE)
+    stop = re.search(
+        r"обязательный пакет|с уважением|подпис|"
+        r"согласовано|начальник\s+(?:отдела|управления)|\[место\s+для",
+        chunk,
+        flags=re.IGNORECASE,
+    )
     if stop:
         chunk = chunk[: stop.start()]
 
@@ -1227,17 +1242,33 @@ def _numbered_attachments_from_chunk(chunk: str) -> list[RequestAttachment]:
 
 def _contract_referenced_attachments(text: str) -> list[RequestAttachment]:
     result: list[RequestAttachment] = []
-    pattern = re.compile(
+    quoted_pattern = re.compile(
         r"приложени[ея]\s*№\s*(\d+)\s*[«\"]([^»\"\n;]+)[»\"]",
         flags=re.IGNORECASE,
     )
-    for match in pattern.finditer(text):
-        title = clean_text(match.group(2))
+    references = [
+        (match.group(1), clean_text(match.group(2)))
+        for match in quoted_pattern.finditer(text)
+    ]
+    before_pattern = re.compile(
+        r"([^\n.;]{3,120}?)\s*\(\s*приложени[ея]\s*№\s*(\d+)\s*\)",
+        flags=re.IGNORECASE,
+    )
+    references.extend(
+        (match.group(2), clean_text(match.group(1)).lstrip(" :-–—"))
+        for match in before_pattern.finditer(text)
+    )
+    seen: set[tuple[str, str]] = set()
+    for number, title in references:
         if not title:
             continue
+        key = (number, title.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
         result.append(
             RequestAttachment(
-                number=match.group(1),
+                number=number,
                 title_raw=title,
                 normalized_document_type=_attachment_type(title),
                 attachment_kind=_attachment_kind(title),
@@ -1288,6 +1319,8 @@ def _purchase_request(ir: DocumentIR, tables: list[ParsedTable]) -> PurchaseRequ
 def _procurement_method(text: str) -> str | None:
     lowered = text.casefold()
     if "электрон" in lowered and "магазин" in lowered:
+        return "single_supplier"
+    if "прямой договор" in lowered:
         return "single_supplier"
     if "единствен" in lowered:
         return "single_supplier"
@@ -1727,6 +1760,9 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
         if table.table_type != "ooz_items_table":
             continue
         for payload in table.compact_json.get("items", []):
+            name = clean_text(payload.get("name"))
+            if _is_non_item_ooz_row(name, payload):
+                continue
             characteristics = [
                 PurchaseItemCharacteristic(
                     name=characteristic.get("name"),
@@ -1739,7 +1775,7 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
             result.append(
                 PurchaseItem(
                     row_number=payload.get("row_number"),
-                    name=payload.get("name"),
+                    name=name,
                     okpd2_code=payload.get("okpd2_code"),
                     ktru_code=payload.get("ktru_code"),
                     trademark=payload.get("trademark"),
@@ -1755,6 +1791,27 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
                 )
             )
     return result
+
+
+def _is_non_item_ooz_row(name: str | None, payload: dict[str, Any]) -> bool:
+    normalized = clean_text(name).casefold()
+    if not normalized:
+        return True
+    if normalized in {"наименование", "наименование оборудования", "наименование товара"}:
+        return True
+    if normalized.startswith("наименование оборудования,"):
+        return True
+    if normalized.startswith("обоснование применения"):
+        return True
+    quantity_raw = clean_text(payload.get("quantity_raw"))
+    has_quantity = bool(
+        re.fullmatch(r"\d+(?:[.,]\d+)?(?:\s+[^\d]{1,30})?", quantity_raw)
+    )
+    has_identity = any(
+        payload.get(field) not in (None, "")
+        for field in ("row_number", "okpd2_code", "ktru_code")
+    ) or has_quantity
+    return len(normalized) > 300 and not has_identity
 
 
 def _contract_specification_items_from_tables(
@@ -1995,6 +2052,40 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
     embedded_subject = _purchase_subject_from_ooz_section(text)
     embedded_delivery_place = _delivery_place_from_ooz_section(text)
     embedded_items = _purchase_items_from_tables(tables)
+    embedded_present = bool(embedded_subject or embedded_delivery_place or embedded_items)
+    actual_attachments = list(table_attachments)
+    if embedded_present and not any(
+        item.attachment_kind == "purchase_description" for item in actual_attachments
+    ):
+        reference = next(
+            (item for item in referenced_attachments if item.attachment_kind == "purchase_description"),
+            None,
+        )
+        actual_attachments.append(
+            RequestAttachment(
+                number=reference.number if reference else None,
+                title_raw=reference.title_raw if reference else "Описание объекта закупки",
+                normalized_document_type="purchase_description",
+                attachment_kind="purchase_description",
+                evidence="contract_text:embedded_purchase_description",
+            )
+        )
+    if specification_items and not any(
+        item.attachment_kind == "contract_specification" for item in actual_attachments
+    ):
+        reference = next(
+            (item for item in referenced_attachments if item.attachment_kind == "contract_specification"),
+            None,
+        )
+        actual_attachments.append(
+            RequestAttachment(
+                number=reference.number if reference else None,
+                title_raw=reference.title_raw if reference else "Спецификация",
+                normalized_document_type="unknown",
+                attachment_kind="contract_specification",
+                evidence="contract_tables:specification",
+            )
+        )
     embedded = PurchaseDescriptionSchema(
         purchase_subject=embedded_subject,
         delivery_place=embedded_delivery_place,
@@ -2039,7 +2130,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         warranty_security_raw=warranty_security_text,
         warranty_security=_security_value(warranty_security_text),
         referenced_attachments=referenced_attachments,
-        actual_attachments=table_attachments,
+        actual_attachments=actual_attachments,
         embedded_purchase_description=(
             embedded
             if embedded.purchase_subject

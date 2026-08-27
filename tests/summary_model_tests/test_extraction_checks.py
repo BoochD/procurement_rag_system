@@ -37,6 +37,7 @@ from summary_model.extraction_models import (
     ScheduleApplicationSchema,
     SecurityValue,
     SupplierPrice,
+    TermValue,
 )
 from summary_model.vlm_lab.models import VlmNmckItem, VlmPurchaseItem, VlmStage
 
@@ -881,6 +882,64 @@ def test_penalty_result_is_passed_when_every_expected_finding_passed():
     assert check.status == "passed"
 
 
+def test_penalty_passed_status_is_rejected_when_quote_has_wrong_smp_percent():
+    from summary_model.checks.penalty_llm import (
+        ContractPenaltyLLMResult,
+        PenaltyCheckFinding,
+        _to_check_result,
+    )
+
+    result = ContractPenaltyLLMResult(
+        status="passed",
+        message="Всё соответствует.",
+        findings=[
+            PenaltyCheckFinding(
+                label="Штраф за непривлечение СМП/СОНКО",
+                status="passed",
+                message="Найдено.",
+                quote="штраф в размере 10 процентов объёма привлечения",
+            )
+        ],
+    )
+
+    check = _to_check_result(result, {"expected": {"smp_sonko_fine_percent": "5"}})
+
+    assert check.status == "failed"
+
+
+def test_semantic_guards_reject_different_streets_and_day_counts():
+    from summary_model.checks.semantic_llm import (
+        SemanticCheckFinding,
+        _apply_delivery_place_guard,
+        _apply_delivery_term_guard,
+    )
+
+    package = _base_package()
+    package.schedule_application.delivery_place = "г. Новосибирск, ул. Свердлова, д. 14"
+    package.purchase_description.delivery_place = "г. Новосибирск, ул. Октябрьская, д. 14"
+    package.contract_draft.delivery_place = "г. Новосибирск, ул. Свердлова, д. 14"
+    package.schedule_application.delivery_term = TermValue(days=30, day_type="calendar")
+    package.purchase_description.delivery_term = TermValue(days=40, day_type="calendar")
+    package.contract_draft.delivery_term = TermValue(days=30, day_type="calendar")
+    passed_place = SemanticCheckFinding(check_id="semantic.delivery_place", status="passed", message="ОК")
+    passed_term = SemanticCheckFinding(check_id="semantic.delivery_term", status="passed", message="ОК")
+
+    assert _apply_delivery_place_guard(package, passed_place).status == "failed"
+    assert _apply_delivery_term_guard(package, passed_term).status == "failed"
+
+
+def test_direct_contract_is_recognized_as_single_supplier():
+    from summary_model.checks.semantic_llm import _procurement_method_kind
+    from summary_model.extraction_pipeline import _procurement_method
+
+    assert _procurement_method("Способ закупки: Прямой договор") == "single_supplier"
+    assert _procurement_method_kind("Прямой договор") == "single_supplier"
+
+
+def test_negative_prohibition_value_is_not_reported_as_unscoped():
+    assert checks_runner._unscoped_prohibition("Запреты; Нет") is False
+
+
 def test_delivery_term_fails_on_inline_stage_conflict():
     package = _base_package()
     package.schedule_application.delivery_term_text = (
@@ -1070,9 +1129,9 @@ def test_penalty_llm_public_result_uses_russian_labels_and_worst_status():
     results, _metrics = run_penalty_llm_checks(package, llm_client=EnglishPenaltyClient())
     result = results[0]
 
-    assert result.status == "manual_review"
-    assert result.report_text == "Часть условий о штрафах и пенях требует ручной проверки."
-    assert any(line.startswith("Штраф заказчика — ОК.") for line in result.details["summary_lines"])
+    assert result.status == "failed"
+    assert result.report_text == "В условиях о штрафах и пенях найдены подтверждённые расхождения."
+    assert any(line.startswith("Штраф заказчика — ОШИБКА.") for line in result.details["summary_lines"])
     assert any("Штраф за непривлечение СМП/СОНКО" in line for line in result.details["summary_lines"])
     assert all("Found" not in line and "Expected" not in line for line in result.details["summary_lines"])
 
@@ -1298,6 +1357,32 @@ def test_onmck_supplier_price_report_contains_variation_and_supplier_labels():
     assert any("коэффициент вариации" in line for line in supplier_check.details["summary_lines"])
     assert any("Поставщик1 = 100" in line for line in supplier_check.details["summary_lines"])
     assert any("выбранная минимальная цена 100" in line for line in min_check.details["summary_lines"])
+
+
+def test_onmck_missing_one_supplier_price_is_not_treated_as_complete():
+    package = _base_package()
+    package.nmck_justification.items[0].supplier_prices[1].unit_price = None
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.onmck.min_price"].status == "manual_review"
+    assert checks["strict.onmck.supplier_prices"].status == "manual_review"
+    assert checks["strict.onmck.supplier_prices"].details["summary_lines"] == []
+
+
+def test_onmck_printed_supplier_total_is_compared_with_row_sum():
+    package = _base_package()
+    package.nmck_justification.totals = [
+        NmckSummaryTotal(
+            supplier_totals=[Decimal("150"), Decimal("240"), Decimal("220")],
+            supplier_totals_raw=["150", "240", "220"],
+        )
+    ]
+
+    result = _by_id(run_checks(package))["strict.onmck.arithmetic"]
+
+    assert result.status == "failed"
+    assert any("по строкам 200.00" in line for line in result.details["supplier_total_mismatches"])
 
 
 def _commercial_offer(

@@ -48,6 +48,7 @@ def normalize_header_name(path: list[str]) -> str | None:
         ("stage_price", ("сумма этапа",)),
         ("row_number", ("№", "номер", "п/п")),
         ("characteristic_unit", ("единица измерения характерист",)),
+        ("characteristic_unit", ("единица измерения показател",)),
         ("characteristic_value", ("значение",)),
         ("characteristic_name", ("характеристик",)),
         ("selected_min_unit_price", ("минимальная цена",)),
@@ -204,8 +205,6 @@ def _key_value_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTabl
 def _attachment_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     rows: list[LogicalTableRow] = []
     for row_index in range(table.row_count):
-        if row_index in table.header_rows:
-            continue
         row = _row_dense(table, row_index)
         text = _raw_text(row)
         if not text:
@@ -249,6 +248,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     row_number_index = mapping.get("row_number")
     trademark_index = mapping.get("trademark")
     trademark_justification_index = mapping.get("trademark_justification")
+    quantity_header_unit = _quantity_header_unit(paths, quantity_index)
 
     logical: list[LogicalTableRow] = []
     current_parent_row: int | None = None
@@ -311,7 +311,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                             "trademark_justification_text": _value(
                                 row, trademark_justification_index
                             ),
-                            "unit": _value(row, unit_index),
+                            "unit": _value(row, unit_index) or quantity_header_unit,
                             "quantity": quantity_value,
                         },
                         raw_text=_raw_text(row),
@@ -373,6 +373,16 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     return logical
 
 
+def _quantity_header_unit(paths: list[HeaderPath], quantity_index: int | None) -> str | None:
+    if quantity_index is None:
+        return None
+    path = next((item for item in paths if item.col_index == quantity_index), None)
+    text = " ".join(path.parts).casefold() if path else ""
+    if re.search(r"\bшт(?:\.|\b)|штук", text):
+        return "шт."
+    return None
+
+
 def _name_from_combined_identity(text: str | None) -> str | None:
     text = clean_text(text)
     if not text:
@@ -419,7 +429,26 @@ def _nmck_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]
             continue
         row_text = _raw_text(row)
         name = _value(row, mapping.get("name"))
-        if _is_total_label(name) or _is_total_label(row_text):
+        row_number = _value(row, row_number_index)
+        if _is_total_label(name) or _is_total_label(row_number) or _is_total_label(row_text):
+            cells_by_header = _nmck_cells_by_header(
+                row,
+                paths,
+                mapping,
+                row_number,
+            )
+            cells_by_header["label"] = name or "Итого"
+            logical.append(
+                LogicalTableRow(
+                    table_id=table.table_id,
+                    row_index=row_index,
+                    row_type="total",
+                    cells_by_col=_cells_by_col(row),
+                    cells_by_header=cells_by_header,
+                    raw_text=row_text,
+                    confidence=0.85,
+                )
+            )
             continue
         if not name and not (OKPD2_RE.search(row_text) or KTRU_RE.search(row_text)):
             continue
@@ -462,17 +491,24 @@ def _nmck_cells_by_header(
         "selected_min_unit_price": _value(row, selected_index),
         "row_total_declared": _value(row, total_index),
     }
-    single_service_columns: list[tuple[str, int, str | None]] = []
+    supplier_columns: dict[str, list[tuple[int, str, str | None]]] = {}
     for path in paths:
         joined = " ".join(path.parts).casefold()
         supplier = _supplier_ref(joined)
-        if supplier and "цена услуги" in joined:
+        if supplier:
             supplier_header = next(
                 (part for part in path.parts if _supplier_ref(part.casefold()) == supplier),
                 None,
             )
-            single_service_columns.append((supplier, path.col_index, supplier_header))
-    if single_service_columns:
+            supplier_columns.setdefault(supplier, []).append(
+                (path.col_index, joined, supplier_header)
+            )
+    single_service_columns = [
+        (supplier, columns[0][0], columns[0][2])
+        for supplier, columns in supplier_columns.items()
+        if len(columns) == 1 and "цена услуги" in columns[0][1]
+    ]
+    if single_service_columns and len(single_service_columns) == len(supplier_columns):
         for supplier, column_index, supplier_header in single_service_columns:
             value = _value(row, column_index)
             if supplier_header:
@@ -535,14 +571,21 @@ def _nmck_staged_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTa
             continue
         name = _value(row, mapping.get("name"))
         row_number = _value(row, row_number_index)
-        if _is_total_label(name) or _is_total_label(row_text):
+        if _is_total_label(name) or _is_total_label(row_number) or _is_total_label(row_text):
+            cells_by_header = _nmck_cells_by_header(
+                row,
+                paths,
+                mapping,
+                row_number,
+            )
+            cells_by_header["label"] = name or "Итого"
             logical.append(
                 LogicalTableRow(
                     table_id=table.table_id,
                     row_index=row_index,
                     row_type="total",
                     cells_by_col=_cells_by_col(row),
-                    cells_by_header={"total": row_text},
+                    cells_by_header=cells_by_header,
                     raw_text=row_text,
                     confidence=0.85,
                 )

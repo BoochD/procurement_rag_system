@@ -1186,6 +1186,24 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
         for item in summary_lines:
             if item:
                 lines.append(f"  - {_human_text(str(item))}")
+    identity_rows = details.get("item_identity_rows")
+    if isinstance(identity_rows, list):
+        for row in identity_rows:
+            if not isinstance(row, dict) or row.get("status") in {"passed", "not_checked"}:
+                continue
+            item_name = row.get("item_name") or "позиция"
+            code = row.get("ktru_code") or "КТРУ не найден"
+            if row.get("name_status") in {"failed", "manual_review"}:
+                lines.append(
+                    f"  - <b>{_human_text(str(item_name))}</b>; КТРУ {_human_text(str(code))}: "
+                    f"наименование в КТРУ — {_human_text(str(row.get('ktru_name') or 'не найдено'))}."
+                )
+            if row.get("unit_status") in {"failed", "manual_review"}:
+                lines.append(
+                    f"  - <b>{_human_text(str(item_name))}</b>; единица товара: "
+                    f"ООЗ — {_human_text(str(row.get('ooz_unit') or 'не указана'))}; "
+                    f"КТРУ — {_human_text(str(row.get('ktru_unit') or 'не найдена'))}."
+                )
     lines.append("")
     for row in rows:
         if not isinstance(row, dict):

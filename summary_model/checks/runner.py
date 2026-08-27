@@ -1217,8 +1217,14 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
         onmck.price_sources,
         total_rows,
     )
+    supplier_total_incomplete = _nmck_supplier_total_incomplete(
+        onmck.items,
+        onmck.price_sources,
+        total_rows,
+    )
     failed.extend(quantity_total_mismatches)
     failed.extend(supplier_total_mismatches)
+    incomplete.extend(supplier_total_incomplete)
     if failed or total_mismatch or plan_mismatch:
         status = "failed"
         message = "В арифметике ОНМЦК найдены расхождения."
@@ -1251,6 +1257,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "plan_nmck": str(plan_total) if plan_total is not None else None,
                 "quantity_total_mismatches": quantity_total_mismatches,
                 "supplier_total_mismatches": supplier_total_mismatches,
+                "supplier_total_incomplete": supplier_total_incomplete,
                 "arithmetic_rows": arithmetic_rows,
                 "summary_lines": [
                     f"строк ОНМЦК: {len(onmck.items)}",
@@ -1259,6 +1266,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                     f"НМЦК в заявке: {_format_money(plan_total)}" if plan_total is not None else "НМЦК в заявке: не найден",
                     *quantity_total_mismatches,
                     *supplier_total_mismatches,
+                    *supplier_total_incomplete,
                 ],
             },
         )
@@ -1313,6 +1321,29 @@ def _nmck_supplier_total_mismatches(
     return mismatches
 
 
+def _nmck_supplier_total_incomplete(
+    items: list[NmckItem],
+    sources: list[PriceSource],
+    totals: list[Any],
+) -> list[str]:
+    if not totals or not sources:
+        return []
+    expected_source_ids = {source.source_id for source in sources}
+    for item in items:
+        row_totals = {
+            price.source_id
+            for price in item.supplier_prices
+            if normalize_decimal(price.row_total) is not None
+        }
+        if not expected_source_ids <= row_totals:
+            return ["Не для всех поставщиков извлечены стоимости строк ОНМЦК."]
+    for total in totals:
+        declared = list(getattr(total, "supplier_totals", []) or [])
+        if len(declared) != len(sources) or any(value is None for value in declared):
+            return ["Строка «Итого» содержит неполный набор итогов поставщиков."]
+    return []
+
+
 def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[CheckResult]:
     onmck = package.nmck_justification
     if onmck is None or not onmck.items:
@@ -1334,6 +1365,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
         source.source_id: _supplier_label(source.supplier_name_raw or source.raw_header or source.source_id)
         for source in onmck.price_sources
     }
+    expected_source_ids = set(source_labels)
     for item in onmck.items:
         source_prices = [
             (price.source_id, normalize_decimal(price.unit_price))
@@ -1341,8 +1373,9 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
             if normalize_decimal(price.unit_price) is not None
         ]
         prices = [price for _source_id, price in source_prices if price is not None]
+        found_source_ids = {source_id for source_id, _price in source_prices}
         selected = normalize_decimal(item.selected_min_unit_price)
-        if not prices or selected is None:
+        if not prices or selected is None or (expected_source_ids and found_source_ids != expected_source_ids):
             incomplete.append(_item_label(item))
             continue
         minimum = min(prices)
@@ -1446,6 +1479,7 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
         source.source_id: _supplier_label(source.supplier_name_raw or source.raw_header or source.source_id)
         for source in onmck.price_sources
     }
+    expected_source_ids = set(source_labels)
     for index, item in enumerate(onmck.items, 1):
         price_pairs = [
             (price.source_id, normalize_decimal(price.unit_price))
@@ -1453,7 +1487,8 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
             if normalize_decimal(price.unit_price) is not None
         ]
         prices = [price for _source_id, price in price_pairs if price is not None]
-        if not prices:
+        found_source_ids = {source_id for source_id, _price in price_pairs}
+        if not prices or (expected_source_ids and found_source_ids != expected_source_ids):
             incomplete.append(_item_label(item))
             continue
         coefficient = _variation_coefficient(prices)
@@ -1467,7 +1502,7 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
             f"№{index} {_item_label(item)} | коэффициент вариации: {coefficient_text} | Цены: {price_text}"
         )
 
-    total_price_pairs = _supplier_total_prices(onmck.items)
+    total_price_pairs = _supplier_total_prices(onmck.items) if not incomplete else []
     if total_price_pairs:
         total_prices = [price for _source_id, price in total_price_pairs]
         coefficient = _variation_coefficient(total_prices)
@@ -2898,6 +2933,9 @@ def _national_regime_label_only(field_code: str, value: str | None) -> bool:
 
 def _unscoped_prohibition(value: str | None) -> bool:
     text = str(value or "").casefold()
+    field_value = re.sub(r"^\s*запреты?\s*[:;\-]?\s*", "", text).strip(" .:;")
+    if field_value in {"нет", "не предусмотрено", "отсутствует", "не установлено"}:
+        return False
     if not text or not any(marker in text for marker in ("запрет", "да")):
         return False
     return not re.search(r"\d{2}(?:\.\d{2}){1,3}|приложен|позиц", text)

@@ -341,11 +341,23 @@ class ProcurementReferenceRegistry:
                 row_code = row.get("okpd2")
                 if not row_code:
                     continue
-                if self._codes_overlap_by_parent(candidate, row_code):
+                if (
+                    self._codes_overlap_by_parent(candidate, row_code)
+                    and (code.startswith(row_code) or row_code.startswith(code))
+                ):
                     matched_rows.append(row)
 
             if matched_rows:
-                return candidate, matched_rows, checked_candidates
+                matched_candidate = candidate
+                query_parts = code.split(".")
+                candidate_parts = candidate.split(".")
+                if (
+                    candidate != code
+                    and code.startswith(candidate)
+                    and len(candidate_parts[-1]) == 1
+                ):
+                    matched_candidate = ".".join(candidate_parts[:-1])
+                return matched_candidate, matched_rows, checked_candidates
 
         return None, [], checked_candidates
 

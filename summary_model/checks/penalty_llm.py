@@ -7,12 +7,15 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from summary_model.checks.models import CheckResult
+from summary_model.checks.normalization import normalize_decimal
 from summary_model.checks.runner import (
     _fixed_penalty_amount,
     _format_money,
     _has_penalty_words,
     _money_amount,
+    _money_values_in_text,
     _plan_requires_smp_sonko_subcontract,
+    _percent_values_in_text,
     _supplier_value_penalty_percent,
 )
 from summary_model.extraction.llm_client import StructuredLLMClient
@@ -46,6 +49,9 @@ PENALTY_CHECK_PROMPT = """
 - объединять разные пункты, стороны или виды обязательств в одну запись.
 
 Сверь текст главы с expected из payload. Верни общий status и короткий message.
+Для штрафов с градацией сверь все значения из fixed_fine_scale и
+supplier_value_percent_scale. В quote сохрани точную выдержку со всеми
+видимыми ветками, чтобы каждое число можно было проверить.
 Все текстовые поля ответа заполняй только на русском языке.
 В findings ОБЯЗАТЕЛЬНО верни отдельную запись для каждого из перечисленных видов,
 даже если условие не найдено или требует проверки:
@@ -145,6 +151,7 @@ def _to_check_result(result: ContractPenaltyLLMResult, payload: dict[str, object
         for finding in result.findings
         if _finding_label(finding.label) in expected_labels
     ]
+    findings = [_validate_finding_numbers(finding, expected) for finding in findings]
     status = _aggregate_status(result, findings)
     passed_labels = {
         _finding_label(finding.label)
@@ -280,6 +287,8 @@ def _penalty_payload(package: ProcurementPackageExtraction) -> dict[str, object]
             "smp_sonko_fine_percent": "5"
             if _plan_requires_smp_sonko_subcontract(package)
             else None,
+            "fixed_fine_scale": ["1000", "5000", "10000", "100000"],
+            "supplier_value_percent_scale": ["10", "5", "1", "0.5", "0.4", "0.3", "0.25", "0.2", "0.1"],
         },
         "schedule_smp_sonko_required": getattr(
             package.schedule_application,
@@ -292,6 +301,40 @@ def _penalty_payload(package: ProcurementPackageExtraction) -> dict[str, object]
         if contract
         else None,
     }
+
+
+def _validate_finding_numbers(
+    finding: PenaltyCheckFinding,
+    expected: object,
+) -> PenaltyCheckFinding:
+    if finding.status != "passed" or not isinstance(expected, dict):
+        return finding
+    label = _finding_label(finding.label)
+    quote = finding.quote or ""
+    expected_value = None
+    actual_values: list[object] = []
+    if label == "Штраф за непривлечение СМП/СОНКО":
+        expected_value = expected.get("smp_sonko_fine_percent")
+        actual_values = _percent_values_in_text(quote)
+    elif label == "Штраф поставщика за стоимостное обязательство":
+        expected_value = expected.get("supplier_value_obligation_percent")
+        actual_values = _percent_values_in_text(quote)
+    elif label in {"Штраф заказчика", "Штраф поставщика за нестоимостное обязательство"}:
+        expected_value = expected.get("fixed_fine_amount")
+        actual_values = _money_values_in_text(quote)
+    if expected_value is None:
+        return finding
+    expected_decimal = normalize_decimal(expected_value)
+    if expected_decimal is None:
+        return finding
+    if not actual_values:
+        return finding
+    if not any(normalize_decimal(value) == expected_decimal for value in actual_values):
+        return finding.model_copy(update={
+            "status": "failed",
+            "message": f"В цитате нет ожидаемого значения {expected_decimal}.",
+        })
+    return finding
 
 
 def _optional_decimal_text(value) -> str | None:

@@ -186,7 +186,17 @@ def _nmck_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
         }
         for source_id in sorted(source_ids, key=_source_sort_key)
     ]
-    return {"price_sources": price_sources, "items": items}
+    totals = [_nmck_total_payload(row) for row in rows if row.row_type == "total"]
+    return {
+        "price_sources": price_sources,
+        "items": items,
+        "nmck_totals": totals,
+        "totals": [
+            {"row_index": row.row_index, "raw_text": row.raw_text}
+            for row in rows
+            if row.row_type == "total"
+        ],
+    }
 
 
 def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
@@ -194,13 +204,13 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
     source_headers: dict[str, str] = {}
     section_rows = [row for row in rows if row.row_type == "section"]
     child_rows = [row for row in rows if row.row_type == "item"]
+    total_rows = [row for row in rows if row.row_type == "total"]
     totals = [
         {
             "row_index": row.row_index,
             "raw_text": row.raw_text,
         }
-        for row in rows
-        if row.row_type == "total"
+        for row in total_rows
     ]
     child_by_prefix: dict[str, list[dict[str, Any]]] = {}
     for row in child_rows:
@@ -256,7 +266,36 @@ def _nmck_staged_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
         "price_sources": price_sources,
         "stages": stages,
         "items": leaf_items,
+        "nmck_totals": [_nmck_total_payload(row) for row in total_rows],
         "totals": totals,
+    }
+
+
+def _nmck_total_payload(row: LogicalTableRow) -> dict[str, Any]:
+    supplier_totals: list[str] = []
+    source_ids = sorted(
+        {
+            key.split(".", 1)[0]
+            for key in row.cells_by_header
+            if key.startswith("supplier_") and "." in key
+        },
+        key=_source_sort_key,
+    )
+    for source_id in source_ids:
+        value = (
+            row.cells_by_header.get(f"{source_id}.row_total")
+            or row.cells_by_header.get(f"{source_id}.unit_price")
+        )
+        if value:
+            supplier_totals.append(value)
+    return {
+        "label": row.cells_by_header.get("label") or "Итого",
+        "unit": row.cells_by_header.get("unit"),
+        "quantity_raw": row.cells_by_header.get("quantity"),
+        "supplier_totals_raw": supplier_totals,
+        "nmck_total_raw": row.cells_by_header.get("row_total_declared"),
+        "row_index": row.row_index,
+        "raw_text": row.raw_text,
     }
 
 

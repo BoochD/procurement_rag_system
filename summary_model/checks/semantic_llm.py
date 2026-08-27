@@ -195,6 +195,32 @@ def _apply_delivery_place_guard(
     if len(house_numbers) < 2:
         return finding
 
+    address_parts = [
+        (label, _address_core(value))
+        for label, value in values
+        if value and _address_core(value) is not None
+    ]
+    if len(address_parts) >= 2:
+        baseline_label, baseline = address_parts[0]
+        street_conflicts = [
+            f"{label}: {parts[1]}"
+            for label, parts in address_parts[1:]
+            if baseline[0] == parts[0]
+            and baseline[2] == parts[2]
+            and baseline[1] != parts[1]
+        ]
+        if street_conflicts:
+            return SemanticCheckFinding(
+                check_id=finding.check_id,
+                status="failed",
+                message=(
+                    f"Улица различается: {baseline_label} — {baseline[1]}; "
+                    f"{' ; '.join(street_conflicts)}. Адреса не согласованы."
+                ),
+                compared_values=finding.compared_values,
+                evidence=finding.evidence,
+            )
+
     baseline_label, baseline_numbers = house_numbers[0]
     conflicts = [
         f"{label}: {', '.join(sorted(numbers))}"
@@ -248,6 +274,17 @@ def _same_address_core(values: list[object]) -> bool:
         streets.add(re.sub(r"\s+", " ", street_match.group(1)).strip(" .").casefold())
         cities.add(city_matches[-1].casefold())
     return len(streets) == 1 and len(cities) == 1
+
+
+def _address_core(value: object) -> tuple[str, str, str] | None:
+    text = str(value or "")
+    street_match = re.search(r"(?i)(?:ул[.]?|улица)\s*([^,;.]+)", text)
+    city_matches = re.findall(r"(?i)(?:город|г[.]?)\s+([а-яёa-z-]+)", text)
+    houses = _house_numbers(text)
+    if not street_match or not city_matches or len(houses) != 1:
+        return None
+    street = re.sub(r"\s+", " ", street_match.group(1)).strip(" .").casefold()
+    return city_matches[-1].casefold(), street, next(iter(houses))
 
 
 def _extract_check(client, schema, prompt: str, payload: str):
@@ -314,10 +351,12 @@ def _apply_procurement_method_guard(
         )
 
     if kinds == {"single_supplier"}:
+        evidence = " ".join(str(value or "") for _label, value, _kind in recognized).casefold()
+        detail = "прямой договор" if "прямой договор" in evidence else "электронный магазин"
         return SemanticCheckFinding(
             check_id=finding.check_id,
             status="passed",
-            message="Способ закупки: единственный поставщик (электронный магазин).",
+            message=f"Способ закупки: единственный поставщик ({detail}).",
             compared_values=cleaned_values,
             evidence=finding.evidence,
         )
@@ -334,6 +373,8 @@ def _apply_procurement_method_guard(
 def _procurement_method_kind(value: object) -> str | None:
     text = str(value or "").casefold().replace("ё", "е")
     if "электрон" in text and "магазин" in text:
+        return "single_supplier"
+    if "прямой договор" in text:
         return "single_supplier"
     if "аукцион" in text or "auction" in text:
         return "auction"
@@ -394,7 +435,37 @@ def _apply_delivery_term_guard(
     package: ProcurementPackageExtraction,
     finding: SemanticCheckFinding,
 ) -> SemanticCheckFinding:
-    if finding.check_id != "semantic.delivery_term" or finding.status == "passed":
+    if finding.check_id != "semantic.delivery_term":
+        return finding
+    values = [
+        ("Заявка в план-график", getattr(package.schedule_application, "delivery_term", None), getattr(package.schedule_application, "delivery_term_text", None)),
+        ("ООЗ", getattr(package.purchase_description, "delivery_term", None), getattr(package.purchase_description, "delivery_term_text", None)),
+        ("Проект контракта", getattr(package.contract_draft, "delivery_term", None), getattr(package.contract_draft, "delivery_term_text", None)),
+    ]
+    signatures = [
+        (label, signature)
+        for label, term, raw in values
+        if (signature := _delivery_term_signature(term, raw)) is not None
+    ]
+    if len(signatures) >= 2:
+        baseline_label, baseline = signatures[0]
+        conflicts = [
+            f"{label}: {_delivery_term_signature_text(signature)}"
+            for label, signature in signatures[1:]
+            if signature[0] == baseline[0] and signature != baseline
+        ]
+        if conflicts:
+            return SemanticCheckFinding(
+                check_id=finding.check_id,
+                status="failed",
+                message=(
+                    f"Сроки различаются: {baseline_label} — "
+                    f"{_delivery_term_signature_text(baseline)}; {'; '.join(conflicts)}."
+                ),
+                compared_values=finding.compared_values,
+                evidence=finding.evidence,
+            )
+    if finding.status == "passed":
         return finding
     ooz = package.purchase_description
     contract = package.contract_draft
@@ -412,6 +483,32 @@ def _apply_delivery_term_guard(
             evidence=finding.evidence,
         )
     return finding
+
+
+def _delivery_term_signature(term: object, raw: object) -> tuple[str, str, str | None] | None:
+    days = getattr(term, "days", None)
+    day_type = getattr(term, "day_type", None)
+    if days is not None:
+        return "days", str(days), str(day_type or "unknown")
+    text = str(raw or "")
+    match = re.search(
+        r"(?i)\b(\d+)\s*(?:\([^)]*\)\s*)?(\u043aалендарн\w*|рабоч\w*)\s+дн",
+        text,
+    )
+    if match:
+        return "days", match.group(1), "working" if match.group(2).casefold().startswith("рабоч") else "calendar"
+    end_dates = re.findall(r"(?i)\b(?:по|до)\s+(\d{1,2}[./]\d{1,2}[./]\d{4})", text)
+    if end_dates:
+        return "end_date", end_dates[-1].replace("/", "."), None
+    return None
+
+
+def _delivery_term_signature_text(signature: tuple[str, str, str | None]) -> str:
+    kind, value, qualifier = signature
+    if kind == "end_date":
+        return f"по {value}"
+    label = "рабочих" if qualifier == "working" else "календарных" if qualifier == "calendar" else "дней"
+    return f"{value} {label} дней" if label != "дней" else f"{value} дней"
 
 
 def _same_text(left: object, right: object) -> bool:

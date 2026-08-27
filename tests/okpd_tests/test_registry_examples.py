@@ -109,6 +109,12 @@ def test_registry_invalid_code_raises(registry):
         registry.check_okpd2("abc")
 
 
+def test_registry_does_not_cross_to_unrelated_descendant_of_broad_parent(registry):
+    result = registry.check_okpd2("25.99.29.129", "Лопата")
+
+    assert result.found is False
+
+
 def test_find_okpd2_returns_rows(registry):
     rows = registry.find_okpd2("31.01.12")
     assert isinstance(rows, list)

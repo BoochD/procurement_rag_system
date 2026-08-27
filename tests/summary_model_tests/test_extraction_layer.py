@@ -5,12 +5,21 @@ from docx import Document
 
 from summary_model.domain.models import DocumentType, InputDocument, TableColumnIR, TableIR, TableRowIR
 from summary_model.extraction_cli import main as extraction_cli_main
-from summary_model.extraction_pipeline import _attachment_type, _price_source_requisites, extract_package
+from summary_model.extraction_pipeline import (
+    _attachment_type,
+    _contract_referenced_attachments,
+    _is_non_item_ooz_row,
+    _link_codes_to_items_from_text,
+    _price_source_requisites,
+    extract_package,
+)
+from summary_model.extraction_models import CodeReference, PurchaseItem
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
 from summary_model.tables.models import HeaderPath
 from summary_model.tables.table_classifier import classify_parsed_table
+from summary_model.tables.table_logical_rows import normalize_header_name
 from summary_model.tables.utils import extract_money
 
 
@@ -349,8 +358,8 @@ def _save_onmck_with_executors(path):
             "2 109 514,00",
         ],
         [
+            "ИТОГО:",
             "",
-            "ИТОГО",
             "",
             "",
             "2 257 266,00",
@@ -713,6 +722,51 @@ def test_purchase_request_extracts_plain_text_attachment_lines_without_semicolon
     ]
 
 
+def test_single_item_receives_single_document_ktru_code():
+    items = [PurchaseItem(name="Сервер")]
+    references = [
+        CodeReference(
+            code_type="ktru",
+            code="26.20.14.000-00000189",
+            raw_text="КТРУ 26.20.14.000-00000189",
+        )
+    ]
+
+    _link_codes_to_items_from_text(items, references)
+
+    assert items[0].ktru_code == "26.20.14.000-00000189"
+
+
+def test_characteristic_measure_header_is_not_product_unit():
+    assert normalize_header_name(["Единица измерения показателя"]) == "characteristic_unit"
+
+
+def test_supplier_and_customer_words_do_not_make_technical_table_a_signature():
+    table = TableIR(
+        table_id="support",
+        row_count=2,
+        columns=[
+            TableColumnIR(index=0, alias="c0"),
+            TableColumnIR(index=1, alias="c1"),
+        ],
+        rows=[
+            TableRowIR(row_id="r0", row=0, values={"c0": "Заказчик", "c1": "Время реакции"}),
+            TableRowIR(row_id="r1", row=1, values={"c0": "Поставщик", "c1": "4 часа"}),
+        ],
+    )
+
+    assert classify_parsed_table(table, DocumentType.OOZ) != "signature_table"
+
+
+def test_contract_attachment_reference_accepts_title_before_number():
+    references = _contract_referenced_attachments(
+        "Требования указаны в Описании объекта закупки (Приложение № 1)."
+    )
+
+    assert references[0].number == "1"
+    assert references[0].attachment_kind == "purchase_description"
+
+
 def test_ooz_logical_rows_attach_characteristics_to_items(tmp_path):
     path = tmp_path / "ooz.docx"
     _save_ooz(path)
@@ -831,6 +885,8 @@ def test_onmck_table_accepts_executor_price_sources(tmp_path):
     assert item.row_total_declared == 2109514
     assert item.is_declared_min_price_correct is True
     assert item.is_row_total_correct is True
+    assert len(onmck.totals) == 1
+    assert onmck.totals[0].supplier_totals == [2257266, 2214762, 2109514]
 
 
 def test_nmck_single_service_price_columns_are_not_paired():
@@ -1014,3 +1070,18 @@ def test_extract_money_preserves_kopeks_and_ignores_long_technical_numbers():
     raw, amount = extract_money("КБК 252540664361154060100100440015829242")
     assert raw is None
     assert amount is None
+
+
+def test_ooz_non_item_filter_drops_headers_and_explanations_but_keeps_items():
+    assert _is_non_item_ooz_row(
+        "Наименование оборудования, КТРУ/ОКПД2",
+        {"quantity_raw": "Товарный знак"},
+    )
+    assert _is_non_item_ooz_row(
+        "Предоставляемые лицензии " + "необходимы для совместимости " * 20,
+        {"quantity_raw": "пояснительный текст"},
+    )
+    assert not _is_non_item_ooz_row(
+        "Программное обеспечение",
+        {"quantity_raw": "4", "ktru_code": "58.29.11.000-00000003"},
+    )
