@@ -1141,19 +1141,29 @@ def _attachments(tables: list[ParsedTable]) -> list[RequestAttachment]:
     for table in tables:
         if table.table_type not in {"request_attachments_table", "contract_attachments_table"}:
             continue
-        for index, item in enumerate(table.compact_json.get("attachments", []), start=1):
-            title = clean_text(item.get("title_raw"))
-            if not title:
-                continue
-            result.append(
-                RequestAttachment(
-                    number=str(index),
-                    title_raw=title,
-                    normalized_document_type=_attachment_type(title),
-                    attachment_kind=_attachment_kind(title),
-                    evidence=f"{table.table_id}:r{item.get('row_index')}",
+        for item in table.compact_json.get("attachments", []):
+            for title in _attachment_title_parts(item.get("title_raw")):
+                result.append(
+                    RequestAttachment(
+                        number=str(len(result) + 1),
+                        title_raw=title,
+                        normalized_document_type=_attachment_type(title),
+                        attachment_kind=_attachment_kind(title),
+                        evidence=f"{table.table_id}:r{item.get('row_index')}",
+                    )
                 )
-            )
+    return result
+
+
+def _attachment_title_parts(value: object) -> list[str]:
+    """Split list-like table cells while leaving ordinary attachment titles intact."""
+    raw = str(value or "")
+    parts = re.split(r"[;\r\n]+", raw)
+    result: list[str] = []
+    for part in parts:
+        title = clean_text(re.sub(r"^\s*\d+\s*[.)]\s*", "", part)).rstrip(".")
+        if title:
+            result.append(title)
     return result
 
 

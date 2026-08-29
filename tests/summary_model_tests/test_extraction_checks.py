@@ -1370,6 +1370,22 @@ def test_onmck_missing_one_supplier_price_is_not_treated_as_complete():
     assert checks["strict.onmck.supplier_prices"].details["summary_lines"] == []
 
 
+def test_onmck_explicit_missing_supplier_price_is_failed():
+    package = _base_package()
+    price = package.nmck_justification.items[0].supplier_prices[1]
+    price.unit_price = None
+    price.raw_unit_price = "—"
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.onmck.min_price"].status == "failed"
+    assert checks["strict.onmck.supplier_prices"].status == "failed"
+    assert "явные отсутствующие цены" in checks["strict.onmck.min_price"].message
+    assert "вместо цены за единицу указан «—»" in checks["strict.onmck.supplier_prices"].details[
+        "explicit_missing_prices"
+    ][0]
+
+
 def test_onmck_printed_supplier_total_is_compared_with_row_sum():
     package = _base_package()
     package.nmck_justification.totals = [

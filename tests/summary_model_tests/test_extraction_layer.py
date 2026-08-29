@@ -6,6 +6,7 @@ from docx import Document
 from summary_model.domain.models import DocumentType, InputDocument, TableColumnIR, TableIR, TableRowIR
 from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import (
+    _attachment_title_parts,
     _attachment_type,
     _contract_referenced_attachments,
     _is_non_item_ooz_row,
@@ -719,6 +720,16 @@ def test_purchase_request_extracts_plain_text_attachment_lines_without_semicolon
         ("3", "contract_draft"),
         ("4", "purchase_description"),
         ("5", "explanatory_note"),
+    ]
+
+
+def test_attachment_title_parts_split_compact_table_list():
+    assert _attachment_title_parts(
+        "1. Заявка в план-график; 2. Обоснование НМЦК\n3. Лето"
+    ) == [
+        "Заявка в план-график",
+        "Обоснование НМЦК",
+        "Лето",
     ]
 
 

@@ -207,6 +207,7 @@ def _merge_with_deterministic_guard(
         _preserve_list(merged, deterministic_schema, "subject_codes", warnings, warn=False)
         _prefer_list(merged, deterministic_schema, "price_sources")
         _prefer_list(merged, deterministic_schema, "items")
+        _prefer_list(merged, deterministic_schema, "totals")
         _prefer_stages(merged, deterministic_schema)
         _prefer_scalar(merged, deterministic_schema, "total_amount")
         _prefer_scalar(merged, deterministic_schema, "total_amount_text")

@@ -2,6 +2,8 @@
 
 This guide is the compact system map for future agent work. Code is the source of truth when this document and implementation disagree.
 
+For the copy-paste shift prompt, pack-debugging workflow, production flow, and current domain invariants, read `docs/agent_handoff.md` first.
+
 The target replacement architecture and phased migration plan are documented in `docs/summary_model_migration.md`.
 
 ## Project Context
@@ -31,16 +33,17 @@ Key document entities:
 - Upload/result UI: `web/fileprocessor/views.py`, `web/fileprocessor/templates/fileprocessor/index.html`, `web/fileprocessor/templates/fileprocessor/result.html`.
 - Celery app: `celery-worker/celery_app.py`.
 - Celery task: `celery-worker/tasks.py`, task name `rag_worker.process_document_query`.
-- Main pipeline: `latest_model/ai_service.py`.
+- Production pipeline: `summary_model/web_service.py`.
+- Production-parity CLI: `summary_model/full_pipeline_cli.py`.
 - Docker stack: `docker-compose.yml`.
 - Container default command: `Dockerfile`.
 
 ## Component Responsibilities
 
 - `web/fileprocessor/views.py`: validates the required upload, serializes documents, starts Celery, stores task metadata in session, polls results, and serves the downloaded report.
-- `celery-worker/tasks.py`: validates task input, decodes files, manages temporary paths, calls `AIService.process_query`, and converts `ai_response` to `.docx`.
-- `latest_model/ai_service.py`: orchestrates all checks and final report sections.
-- `summary_model/`: independent schema-first replacement pipeline with ordered DOCX ingestion, document-specific extraction, deterministic rules, registry adapters, CLI artifacts, and report generation. It is not connected to the worker. Its async API is `aprocess_package`; extraction and three semantic analyzers share an LLM concurrency limit of three, while `process_package` remains the synchronous CLI wrapper.
+- `celery-worker/tasks.py`: validates task input, decodes files, manages temporary paths, calls `summary_model.web_service.process_uploaded_documents`, and converts `ai_response` to `.docx`.
+- `latest_model/ai_service.py`: retained legacy pipeline; it is not the active Celery path.
+- `summary_model/`: active schema-first production pipeline with ordered DOCX ingestion, document-specific extraction, deterministic rules, registry adapters, CLI artifacts, and report generation. The Celery worker calls `summary_model.web_service.process_uploaded_documents`; `summary_model.full_pipeline_cli` mirrors that orchestration for local diagnostics. The older `summary_model.service`/`summary_model.cli` flow remains separate and must not be mistaken for web parity.
 - `summary_model/extraction_pipeline.py` and `summary_model/extraction_cli.py`: independent typed extraction layer. It reads DOCX files, classifies document types, builds parsed table artifacts, normalizes fields into `ProcurementPackageExtraction`, and writes debug artifacts without running external registry checks or package-level LLM analyzers. The CLI also writes per-document LLM payload JSON with paragraphs, compact parsed tables, and deterministic known extraction.
 - `summary_model/extraction/llm_document_extractor.py`: optional document-level LLM canonicalization layer for the new extraction pipeline. It consumes per-document `llm_payloads`, returns the same strict Pydantic document schemas, and restores deterministic parsed items/codes/prices if an LLM response drops them.
 - `summary_model/tables/`: table parsing layer on top of `TableIR v4`. DOCX ingestion exposes both top-level tables and tables nested inside cells, then classifies them, builds logical rows, generates `compact_markdown`/`compact_json`, and exports physical/logical/compact debug views for parser review. Contract description/characteristic tables and contract specification/price tables are separate table types; signature/service tables are debug-only and must not enter working extraction schemas. ONMCK supplier columns are grouped as supplier pairs: unit price plus row total. Weak or template-like rows should remain fallback/debug rows rather than becoming fake structured items.
@@ -75,9 +78,11 @@ Key document entities:
 - `shared_modules/llm_models.py`: LLM client/model factories; the active pipeline uses the OpenAI-compatible provider.
 - `shared_modules/embeddings.py`: embedding model factories for optional FAISS retrieval.
 
-## Pipeline Details
+## Legacy Pipeline Details
 
-`AIService.process_query` currently performs these stages:
+The retained `latest_model.AIService.process_query` performs the stages below,
+but it is not the active web/worker path. See `docs/agent_handoff.md` for the
+production `summary_model.web_service` flow.
 
 1. Determine available and missing documents.
 2. Parse plan table values, treating the plan as the baseline.
@@ -89,7 +94,7 @@ Key document entities:
 8. Parse ONMCK supplier prices and flag coefficient of variation >= 33%.
 9. Assemble the final tagged text report and highlight error labels.
 
-Report sections are assembled in `latest_model/ai_service.py` in this order:
+Legacy report sections are assembled in `latest_model/ai_service.py` in this order:
 
 - package completeness and performed/skipped checks;
 - KTRU check through `zakupki.gov.ru`;
@@ -444,11 +449,11 @@ a compact diagnostic retained in parser warnings.
   and is skipped when both fields are already populated.
 - LLM prompts define strict output formats consumed by HTML and DOCX rendering; prompt changes can affect report formatting.
 - The report renderer only understands a small tag set. New tags require changes in both HTML rendering expectations and `build_result_docx_bytes`.
-- Avoid coupling UI text, Celery payload keys, and AIService parameter names accidentally; they form the user-facing document contract.
+- Avoid coupling UI text, Celery payload keys, and `summary_model.web_service` input keys accidentally; they form the user-facing document contract.
 
 ## Known Verification Gaps
 
-- There is no automated end-to-end test for `AIService.process_query`; it requires document fixtures plus mocked LLM, registry, and network calls.
+- Production end-to-end behavior is exercised primarily through fixture-based `summary_model.full_pipeline_cli` runs; paid LLM, VLM, registry, and network layers still require isolated mocks or deliberate live runs.
 - The OKPD/KTRU plain-text fallbacks and OOZ characteristic name-matching fallback currently rely primarily on manual document-pack verification.
 - Live KTRU tests can skip on network errors, so a green local run does not prove that `zakupki.gov.ru` integration is available.
 - LLM output-format compliance is prompt-driven and is not covered by deterministic contract tests.

@@ -28,6 +28,7 @@ from summary_model.extraction_models import (
     MoneyValue,
     NmckItem,
     NmckJustificationSchema,
+    NmckSummaryTotal,
     PriceSource,
     PenaltyClause,
     ProcurementStage,
@@ -242,6 +243,15 @@ def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
         total_amount=MoneyValue(raw="106 312 006,00", amount=Decimal("106312006.00")),
         price_sources=[PriceSource(source_id="supplier_1", raw_header="Поставщик 1")],
         items=[],
+        totals=[
+            NmckSummaryTotal(
+                label="Итого",
+                supplier_totals_raw=["106 312 006,00"],
+                supplier_totals=[Decimal("106312006.00")],
+                nmck_total_raw="106 312 006,00",
+                nmck_total=Decimal("106312006.00"),
+            )
+        ],
         stages=[
             ProcurementStage(
                 stage_number="1",
@@ -275,6 +285,7 @@ def test_onmck_deterministic_totals_items_and_stage_prices_win_over_llm():
     assert error is None
     assert result.total_amount.amount == Decimal("106312006.00")
     assert result.price_sources == deterministic.price_sources
+    assert result.totals == deterministic.totals
     assert result.stages[0].price.amount == Decimal("40000.00")
 
 

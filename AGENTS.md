@@ -2,9 +2,9 @@
 
 This repository is a Procurement RAG Legal Checker. It accepts procurement document packs in a Django UI, sends them to a Celery worker, extracts structured data from `.docx` files, checks registry data, runs LLM-assisted checks, and returns both an HTML result and a generated `.docx` report.
 
-Current active development focus: the new independent `summary_model` extraction layer. The immediate goal is reliable parsing of procurement documents into strict typed schemas, using deterministic table parsers first and LLM extraction only to fill document-specific text fields that table/rule parsing cannot robustly extract.
+Current active development focus: the production `summary_model` pipeline. It is connected to web/Celery through `summary_model.web_service`; the immediate goal is reliable parser-first extraction, validation, commercial-offer matching, and Russian report output across heterogeneous procurement packs.
 
-Read this file and `docs/project_guide.md` before making changes.
+Read this file, `docs/agent_handoff.md`, and `docs/project_guide.md` before making changes.
 
 ## Working Modes
 
@@ -37,9 +37,9 @@ Always reread this `AGENTS.md` at the start of a new coding task or after contex
 ## Architecture Map
 
 - `web/`: Django project and UI. `web/fileprocessor/views.py` accepts uploads, serializes files as base64, submits Celery task `rag_worker.process_document_query`, polls task status, and serves generated reports.
-- `celery-worker/`: Celery worker. `tasks.py` validates uploaded documents, writes temporary files, calls `latest_model.ai_service.get_ai_service().process_query(...)`, and builds the `.docx` result.
-- `latest_model/`: main AI/RAG pipeline. `ai_service.py` orchestrates parsing, registry checks, smart LLM checks, RAG checks, characteristic checks, price checks, and final report assembly.
-- `summary_model/`: independent structured extraction pipeline under development. It is invoked through its Python API or CLI and is not connected to web/Celery yet.
+- `celery-worker/`: Celery worker. `tasks.py` validates uploaded documents, writes temporary files, calls `summary_model.web_service.process_uploaded_documents(...)`, and builds the `.docx` result.
+- `latest_model/`: retained legacy AI/RAG implementation and exploratory notebooks. It is not the active Celery orchestration path.
+- `summary_model/`: active structured pipeline. `summary_model.web_service` is called by the Celery worker; `summary_model.full_pipeline_cli` runs the closest local equivalent and writes diagnostic artifacts.
 - `summary_model/extraction_pipeline.py`: new parser-first extraction entrypoint. It builds `ProcurementPackageExtraction` from DOCX documents without running external registry checks, legal validation, report generation, or package-level semantic LLM analyzers.
 - `summary_model/extraction_cli.py`: CLI for the new extraction layer. It writes `extraction_result.json`, per-document JSON, parsed-table JSON, and table debug artifacts.
 - `summary_model/extraction_models.py`: strict typed extraction schemas for procurement documents and normalized values.
@@ -56,12 +56,12 @@ Always reread this `AGENTS.md` at the start of a new coding task or after contex
 - `plan` is the only mandatory uploaded document in both web and worker code.
 - Worker output must include `ai_response`; downloadable reports depend on `result_file_b64` and `result_file_name`.
 - Report markup uses simple tags: `<b>`, `<u>`, `<ins>`, `<ok>`, `<warn>`, `<error>`. The HTML template renders these tags and `build_result_docx_bytes` maps them to Word formatting.
-- `latest_model.ai_service.AIService.process_query` is the main orchestration boundary. Avoid bypassing it unless the task explicitly changes the pipeline.
+- `summary_model.web_service.process_uploaded_documents` is the production orchestration boundary. Keep `summary_model.full_pipeline_cli` aligned with it.
 - `data/parsed_tables/pp1875.sqlite` and `okpd_index.json` are runtime inputs for registry checks.
 - Live KTRU checks depend on `zakupki.gov.ru` and can be flaky or unavailable.
 - The LLM provider is OpenAI-compatible via `OPENAI_API_KEY` and `OPENAI_BASE_URL`; model names are fixed in `shared_modules/llm_models.py` and must not be overridden elsewhere.
 - Russian text appears in code, prompts, templates, and tests. Preserve existing encoding and verify readable output when touching text-heavy files.
-- The new extraction layer must remain independent from web/Celery until a separate explicit switch task.
+- Keep `summary_model.web_service` and `summary_model.full_pipeline_cli` behavior aligned. Do not test production behavior through the older independent `summary_model.cli` flow by mistake.
 - New extraction work must not call PP 1875, live KTRU, or package-level LLM analyzers unless the user explicitly asks for validation/report integration.
 - For the new extraction layer, table parsing is the primary source for items, quantities, units, supplier prices, characteristics, and key-value plan fields.
 - The schedule application / plan-график (`plan`, ПГ) is the ground truth for package comparisons. Names, dates, delivery/place terms, quantities, NMCK, stages, procurement method, and SMP/SONKO fields are compared against the ПГ values when those values are present.
@@ -106,5 +106,6 @@ If a task changes document-checking logic or report output, explicitly review ri
 - Full tests: `pytest tests`
 - Local OKPD tests: `pytest tests/okpd_tests`
 - Deterministic KTRU parser/validation tests: `pytest tests/ktru_tests/test_parsing.py tests/ktru_tests/test_validation.py`
-- Summary pipeline without LLM/network: `python -m summary_model.cli --input-dir <pack> --output-dir <output> --no-llm --no-external`
+- Older independent summary-service pipeline without LLM/network: `python -m summary_model.cli --input-dir <pack> --output-dir <output> --no-llm --no-external` (not web parity).
+- Production-parity diagnostics: `python -m summary_model.full_pipeline_cli --input-dir <pack> --output-dir <output>`.
 - New extraction pipeline: `python -m summary_model.extraction_cli --input-dir <pack> --output-dir <output>`

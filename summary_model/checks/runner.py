@@ -1359,6 +1359,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
         ]
     failed = []
     incomplete = []
+    explicit_missing_prices: list[str] = []
     item_summary_lines: list[str] = []
     price_rows: list[dict[str, Any]] = []
     source_labels = {
@@ -1367,6 +1368,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
     }
     expected_source_ids = set(source_labels)
     for item in onmck.items:
+        explicit_missing = _explicit_missing_supplier_prices(item, source_labels)
         source_prices = [
             (price.source_id, normalize_decimal(price.unit_price))
             for price in item.supplier_prices
@@ -1376,7 +1378,12 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
         found_source_ids = {source_id for source_id, _price in source_prices}
         selected = normalize_decimal(item.selected_min_unit_price)
         if not prices or selected is None or (expected_source_ids and found_source_ids != expected_source_ids):
-            incomplete.append(_item_label(item))
+            if explicit_missing:
+                failed.append({"item": _item_label(item), "reason": explicit_missing[0]})
+                explicit_missing_prices.extend(explicit_missing)
+                item_summary_lines.extend(explicit_missing)
+            else:
+                incomplete.append(_item_label(item))
             continue
         minimum = min(prices)
         price_text = ", ".join(
@@ -1426,7 +1433,11 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
     checked_count = len(onmck.items) - len(incomplete)
     if failed:
         status = "failed"
-        message = "Выбранная минимальная цена отличается от минимума среди поставщиков."
+        message = (
+            "В расчётной таблице ОНМЦК обнаружены явные отсутствующие цены поставщиков."
+            if explicit_missing_prices
+            else "Выбранная минимальная цена отличается от минимума среди поставщиков."
+        )
     elif incomplete:
         status = "manual_review"
         message = "В части строк не хватает цен поставщиков или выбранной минимальной цены."
@@ -1448,6 +1459,7 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
             details={
                 "failed_items": failed,
                 "incomplete_items": incomplete,
+                "explicit_missing_prices": explicit_missing_prices,
                 "price_rows": price_rows,
                 "summary_lines": [
                     f"проверено позиций: {checked_count}",
@@ -1475,12 +1487,14 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
 
     summary_lines: list[str] = []
     incomplete: list[str] = []
+    explicit_missing: list[str] = []
     source_labels = {
         source.source_id: _supplier_label(source.supplier_name_raw or source.raw_header or source.source_id)
         for source in onmck.price_sources
     }
     expected_source_ids = set(source_labels)
     for index, item in enumerate(onmck.items, 1):
+        item_missing = _explicit_missing_supplier_prices(item, source_labels)
         price_pairs = [
             (price.source_id, normalize_decimal(price.unit_price))
             for price in item.supplier_prices
@@ -1489,7 +1503,11 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
         prices = [price for _source_id, price in price_pairs if price is not None]
         found_source_ids = {source_id for source_id, _price in price_pairs}
         if not prices or (expected_source_ids and found_source_ids != expected_source_ids):
-            incomplete.append(_item_label(item))
+            if item_missing:
+                explicit_missing.extend(item_missing)
+                summary_lines.extend(item_missing)
+            else:
+                incomplete.append(_item_label(item))
             continue
         coefficient = _variation_coefficient(prices)
         coefficient_text = f"{coefficient:.2f}%" if coefficient is not None else "не рассчитан"
@@ -1513,9 +1531,11 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
         )
         summary_lines.append(f"№ ИТОГО | коэффициент вариации: {coefficient_text} | Цены: {price_text}")
 
-    status = "manual_review" if incomplete else "passed"
+    status = "failed" if explicit_missing else "manual_review" if incomplete else "passed"
     message = (
-        "В части строк не хватает цен поставщиков."
+        "В расчётной таблице ОНМЦК обнаружены явные отсутствующие цены поставщиков."
+        if explicit_missing
+        else "В части строк не хватает цен поставщиков."
         if incomplete
         else "Цены поставщиков в ОНМЦК сведены для сравнения."
     )
@@ -1530,6 +1550,7 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
             fields=["nmck_justification.items[].supplier_prices[].unit_price"],
             details={
                 "incomplete_items": incomplete,
+                "explicit_missing_prices": explicit_missing,
                 "summary_lines": summary_lines,
             },
         )
@@ -1745,6 +1766,23 @@ def _supplier_label(value: str | None) -> str:
     if match:
         return f"{match.group(1).capitalize()}{match.group(2)}"
     return text
+
+
+def _explicit_missing_supplier_prices(
+    item: NmckItem,
+    source_labels: dict[str, str],
+) -> list[str]:
+    missing_markers = {"-", "–", "—", "нет", "н/д", "n/a", "не указано"}
+    result: list[str] = []
+    for price in item.supplier_prices:
+        raw = " ".join(str(getattr(price, "raw_unit_price", None) or "").split()).casefold()
+        if raw not in missing_markers:
+            continue
+        supplier = source_labels.get(price.source_id, _supplier_label(price.source_id))
+        result.append(
+            f"{_item_label(item)}: у {supplier} вместо цены за единицу указан «{raw}»."
+        )
+    return result
 
 
 def _commercial_offer_label(index: int, offer: Any) -> str:
