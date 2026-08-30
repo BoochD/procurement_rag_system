@@ -62,6 +62,12 @@ SEMANTIC_CHECKS_PROMPT = """
 Если данных недостаточно, ставь manual_review и коротко назови недостающие поля.
 Если формулировки отличаются только регистром, пунктуацией или небольшой
 перефразировкой без изменения смысла, это passed.
+Для semantic.subject сравнивай не только общую близость фраз, но и охват
+самостоятельных групп товаров, работ или услуг. Если в одном документе названа
+такая группа, а в другом она отсутствует, ставь warning и назови её. Например,
+«инструменты, инвентарь и расходные материалы» и «инструменты и расходные
+материалы» не являются полностью согласованными формулировками. Passed допустим
+только при одинаковом смысловом охвате предмета.
 Для semantic.delivery_place адрес сравнивай точно. Разные номера дома, корпуса,
 строения или помещения являются подтверждённым расхождением и дают failed;
 их нельзя считать отличием форматирования. Например, «д. 001» и «д. 14» — failed.
@@ -86,6 +92,8 @@ SEMANTIC_CHECKS_PROMPT = """
 - ссылка вида «требования указаны в ООЗ/Приложении» сама по себе НЕ подтверждает
   совпадение: если фактические условия проекта контракта не извлечены, ставь manual_review;
 - passed допустим только когда в обоих документах найдены и согласованы сами сроки/условия;
+- если фактические числовые сроки или иные числовые условия различаются, ставь warning,
+  даже когда условие контракта строже; это различие надо показать пользователю;
 - пример: основной текст контракта ссылается на Приложение № 1, а в переданной
   warranty_section_text этого приложения указаны «12 месяцев на ПНР» и
   «36 месяцев на серверы» — сравни именно эти значения и приведи ссылку на секцию;
@@ -125,6 +133,14 @@ def _apply_warranty_guard(
         message = (
             "В проекте контракта найдена только ссылка на ООЗ; "
             "фактические гарантийные сроки в приложении не извлечены."
+        )
+    elif status == "passed" and _warranty_numeric_terms(embedded_value or contract_value) != _warranty_numeric_terms(
+        getattr(package.purchase_description, "warranty_requirements_text", None)
+    ):
+        status = "warning"
+        message = (
+            "Гарантийные сроки или иные числовые условия различаются; "
+            "требуется сверка формулировок ООЗ и проекта контракта."
         )
 
     return SemanticCheckFinding(
@@ -170,6 +186,7 @@ def run_semantic_llm_checks(
         finding = _apply_delivery_place_guard(package, finding)
         finding = _apply_procurement_method_guard(package, finding)
         finding = _apply_smp_preference_guard(package, finding)
+        finding = _apply_subject_guard(package, finding)
         finding = _apply_warranty_guard(package, finding)
         checks.append(_to_check_result(finding, title, _semantic_summary_lines(package, check_id)))
     return checks, metrics
@@ -519,6 +536,77 @@ def _same_text(left: object, right: object) -> bool:
 
 def _semantic_normalize(value: object) -> str:
     return " ".join(str(value).replace("\xa0", " ").casefold().split())
+
+
+def _warranty_numeric_terms(value: object) -> set[str]:
+    return set(re.findall(r"\d+(?:[.,]\d+)?", _semantic_normalize(value)))
+
+
+_SUBJECT_STOP_TERMS = {
+    "закупк",
+    "поставк",
+    "оказани",
+    "выполнен",
+    "контракт",
+    "государствен",
+    "муниципальн",
+    "нужд",
+    "товар",
+    "работ",
+    "услуг",
+}
+
+
+def _subject_terms(value: object) -> dict[str, str]:
+    words = re.findall(r"[а-яё]{5,}", _semantic_normalize(value))
+    return {
+        word[:7]: word
+        for word in words
+        if not any(word.startswith(stop_term) for stop_term in _SUBJECT_STOP_TERMS)
+    }
+
+
+def _apply_subject_guard(
+    package: ProcurementPackageExtraction,
+    finding: SemanticCheckFinding,
+) -> SemanticCheckFinding:
+    if finding.check_id != "semantic.subject" or finding.status != "passed":
+        return finding
+
+    baseline_terms = _subject_terms(getattr(package.schedule_application, "purchase_subject", None))
+    contract = package.contract_draft
+    embedded_contract_subject = (
+        getattr(contract.embedded_purchase_description, "purchase_subject", None)
+        if contract and contract.embedded_purchase_description
+        else None
+    )
+    values = [
+        ("Обращение", getattr(package.purchase_request, "purchase_subject", None)),
+        ("ООЗ", getattr(package.purchase_description, "purchase_subject", None)),
+        ("Проект контракта", embedded_contract_subject or getattr(contract, "subject", None)),
+        ("Пояснительная записка", getattr(package.explanatory_note, "subject", None)),
+    ]
+    gaps = []
+    for label, value in values:
+        if not value:
+            continue
+        candidate_terms = _subject_terms(value)
+        missing = sorted(set(baseline_terms) - set(candidate_terms))
+        if missing:
+            gaps.append(f"{label}: не названы {', '.join(baseline_terms[key] for key in missing)}")
+    if not gaps:
+        return finding
+    return SemanticCheckFinding(
+        check_id=finding.check_id,
+        status="warning",
+        message=(
+            "Формулировки предмета близки, но охват закупаемых групп различается: "
+            + "; ".join(gaps)
+            + "."
+        ),
+        compared_values=finding.compared_values,
+        evidence=finding.evidence,
+    )
 
 
 def _warranty_reference_only(value: object) -> bool:

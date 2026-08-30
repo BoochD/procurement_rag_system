@@ -84,6 +84,30 @@ def test_extract_main_name_fallback_from_section_title(
     assert payload["name"] == "Зерно ржи"
 
 
+def test_parse_ktru_common_info_reads_unit_from_current_card_header(
+    registry: ProcurementReferenceRegistry,
+) -> None:
+    html = """
+    <div class="sectionMainInfo__body">
+      <div class="cardMainInfo__section">
+        <span class="cardMainInfo__content">Урна для мусора металлическая</span>
+        <span class="cardMainInfo__title mt-3">
+          Единица измерения:
+          Штука
+        </span>
+      </div>
+    </div>
+    """
+
+    payload = registry.parse_ktru_common_info_html(
+        html=html,
+        ktru_code="25.99.29.000-00000001",
+    )
+
+    assert payload["name"] == "Урна для мусора металлическая"
+    assert payload["unit"] == "Штука"
+
+
 def test_common_info_uses_description_route_and_caches_html(
     registry: ProcurementReferenceRegistry,
     monkeypatch,

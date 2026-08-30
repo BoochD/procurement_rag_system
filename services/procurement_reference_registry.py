@@ -823,7 +823,9 @@ class ProcurementReferenceRegistry:
             else:
                 okpd2_code = self.clean_text(okpd2_raw)
 
-        unit = section_pairs.get("Единицы измерения (количество товара, объем работы, услуги по ОКЕИ)")
+        unit = self._extract_ktru_card_unit(soup)
+        if not unit:
+            unit = section_pairs.get("Единицы измерения (количество товара, объем работы, услуги по ОКЕИ)")
         application_date_start = section_pairs.get("Дата начала обязательного применения позиции каталога")
         application_date_end = section_pairs.get("Дата окончания применения позиции каталога")
 
@@ -847,6 +849,17 @@ class ProcurementReferenceRegistry:
             "short_description": short_description,
             "section_pairs": section_pairs,
         }
+
+    def _extract_ktru_card_unit(self, soup: BeautifulSoup) -> str | None:
+        """Read the unit from the current KTRU card header layout."""
+        for element in soup.select(".cardMainInfo__title"):
+            value = self.clean_text(element.get_text(" ", strip=True))
+            marker = "единица измерения:"
+            if value.casefold().startswith(marker):
+                unit = self.clean_text(value[len(marker) :])
+                if unit:
+                    return unit
+        return None
 
     def get_ktru_common_info(self, ktru_code: str) -> dict[str, Any]:
         code = self.normalize_ktru(ktru_code)

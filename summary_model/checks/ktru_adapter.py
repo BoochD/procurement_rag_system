@@ -1052,9 +1052,9 @@ def _unit_status(ooz_unit: str | None, legal_unit: str | None) -> str:
 def _unit_key(value: str | None) -> str:
     normalized = _name_key(value)
     aliases = (
-        (("шт", "штук"), "штука"),
-        (("комплект",), "комплект"),
         (("пара",), "пара"),
+        (("комплект",), "комплект"),
+        (("шт", "штук"), "штука"),
         (("усл ед", "условная единица"), "условная единица"),
     )
     for markers, canonical in aliases:

@@ -1229,6 +1229,48 @@ def test_warranty_guard_rejects_passed_result_based_only_on_reference():
     assert "только ссылка" in result.message
 
 
+def test_warranty_guard_downgrades_different_explicit_terms_to_warning():
+    from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_warranty_guard
+
+    package = _base_package()
+    package.purchase_description.warranty_requirements_text = "Гарантия производителя: не менее 10 месяцев."
+    package.contract_draft.warranty_text = "Гарантия производителя: не менее 12 месяцев."
+    finding = SemanticCheckFinding(
+        check_id="semantic.warranty",
+        status="passed",
+        message="Гарантии согласованы.",
+    )
+
+    result = _apply_warranty_guard(package, finding)
+
+    assert result.status == "warning"
+    assert "числовые условия различаются" in result.message
+
+
+def test_subject_guard_downgrades_missing_product_group_to_warning():
+    from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_subject_guard
+
+    package = _base_package()
+    package.purchase_request = None
+    package.explanatory_note = None
+    package.schedule_application.purchase_subject = (
+        "Поставка инструментов, инвентаря и расходных материалов"
+    )
+    package.purchase_description.purchase_subject = "Поставка инструментов и расходных материалов"
+    package.contract_draft.subject = package.schedule_application.purchase_subject
+    finding = SemanticCheckFinding(
+        check_id="semantic.subject",
+        status="passed",
+        message="Предмет закупки согласован.",
+    )
+
+    result = _apply_subject_guard(package, finding)
+
+    assert result.status == "warning"
+    assert "ООЗ" in result.message
+    assert "инвентаря" in result.message
+
+
 def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data():
     from summary_model.checks.penalty_llm import run_penalty_llm_checks
 
@@ -2118,6 +2160,14 @@ class FallbackKtruRegistry(FakeKtruRegistry):
         return {
             "Индекс категории скорости": {"values": ["T"], "required": True},
         }
+
+
+def test_ktru_item_unit_does_not_reduce_pair_to_piece():
+    from summary_model.checks.ktru_adapter import _unit_status
+
+    assert _unit_status("Шт.", "Штука") == "passed"
+    assert _unit_status("Пара (2 шт.)", "Пара (2 шт.)") == "passed"
+    assert _unit_status("Пара (2 шт.)", "Штука") == "failed"
 
 
 def test_ktru_adapter_checks_characteristics_without_docx_parsing():
