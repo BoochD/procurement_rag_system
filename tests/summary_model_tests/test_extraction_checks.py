@@ -644,6 +644,35 @@ def test_stages_against_plan_detects_conflict_inside_plan_delivery_term():
     assert any("явное внутреннее противоречие ПГ" in line for line in check.details["internal_differences"])
 
 
+def test_stages_against_plan_does_not_flag_matching_inline_and_table_terms():
+    package = _base_package()
+    package.schedule_application.stages = [
+        ProcurementStage(
+            stage_number="1",
+            stage_name="1 этап",
+            service_start_date=date(2026, 1, 1),
+            service_end_date=date(2026, 1, 10),
+            evidence="plan-stage-table:r1",
+        ),
+        ProcurementStage(
+            stage_number="2",
+            stage_name="2 этап",
+            service_start_date=date(2026, 1, 11),
+            service_end_date=date(2026, 1, 31),
+            evidence="plan-stage-table:r2",
+        ),
+    ]
+    package.schedule_application.delivery_term_text = (
+        "1 этап - с 01.01.2026 по 10.01.2026; "
+        "2 этап - с 11.01.2026 по 31.01.2026"
+    )
+
+    check = _by_id(run_checks(package))["strict.plan.stages"]
+
+    assert check.status != "failed"
+    assert check.details["internal_differences"] == []
+
+
 def test_stages_compare_physical_plan_table_without_inline_extra_stage():
     package = _base_package()
     package.schedule_application.stages = [

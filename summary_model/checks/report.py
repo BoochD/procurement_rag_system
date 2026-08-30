@@ -787,6 +787,16 @@ def _render_onmck_arithmetic(result: CheckResult) -> list[str]:
         f"  Итог ОНМЦК: <b>{_report_money(details.get('onmck_total'))}</b>",
         f"  НМЦК в заявке: <b>{_report_money(details.get('plan_nmck'))}</b>",
     ])
+    failed_items = details.get("failed_items")
+    incomplete_items = details.get("incomplete_items")
+    if isinstance(failed_items, list) and failed_items:
+        lines.append("")
+        lines.append("  <b>Расхождения в расчёте:</b>")
+        lines.extend(f"  - <error>{_human_text(str(item))}</error>" for item in failed_items if item)
+    if isinstance(incomplete_items, list) and incomplete_items:
+        lines.append("")
+        lines.append("  <b>Требуют проверки:</b>")
+        lines.extend(f"  - <warn>{_human_text(str(item))}</warn>" for item in incomplete_items if item)
     return lines
 
 

@@ -602,6 +602,38 @@ def test_report_renders_onmck_arithmetic_with_formula_and_kopecks():
     assert "Сумма строк: <b>40 980 000,00 руб.</b>" in text
 
 
+def test_report_renders_onmck_arithmetic_total_discrepancy():
+    report = _report(
+        _check_result(
+            "strict.onmck.arithmetic",
+            "Арифметика ОНМЦК",
+            "failed",
+            "В арифметике ОНМЦК найдены расхождения.",
+            details={
+                "arithmetic_rows": [{
+                    "item": "Услуга",
+                    "quantity": "1",
+                    "unit_price": "100",
+                    "calculated": "100",
+                    "declared": "100",
+                    "status": "passed",
+                }],
+                "row_sum": "100",
+                "onmck_total": "100",
+                "plan_nmck": "100",
+                "failed_items": [
+                    "Итог Исполнитель 1: по строкам 100.00, в строке «Итого» 100.90."
+                ],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Расхождения в расчёте:" in text
+    assert "Итог Исполнитель 1: по строкам 100.00, в строке «Итого» 100.90." in text
+
+
 def test_report_prefers_successful_semantic_checks_over_duplicate_strict_rows():
     report = _report(
         _check_result(

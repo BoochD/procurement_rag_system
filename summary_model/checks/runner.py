@@ -3020,11 +3020,19 @@ def _plan_stage_internal_differences(schedule: Any) -> list[str]:
     )
     if incomplete:
         inline_line += f" У этапа {', '.join(incomplete)} не указана дата окончания."
-    differences.append(inline_line)
-    differences.append(
+    table_line = (
         "В ПГ в поле «Этапы исполнения контракта» предусмотрено "
         f"{len(table_numbers)} этапов: {', '.join(table_numbers)}."
     )
+
+    def add_context() -> None:
+        if inline_line not in differences:
+            differences.append(inline_line)
+        if table_line not in differences:
+            differences.append(table_line)
+
+    if incomplete:
+        add_context()
     table_by_number = {
         clean_stage_number(getattr(stage, "stage_number", None)): stage
         for stage in table_stages
@@ -3047,12 +3055,14 @@ def _plan_stage_internal_differences(schedule: Any) -> list[str]:
             )
             table_end_text = table_end_match.group(1) if table_end_match else None
         if inline_end_match and table_end_text and inline_end_match.group(1) != table_end_text:
+            add_context()
             differences.append(
                 f"В ПГ срок оказания услуг по этапу {number} в поле «Сроки поставки товара, "
                 f"выполнения работ, оказания услуг по контракту» указан по {inline_end_match.group(1)}, "
                 f"а в поле «Этапы исполнения контракта» — по {table_end_text}."
             )
     if inline_numbers != table_numbers:
+        add_context()
         differences.append(
             "Это явное внутреннее противоречие ПГ: "
             f"в сроках указано {len(inline_numbers)} этапов, а в таблице этапов — {len(table_numbers)}."
