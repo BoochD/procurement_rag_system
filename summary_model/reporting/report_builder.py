@@ -479,7 +479,7 @@ def build_report_text(
     )
 
     ktru_findings = [finding for finding in findings if _is_registry_ktru(finding)]
-    lines.extend(["", "1) Проверка КТРУ через сервис zakupki.gov.ru"])
+    lines.extend(["", "1) Проверка кодов КТРУ из плана-графика через сервис zakupki.gov.ru"])
     for finding in ktru_findings:
         if finding.status == FindingStatus.PASSED:
             lines.append(f"- {finding.title} — карточка получена")

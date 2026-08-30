@@ -317,7 +317,7 @@ def _render_plan_regulatory_section(by_id: dict[str, CheckResult]) -> list[str]:
 
 def _render_ktru_registry_section(by_id: dict[str, CheckResult]) -> list[str]:
     result = by_id.get("manual.ktru.plan_registry") or by_id.get("manual.ktru.characteristics")
-    lines = ["2) Проверка КТРУ через сервис zakupki.gov.ru:"]
+    lines = ["2) Проверка кодов КТРУ из плана-графика через сервис zakupki.gov.ru:"]
     if result is None:
         lines.append("- не выполнялась")
         return lines

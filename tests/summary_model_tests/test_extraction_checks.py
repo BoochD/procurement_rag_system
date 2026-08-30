@@ -1842,7 +1842,7 @@ def test_report_renders_plan_regulatory_section_before_registry_sections():
     report_text = build_checks_report_text(run_checks(package))
 
     assert report_text.index("1) Нормативные проверки заявки в план-график:") < report_text.index(
-        "2) Проверка КТРУ через сервис zakupki.gov.ru:"
+        "2) Проверка кодов КТРУ из плана-графика через сервис zakupki.gov.ru:"
     )
 
 
