@@ -3895,7 +3895,7 @@ def _unexpected_national_regime_codes(
             if row["field_code"] == field_code
         ]
         value = fields.get(field_code, "")
-        for code in re.findall(r"\d{2}(?:\.\d{2}){1,3}", value):
+        for code in re.findall(r"\d{2}(?:\.\d{2,3}){1,3}", value):
             normalized = normalize_code(code)
             if not normalized:
                 continue

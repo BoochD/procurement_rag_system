@@ -192,6 +192,10 @@ def run_ktru_characteristic_checks(
         for legal_key, legal_name in required_names.items():
             if legal_key not in present_required_names:
                 missing_required.append(f"{ktru_code} / {legal_name}")
+                similar_name = _similar_ooz_characteristic_name(
+                    legal_name,
+                    [characteristic.name for characteristic in item.characteristics],
+                )
                 characteristic_rows.append(
                     {
                         "ktru_code": ktru_code,
@@ -204,6 +208,7 @@ def run_ktru_characteristic_checks(
                         "required": True,
                         "status": "failed",
                         "message": "обязательная характеристика не найдена в ООЗ",
+                        "similar_ooz_characteristic": similar_name,
                     }
                 )
 
@@ -688,6 +693,23 @@ def _safe_common_info(registry: Any, ktru_code: str | None) -> dict[str, Any] | 
         return registry.get_ktru_common_info(ktru_code)
     except Exception:
         return None
+
+
+def _similar_ooz_characteristic_name(
+    required_name: str,
+    ooz_names: list[str | None],
+) -> str | None:
+    """Return only an unambiguous extension of a missing required name."""
+    required_key = _name_key(required_name)
+    if len(required_key) < 8:
+        return None
+    prefix = f"{required_key} "
+    matches = [
+        str(name).strip()
+        for name in ooz_names
+        if name and _name_key(name).startswith(prefix)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _plan_okpd2_for_item(

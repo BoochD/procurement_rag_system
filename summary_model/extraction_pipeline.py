@@ -1265,8 +1265,11 @@ def _contract_referenced_attachments(text: str) -> list[RequestAttachment]:
         flags=re.IGNORECASE,
     )
     references.extend(
-        (match.group(2), clean_text(match.group(1)).lstrip(" :-–—"))
+        (match.group(2), title)
         for match in before_pattern.finditer(text)
+        if _looks_like_contract_attachment_title(
+            title := clean_text(match.group(1)).lstrip(" :-–—")
+        )
     )
     seen: set[tuple[str, str]] = set()
     for number, title in references:
@@ -1286,6 +1289,23 @@ def _contract_referenced_attachments(text: str) -> list[RequestAttachment]:
             )
         )
     return result
+
+
+def _looks_like_contract_attachment_title(title: str) -> bool:
+    normalized = clean_text(title).casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "описани",
+            "спецификаци",
+            "техническ",
+            "форма акта",
+            "график",
+            "перечень",
+            "расчет",
+            "расчёт",
+        )
+    )
 
 
 def _contract_attachment_warnings(

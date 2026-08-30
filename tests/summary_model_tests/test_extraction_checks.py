@@ -1247,7 +1247,7 @@ def test_warranty_guard_downgrades_different_explicit_terms_to_warning():
     assert "числовые условия различаются" in result.message
 
 
-def test_subject_guard_downgrades_missing_product_group_to_warning():
+def test_subject_guard_fails_missing_product_group():
     from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_subject_guard
 
     package = _base_package()
@@ -1260,15 +1260,26 @@ def test_subject_guard_downgrades_missing_product_group_to_warning():
     package.contract_draft.subject = package.schedule_application.purchase_subject
     finding = SemanticCheckFinding(
         check_id="semantic.subject",
-        status="passed",
-        message="Предмет закупки согласован.",
+        status="warning",
+        message="Формулировки предмета требуют внимания.",
     )
 
     result = _apply_subject_guard(package, finding)
 
-    assert result.status == "warning"
+    assert result.status == "failed"
     assert "ООЗ" in result.message
     assert "инвентаря" in result.message
+
+
+def test_national_regime_unexpected_codes_keeps_three_digit_okpd2_segment():
+    from summary_model.checks.runner import _unexpected_national_regime_codes
+
+    unexpected = _unexpected_national_regime_codes(
+        {"17.1": "Запреты; ОКПД2: 13.95.10.190 (поз. 2)"},
+        [{"field_code": "17.1", "code": "13.95.10.190", "matched_code": "13.95.10.190"}],
+    )
+
+    assert unexpected == []
 
 
 def test_penalty_llm_failure_returns_manual_review_instead_of_general_llm_data():
@@ -2168,6 +2179,18 @@ def test_ktru_item_unit_does_not_reduce_pair_to_piece():
     assert _unit_status("Шт.", "Штука") == "passed"
     assert _unit_status("Пара (2 шт.)", "Пара (2 шт.)") == "passed"
     assert _unit_status("Пара (2 шт.)", "Штука") == "failed"
+
+
+def test_ktru_missing_characteristic_keeps_only_unambiguous_name_hint():
+    from summary_model.checks.ktru_adapter import _similar_ooz_characteristic_name
+
+    assert _similar_ooz_characteristic_name(
+        "Вид защиты", ["Вид защиты стрекозы"]
+    ) == "Вид защиты стрекозы"
+    assert _similar_ooz_characteristic_name("Тип", ["Тип нагревания"]) is None
+    assert _similar_ooz_characteristic_name(
+        "Вид защиты", ["Вид защиты стрекозы", "Вид защиты рук"]
+    ) is None
 
 
 def test_ktru_adapter_checks_characteristics_without_docx_parsing():

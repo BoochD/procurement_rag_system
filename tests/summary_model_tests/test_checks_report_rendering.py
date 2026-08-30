@@ -421,6 +421,7 @@ def test_report_compacts_ktru_values_and_keeps_successful_matches_visible():
                         "characteristic_name": "Способ предоставления",
                         "status": "failed",
                         "message": "обязательная характеристика не найдена в ООЗ",
+                        "similar_ooz_characteristic": "Способ предоставления лицензии",
                     },
                 ],
             },
@@ -431,9 +432,29 @@ def test_report_compacts_ktru_values_and_keeps_successful_matches_visible():
 
     assert "Способ предоставления" in text
     assert "обязательная характеристика не найдена в ООЗ" in text
+    assert "Возможно, в ООЗ допущена ошибка в наименовании" in text
     assert "Аппаратная поддержка виртуализации" in text
     assert "Значение допустимо в КТРУ" in text
     assert "Допустимые значения КТРУ" not in text
+
+
+def test_report_frames_missing_additional_characteristics_justification():
+    report = _report(
+        _check_result(
+            "manual.ktru.additional",
+            "Дополнительные характеристики КТРУ",
+            "failed",
+            "Для допустимых дополнительных характеристик не найдено явное обоснование в ООЗ.",
+            details={
+                "assessments": [{"item": "Сервер", "ktru_code": "26.20.14.000-00000189"}],
+                "ooz_justification_state": {"found": False, "partial": False},
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "<note>Явное обоснование дополнительных характеристик в ООЗ не найдено.</note>" in text
 
 
 def test_report_shows_missing_plan_ktru_card():

@@ -7,6 +7,8 @@ import re
 import html
 from celery import shared_task
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 from summary_model.report_markup import mark_report_text
 from summary_model.web_service import WebPipelineOptions, process_uploaded_documents
@@ -24,7 +26,7 @@ MANDATORY_DOCUMENT_KEYS = {"plan"}
 
 
 def _add_formatted_runs(paragraph, text: str) -> None:
-    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big|doc)>", re.IGNORECASE)
+    tag_pattern = re.compile(r"</?(?:b|u|ins|ok|warn|error|big|doc|note)>", re.IGNORECASE)
     bold_active = False
     underline_active = False
     ok_active = False
@@ -98,6 +100,21 @@ def _add_formatted_runs(paragraph, text: str) -> None:
             run.font.color.rgb = RGBColor(0x6C, 0x75, 0x7D)
 
 
+def _apply_note_frame(paragraph) -> None:
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), "F1F3F5")
+    paragraph_properties.append(shading)
+    borders = OxmlElement("w:pBdr")
+    for edge in ("top", "left", "bottom", "right"):
+        border = OxmlElement(f"w:{edge}")
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "4")
+        border.set(qn("w:color"), "CED4DA")
+        borders.append(border)
+    paragraph_properties.append(borders)
+
+
 def build_result_docx_bytes(ai_response: str) -> bytes:
     """
     Собирает docx-файл из текстового ответа модели с поддержкой таблиц, заголовков и переносов строк.
@@ -152,6 +169,8 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
             _add_formatted_runs(p, "----------------------------------------")
         else:
             p = document.add_paragraph()
+            if "<note>" in line.casefold():
+                _apply_note_frame(p)
             _add_formatted_runs(p, line)
 
         i += 1

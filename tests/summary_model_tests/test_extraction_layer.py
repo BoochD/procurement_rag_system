@@ -778,6 +778,14 @@ def test_contract_attachment_reference_accepts_title_before_number():
     assert references[0].attachment_kind == "purchase_description"
 
 
+def test_contract_attachment_reference_ignores_ordinary_text_before_number():
+    references = _contract_referenced_attachments(
+        "Товар соответствует требованиям защиты (Приложение № 1)."
+    )
+
+    assert references == []
+
+
 def test_ooz_logical_rows_attach_characteristics_to_items(tmp_path):
     path = tmp_path / "ooz.docx"
     _save_ooz(path)

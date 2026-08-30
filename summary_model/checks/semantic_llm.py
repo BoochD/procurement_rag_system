@@ -64,7 +64,7 @@ SEMANTIC_CHECKS_PROMPT = """
 перефразировкой без изменения смысла, это passed.
 Для semantic.subject сравнивай не только общую близость фраз, но и охват
 самостоятельных групп товаров, работ или услуг. Если в одном документе названа
-такая группа, а в другом она отсутствует, ставь warning и назови её. Например,
+такая группа, а в другом она отсутствует, ставь failed и назови её. Например,
 «инструменты, инвентарь и расходные материалы» и «инструменты и расходные
 материалы» не являются полностью согласованными формулировками. Passed допустим
 только при одинаковом смысловом охвате предмета.
@@ -570,7 +570,7 @@ def _apply_subject_guard(
     package: ProcurementPackageExtraction,
     finding: SemanticCheckFinding,
 ) -> SemanticCheckFinding:
-    if finding.check_id != "semantic.subject" or finding.status != "passed":
+    if finding.check_id != "semantic.subject" or finding.status not in {"passed", "warning"}:
         return finding
 
     baseline_terms = _subject_terms(getattr(package.schedule_application, "purchase_subject", None))
@@ -598,9 +598,9 @@ def _apply_subject_guard(
         return finding
     return SemanticCheckFinding(
         check_id=finding.check_id,
-        status="warning",
+        status="failed",
         message=(
-            "Формулировки предмета близки, но охват закупаемых групп различается: "
+            "Предмет закупки не согласован: "
             + "; ".join(gaps)
             + "."
         ),

@@ -1228,6 +1228,12 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
         else:
             if message and message != "ОК":
                 lines.append(f"    {_human_text(str(message))}.")
+            similar_name = row.get("similar_ooz_characteristic")
+            if similar_name:
+                lines.append(
+                    "    Возможно, в ООЗ допущена ошибка в наименовании: "
+                    f"«{_human_text(str(similar_name))}»."
+                )
             if ooz_value != "не найдено" or ooz_unit != "не указана" or legal_unit != "не указана":
                 lines.append(
                     f"    В ООЗ: {_human_text(str(ooz_value))}; единица: "
@@ -1254,7 +1260,7 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
     elif ooz_state.get("partial"):
         lines.append("  - Таблица обоснований найдена в ООЗ, но извлечена не полностью.")
     else:
-        lines.append("  - Явное обоснование дополнительных характеристик в ООЗ не найдено.")
+        lines.append("  - <note>Явное обоснование дополнительных характеристик в ООЗ не найдено.</note>")
 
     rows = details.get("additional_rows")
     rows = rows if isinstance(rows, list) else []
