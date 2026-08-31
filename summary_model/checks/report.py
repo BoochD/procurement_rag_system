@@ -30,6 +30,7 @@ INTERNAL_CHECK_ORDER = [
     "strict.nmck.amounts",
     "strict.onmck.arithmetic",
     "strict.onmck.min_price",
+    "strict.onmck.items",
     "strict.onmck.stage_prices",
     "strict.codes.okpd2",
     "strict.codes.ktru",
@@ -391,6 +392,8 @@ def _render_internal_section(
             continue
         result = by_id.get(check_id)
         if result is not None:
+            if check_id == "strict.nmck.amounts":
+                lines.extend(["", "<b>Проверки ОНМЦК:</b>", ""])
             lines.extend(_render_titled_result(result))
             lines.append("")
     while lines and lines[-1] == "":
@@ -424,6 +427,10 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
         required = count.details.get("required") if count.details else None
         if found == 0:
             lines.append(f"- Коммерческие предложения не приложены. Требуется не менее {required or 3}.")
+            lines.append(
+                "- Сверка наименований, цен, количества, единиц измерения, реквизитов и НДС с КП не выполнена: "
+                "в пакете нет документов КП."
+            )
             lines.extend(_render_trademark_table(by_id.get("manual.ktru.trademarks")))
             return lines
         else:
@@ -730,9 +737,17 @@ def _render_onmck_min_price(result: CheckResult) -> list[str]:
         for supplier in row.get("suppliers") or []:
             if not isinstance(supplier, dict):
                 continue
+            price = supplier.get("price")
+            price_text = (
+                _report_money(price)
+                if price not in (None, "")
+                else _human_text(str(supplier.get("raw_price") or "не указана"))
+            )
+            if supplier.get("derived_from_total"):
+                price_text += " (рассчитано по стоимости)"
             lines.append(
                 f"    - {_human_text(str(supplier.get('label') or 'Поставщик'))}: "
-                f"<b>{_report_money(supplier.get('price'))}</b>"
+                f"<b>{price_text}</b>"
             )
         coefficient = row.get("variation_coefficient")
         lines.append(
@@ -743,6 +758,8 @@ def _render_onmck_min_price(result: CheckResult) -> list[str]:
             "    Итог: "
             f"<b>{STATUS_LABELS.get(str(row.get('status')), 'ТРЕБУЕТ ПРОВЕРКИ')}</b>"
         )
+        if row.get("issue"):
+            lines.append(f"    Причина: {_human_text(str(row['issue']))}")
     return lines
 
 

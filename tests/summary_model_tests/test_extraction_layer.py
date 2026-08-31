@@ -8,6 +8,7 @@ from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import (
     _attachment_title_parts,
     _attachment_type,
+    _contract_execution_term_text,
     _contract_referenced_attachments,
     _is_non_item_ooz_row,
     _link_codes_to_items_from_text,
@@ -1029,6 +1030,19 @@ def test_contract_extracts_text_referenced_attachments_and_warns_when_tables_mis
     assert contract.items == []
     assert contract.specification_items == []
     assert any("Спецификация" in warning for warning in contract.parser_warnings)
+
+
+def test_contract_execution_term_ignores_price_boilerplate_before_dedicated_section():
+    text = "\n".join([
+        "2.4. Цена Контракта является твердой и определяется на весь срок исполнения Контракта.",
+        "2.5. Цена Контракта может быть снижена по соглашению Сторон.",
+        "XII. СРОК ИСПОЛНЕНИЯ И ПОРЯДОК РАСТОРЖЕНИЯ КОНТРАКТА",
+        "12.1.1. Срок исполнения Контракта указывается в структурированном виде электронной формы ЕИС.",
+    ])
+
+    value = _contract_execution_term_text(text)
+
+    assert value == "12.1.1. Срок исполнения Контракта указывается в структурированном виде электронной формы ЕИС."
 
 
 def test_extraction_cli_creates_result_tables_and_debug_artifacts(tmp_path):

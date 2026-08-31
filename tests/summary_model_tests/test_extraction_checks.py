@@ -1466,6 +1466,38 @@ def test_onmck_explicit_missing_supplier_price_is_failed():
     assert "вместо цены за единицу указан «—»" in checks["strict.onmck.supplier_prices"].details[
         "explicit_missing_prices"
     ][0]
+    price_row = checks["strict.onmck.min_price"].details["price_rows"][0]
+    assert price_row["suppliers"][1]["raw_price"] == "—"
+    assert price_row["status"] == "failed"
+
+
+def test_onmck_uses_row_total_to_calculate_unit_price_when_explicit_price_is_missing():
+    package = _base_package()
+    package.nmck_justification.items[0].quantity = Decimal("2")
+    price = package.nmck_justification.items[0].supplier_prices[1]
+    price.unit_price = None
+    price.raw_unit_price = "-"
+    price.row_total = Decimal("240")
+
+    checks = _by_id(run_checks(package))
+    price_row = checks["strict.onmck.min_price"].details["price_rows"][0]
+
+    assert price_row["suppliers"][1]["price"] == "120"
+    assert price_row["suppliers"][1]["derived_from_total"] is True
+    assert price_row["variation_coefficient"] == "9.09%"
+    assert checks["strict.onmck.min_price"].status == "failed"
+
+
+def test_onmck_item_names_fail_when_no_ooz_item_matches():
+    package = _base_package()
+    package.nmck_justification.items[0].name = "Стол*"
+    package.purchase_description.items[0].name = "Сервер"
+
+    result = _by_id(run_checks(package))["strict.onmck.items"]
+
+    assert result.status == "failed"
+    assert "Список товарных позиций" in result.message
+    assert any("Стол*" in line for line in result.details["summary_lines"])
 
 
 def test_onmck_printed_supplier_total_is_compared_with_row_sum():

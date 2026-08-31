@@ -567,6 +567,64 @@ def test_report_renders_onmck_minimum_prices_as_readable_blocks():
     assert "8) Сравнение цен услуг поставщиков в ОНМЦК:" not in text
 
 
+def test_report_renders_missing_nmck_supplier_price_in_price_block():
+    report = _report(
+        _check_result(
+            "strict.onmck.min_price",
+            "Минимальная цена ОНМЦК",
+            "failed",
+            "В расчётной таблице ОНМЦК обнаружены явные отсутствующие цены поставщиков.",
+            details={
+                "price_rows": [{
+                    "item": "Сервер",
+                    "quantity": "1",
+                    "selected": "9500000",
+                    "minimum_source": "Поставщик 1",
+                    "suppliers": [
+                        {"label": "Поставщик 1", "price": "9500000"},
+                        {"label": "Поставщик 2", "price": None, "raw_price": "-"},
+                    ],
+                    "variation_coefficient": None,
+                    "status": "failed",
+                    "issue": "Сервер: у Поставщик 2 вместо цены за единицу указан «-».",
+                }]
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Поставщик 2: <b>-</b>" in text
+    assert "Коэффициент вариации: <b>не рассчитан</b>" in text
+    assert "Причина: Сервер: у Поставщик 2 вместо цены за единицу указан «-»." in text
+
+
+def test_report_marks_nmck_price_derived_from_row_total():
+    report = _report(
+        _check_result(
+            "strict.onmck.min_price",
+            "Минимальная цена ОНМЦК",
+            "failed",
+            "В расчётной таблице ОНМЦК обнаружены явные отсутствующие цены поставщиков.",
+            details={
+                "price_rows": [{
+                    "item": "Сервер",
+                    "suppliers": [{
+                        "label": "Поставщик 2",
+                        "price": "120",
+                        "derived_from_total": True,
+                    }],
+                    "status": "failed",
+                }]
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "120,00 руб. (рассчитано по стоимости)" in text
+
+
 def test_report_renders_onmck_arithmetic_with_formula_and_kopecks():
     report = _report(
         _check_result(

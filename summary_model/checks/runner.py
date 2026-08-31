@@ -69,6 +69,7 @@ def run_checks(
     results.extend(_check_nmck_amounts(package))
     results.extend(_check_onmck_arithmetic(package))
     results.extend(_check_onmck_min_prices(package))
+    results.extend(_check_onmck_items_against_ooz(package))
     results.extend(_check_onmck_supplier_prices(package))
     results.extend(_check_onmck_stage_prices(package))
     results.extend(_check_commercial_offer_content(package))
@@ -1369,21 +1370,62 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
     expected_source_ids = set(source_labels)
     for item in onmck.items:
         explicit_missing = _explicit_missing_supplier_prices(item, source_labels)
-        source_prices = [
-            (price.source_id, normalize_decimal(price.unit_price))
+        quantity = normalize_decimal(item.quantity)
+        effective_prices = [
+            (price, *_nmck_effective_unit_price(item, price))
             for price in item.supplier_prices
-            if normalize_decimal(price.unit_price) is not None
+        ]
+        source_prices = [
+            (price.source_id, value)
+            for price, value, _derived in effective_prices
+            if value is not None
         ]
         prices = [price for _source_id, price in source_prices if price is not None]
         found_source_ids = {source_id for source_id, _price in source_prices}
         selected = normalize_decimal(item.selected_min_unit_price)
-        if not prices or selected is None or (expected_source_ids and found_source_ids != expected_source_ids):
+        if explicit_missing or not prices or selected is None or (expected_source_ids and found_source_ids != expected_source_ids):
             if explicit_missing:
                 failed.append({"item": _item_label(item), "reason": explicit_missing[0]})
                 explicit_missing_prices.extend(explicit_missing)
                 item_summary_lines.extend(explicit_missing)
             else:
                 incomplete.append(_item_label(item))
+            minimum = min(prices) if prices else None
+            min_source_id = next(
+                (source_id for source_id, price in source_prices if price == minimum),
+                None,
+            )
+            price_rows.append(
+                {
+                    "item": _item_label(item),
+                    "quantity": _format_decimal(quantity)
+                    if quantity is not None
+                    else None,
+                    "unit": item.unit,
+                    "selected": _format_decimal(selected) if selected is not None else None,
+                    "minimum_source": (
+                        source_labels.get(min_source_id, _supplier_label(min_source_id))
+                        if min_source_id
+                        else None
+                    ),
+                    "suppliers": [
+                        {
+                            "label": source_labels.get(price.source_id, _supplier_label(price.source_id)),
+                            "price": _format_decimal(value) if value is not None else None,
+                            "raw_price": price.raw_unit_price,
+                            "derived_from_total": derived_from_total,
+                        }
+                        for price, value, derived_from_total in effective_prices
+                    ],
+                    "variation_coefficient": (
+                        f"{coefficient:.2f}%"
+                        if (coefficient := _variation_coefficient(prices)) is not None
+                        else None
+                    ),
+                    "status": "failed" if explicit_missing else "manual_review",
+                    "issue": explicit_missing[0] if explicit_missing else None,
+                }
+            )
             continue
         minimum = min(prices)
         price_text = ", ".join(
@@ -1394,7 +1436,6 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
         item_summary_lines.append(
             f"{_item_label(item)}: минимальная цена {_format_decimal(selected)}; цены поставщиков: {price_text}"
         )
-        quantity = normalize_decimal(item.quantity)
         line_prefix = _item_label(item)
         if quantity is not None:
             line_prefix += f"; количество {_format_decimal(quantity)} {item.unit or ''}".rstrip()
@@ -1418,6 +1459,14 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
                     {
                         "label": source_labels.get(source_id, _supplier_label(source_id)),
                         "price": _format_decimal(price),
+                        "derived_from_total": next(
+                            (
+                                derived
+                                for source_price, _value, derived in effective_prices
+                                if source_price.source_id == source_id
+                            ),
+                            False,
+                        ),
                     }
                     for source_id, price in source_prices
                     if price is not None
@@ -1471,6 +1520,81 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
     ]
 
 
+def _nmck_effective_unit_price(item: NmckItem, price: Any) -> tuple[Decimal | None, bool]:
+    unit_price = normalize_decimal(getattr(price, "unit_price", None))
+    if unit_price is not None:
+        return unit_price, False
+    row_total = normalize_decimal(getattr(price, "row_total", None))
+    quantity = normalize_decimal(getattr(item, "quantity", None))
+    if row_total is not None and quantity is not None and quantity > 0:
+        return row_total / quantity, True
+    return None, False
+
+
+def _check_onmck_items_against_ooz(package: ProcurementPackageExtraction) -> list[CheckResult]:
+    onmck = package.nmck_justification
+    ooz = package.purchase_description
+    nmck_items = [item for item in (getattr(onmck, "items", []) or []) if _is_nmck_product_item(item)]
+    ooz_items = list(getattr(ooz, "items", []) or []) if ooz else []
+    if not nmck_items or not ooz_items:
+        return [
+            _result(
+                "strict.onmck.items",
+                "Наименования позиций ОНМЦК и ООЗ",
+                "manual_review",
+                "strict",
+                "Для сверки наименований позиций не хватает товарных строк ОНМЦК или ООЗ.",
+                documents=["nmck_justification", "purchase_description"],
+                fields=["nmck_justification.items[].name", "purchase_description.items[].name"],
+            )
+        ]
+    unmatched = [
+        item for item in nmck_items
+        if not any(_same_item_identity(item, reference) for reference in ooz_items)
+    ]
+    summary_lines = [
+        "ОНМЦК: " + ", ".join(_item_label(item) for item in nmck_items),
+        "ООЗ: " + ", ".join(_item_label(item) for item in ooz_items),
+    ]
+    if not unmatched:
+        status = "passed"
+        message = "Наименования товарных позиций ОНМЦК сопоставлены с ООЗ."
+    elif len(unmatched) == len(nmck_items) and len(nmck_items) == len(ooz_items):
+        status = "failed"
+        message = "Список товарных позиций ОНМЦК не соответствует списку позиций ООЗ."
+        summary_lines.extend(
+            f"Для позиции ОНМЦК «{_item_label(item)}» не найдена соответствующая позиция ООЗ."
+            for item in unmatched
+        )
+    else:
+        status = "manual_review"
+        message = "Часть позиций ОНМЦК не удалось однозначно сопоставить с ООЗ."
+        summary_lines.extend(
+            f"Требует сопоставления: {_item_label(item)}." for item in unmatched
+        )
+    return [
+        _result(
+            "strict.onmck.items",
+            "Наименования позиций ОНМЦК и ООЗ",
+            status,
+            "strict",
+            message,
+            documents=["nmck_justification", "purchase_description"],
+            fields=["nmck_justification.items[].name", "purchase_description.items[].name"],
+            details={"summary_lines": summary_lines},
+        )
+    ]
+
+
+def _is_nmck_product_item(item: NmckItem) -> bool:
+    name = normalize_text(getattr(item, "name", None))
+    return bool(name) and not getattr(item, "parent_stage_number", None) and not re.search(r"\b\d+\s*этап\b", name)
+
+
+def _same_item_identity(left: NmckItem, right: PurchaseItem) -> bool:
+    return _names_close(left.name, right.name)
+
+
 def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[CheckResult]:
     onmck = package.nmck_justification
     if onmck is None or not onmck.items:
@@ -1496,13 +1620,14 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
     for index, item in enumerate(onmck.items, 1):
         item_missing = _explicit_missing_supplier_prices(item, source_labels)
         price_pairs = [
-            (price.source_id, normalize_decimal(price.unit_price))
+            (price.source_id, value)
             for price in item.supplier_prices
-            if normalize_decimal(price.unit_price) is not None
+            for value, _derived in [_nmck_effective_unit_price(item, price)]
+            if value is not None
         ]
         prices = [price for _source_id, price in price_pairs if price is not None]
         found_source_ids = {source_id for source_id, _price in price_pairs}
-        if not prices or (expected_source_ids and found_source_ids != expected_source_ids):
+        if item_missing or not prices or (expected_source_ids and found_source_ids != expected_source_ids):
             if item_missing:
                 explicit_missing.extend(item_missing)
                 summary_lines.extend(item_missing)

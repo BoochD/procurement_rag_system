@@ -1560,6 +1560,36 @@ def _line_value_after_marker(text: str, *markers: str) -> str | None:
     return _line_after_marker(text, *markers)
 
 
+def _contract_execution_term_text(text: str) -> str | None:
+    """Read the dedicated contract-execution field without matching boilerplate."""
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    explicit = re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?срок\s+исполнения\s+контракта\s*[:\-–—]\s*(.+)$",
+        flags=re.IGNORECASE,
+    )
+    for line in lines:
+        match = explicit.match(line)
+        if match:
+            return clean_text(match.group(1)) or None
+
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        if "срок исполнения" not in lowered or "контракт" not in lowered:
+            continue
+        if "расторжен" not in lowered and "срок исполнения контракта" not in lowered:
+            continue
+        for candidate in lines[index : index + 16]:
+            candidate_lowered = candidate.casefold()
+            if "срок исполнения контракта" not in candidate_lowered:
+                continue
+            if "структурированном виде" in candidate_lowered:
+                return candidate
+            match = explicit.match(candidate)
+            if match:
+                return clean_text(match.group(1)) or None
+    return None
+
+
 def _explicit_line_value_after_marker(text: str, *markers: str) -> str | None:
     lowered_markers = [marker.casefold() for marker in markers]
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
@@ -2067,7 +2097,7 @@ def _contract_draft(ir: DocumentIR, tables: list[ParsedTable]) -> ContractDraftS
         "срок поставки",
         "срок выполнения",
     )
-    contract_execution_text = _line_value_after_marker(text, "срок исполнения контракта")
+    contract_execution_text = _contract_execution_term_text(text)
     contract_security_text = _contract_security_text(text)
     warranty_security_text = _contract_warranty_security_text(text)
     funding_source = _contract_funding_source(text)
