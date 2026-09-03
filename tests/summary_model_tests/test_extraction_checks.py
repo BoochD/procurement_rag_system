@@ -225,6 +225,84 @@ def _base_package() -> ProcurementPackageExtraction:
     )
 
 
+def test_supplier_totals_do_not_double_count_stage_parent_equal_to_children():
+    parent = NmckItem(
+        row_number="2.",
+        name="Этап 2",
+        quantity=Decimal("1"),
+        supplier_prices=[
+            SupplierPrice(source_id="supplier_1", row_total=Decimal("100")),
+            SupplierPrice(source_id="supplier_2", row_total=Decimal("120")),
+        ],
+    )
+    children = [
+        NmckItem(
+            row_number="2.1",
+            parent_stage_number="2",
+            name="Товар 1",
+            quantity=Decimal("1"),
+            supplier_prices=[
+                SupplierPrice(source_id="supplier_1", row_total=Decimal("40")),
+                SupplierPrice(source_id="supplier_2", row_total=Decimal("50")),
+            ],
+        ),
+        NmckItem(
+            row_number="2.2",
+            parent_stage_number="2",
+            name="Товар 2",
+            quantity=Decimal("1"),
+            supplier_prices=[
+                SupplierPrice(source_id="supplier_1", row_total=Decimal("60")),
+                SupplierPrice(source_id="supplier_2", row_total=Decimal("70")),
+            ],
+        ),
+    ]
+    standalone = NmckItem(
+        row_number="1.",
+        name="Услуга",
+        quantity=Decimal("1"),
+        supplier_prices=[
+            SupplierPrice(source_id="supplier_1", row_total=Decimal("10")),
+            SupplierPrice(source_id="supplier_2", row_total=Decimal("20")),
+        ],
+    )
+
+    assert checks_runner._supplier_total_prices([standalone, parent, *children]) == [
+        ("supplier_1", Decimal("110")),
+        ("supplier_2", Decimal("140")),
+    ]
+    mismatches = checks_runner._nmck_supplier_total_mismatches(
+        [standalone, parent, *children],
+        [
+            PriceSource(source_id="supplier_1", raw_header="Поставщик 1", supplier_name_raw="Поставщик 1"),
+            PriceSource(source_id="supplier_2", raw_header="Поставщик 2", supplier_name_raw="Поставщик 2"),
+        ],
+        [NmckSummaryTotal(supplier_totals=[Decimal("110"), Decimal("140")])],
+    )
+
+    assert mismatches == []
+
+
+def test_supplier_totals_keep_stage_parent_when_it_is_not_child_aggregate():
+    parent = NmckItem(
+        row_number="2.",
+        name="Этап 2",
+        quantity=Decimal("1"),
+        supplier_prices=[SupplierPrice(source_id="supplier_1", row_total=Decimal("100"))],
+    )
+    child = NmckItem(
+        row_number="2.1",
+        parent_stage_number="2",
+        name="Товар",
+        quantity=Decimal("1"),
+        supplier_prices=[SupplierPrice(source_id="supplier_1", row_total=Decimal("40"))],
+    )
+
+    assert checks_runner._supplier_total_prices([parent, child]) == [
+        ("supplier_1", Decimal("140"))
+    ]
+
+
 def _by_id(report):
     return {item.check_id: item for item in report.results}
 
@@ -2658,6 +2736,34 @@ def test_procurement_method_guard_rejects_plan_tender_against_auction():
     assert "различается между документами" in guarded.message
     assert "Конкурс" in guarded.message
     assert "Электронный аукцион" in guarded.message
+
+
+def test_procurement_method_guard_renders_raw_auction_in_russian_on_conflict():
+    from summary_model.checks.semantic_llm import _apply_procurement_method_guard, SemanticCheckFinding
+    from summary_model.extraction_models import (
+        ExplanatoryNoteSchema,
+        ProcurementPackageExtraction,
+        PurchaseRequestSchema,
+        ScheduleApplicationSchema,
+    )
+
+    package = ProcurementPackageExtraction(
+        schedule_application=ScheduleApplicationSchema(procurement_method_raw="Прямой договор"),
+        purchase_request=PurchaseRequestSchema(procurement_method_raw="auction"),
+        explanatory_note=ExplanatoryNoteSchema(procurement_method_raw="электронный аукцион"),
+    )
+    finding = SemanticCheckFinding(
+        check_id="semantic.procurement_method",
+        status="passed",
+        message="Способ закупки согласован.",
+        compared_values=[],
+    )
+
+    guarded = _apply_procurement_method_guard(package, finding)
+
+    assert guarded.status == "failed"
+    assert "auction" not in guarded.message
+    assert "электронный аукцион" in guarded.message
 
 
 def test_procurement_method_guard_treats_electronic_store_as_single_supplier():

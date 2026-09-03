@@ -349,7 +349,10 @@ def _apply_procurement_method_guard(
     ]
     kinds = {kind for _label, _value, kind in recognized}
     if len(kinds) > 1:
-        values_text = "; ".join(f"{label}: {value}" for label, value, _kind in recognized)
+        values_text = "; ".join(
+            f"{label}: {_display_procurement_method(value)}"
+            for label, value, _kind in recognized
+        )
         return SemanticCheckFinding(
             check_id=finding.check_id,
             status="failed",
@@ -402,6 +405,15 @@ def _procurement_method_kind(value: object) -> str | None:
     if "единственн" in text or "single_supplier" in text:
         return "single_supplier"
     return None
+
+
+def _display_procurement_method(value: object) -> str:
+    return (
+        str(value or "")
+        .replace("auction", "электронный аукцион")
+        .replace("tender", "конкурс")
+        .replace("request_for_quotations", "запрос котировок")
+    )
 
 
 def _apply_smp_preference_guard(

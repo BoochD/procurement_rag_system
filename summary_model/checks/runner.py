@@ -1201,7 +1201,12 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "status": "manual_review",
             })
             incomplete.append(name)
-    declared_totals = [_money(item.row_total_declared) for item in onmck.items]
+    duplicate_stage_totals = _duplicate_stage_parent_item_ids(onmck.items)
+    declared_totals = [
+        _money(item.row_total_declared)
+        for item in onmck.items
+        if id(item) not in duplicate_stage_totals
+    ]
     row_sum = sum((value for value in declared_totals if value is not None), Decimal("0.00"))
     rows_complete = all(value is not None for value in declared_totals)
     total = _money_amount(onmck.total_amount)
@@ -1297,17 +1302,10 @@ def _nmck_supplier_total_mismatches(
 ) -> list[str]:
     if not totals or not sources:
         return []
-    source_totals: list[Decimal] = []
-    for source in sources:
-        values = [
-            normalize_decimal(price.row_total)
-            for item in items
-            for price in item.supplier_prices
-            if price.source_id == source.source_id
-        ]
-        if not values or any(value is None for value in values):
-            return []
-        source_totals.append(sum((value for value in values if value is not None), Decimal("0.00")))
+    source_total_by_id = dict(_supplier_total_prices(items))
+    if any(source.source_id not in source_total_by_id for source in sources):
+        return []
+    source_totals = [source_total_by_id[source.source_id] for source in sources]
     mismatches = []
     for total in totals:
         declared = list(getattr(total, "supplier_totals", []) or [])
@@ -1853,17 +1851,55 @@ def _variation_coefficient(values: list[Decimal]) -> float | None:
 
 
 def _supplier_total_prices(items: list[NmckItem]) -> list[tuple[str, Decimal]]:
+    duplicate_stage_totals = _duplicate_stage_parent_item_ids(items)
     totals: dict[str, Decimal] = defaultdict(Decimal)
     for item in items:
-        quantity = normalize_decimal(item.quantity)
-        for price in item.supplier_prices:
-            unit_price = normalize_decimal(price.unit_price)
-            row_total = normalize_decimal(price.row_total)
-            if row_total is None and quantity is not None and unit_price is not None:
-                row_total = quantity * unit_price
-            if row_total is not None:
-                totals[price.source_id] += row_total
+        if id(item) in duplicate_stage_totals:
+            continue
+        for source_id, value in _supplier_row_prices(item).items():
+            totals[source_id] += value
     return [(key, totals[key]) for key in sorted(totals)]
+
+
+def _duplicate_stage_parent_item_ids(items: list[NmckItem]) -> set[int]:
+    child_items_by_stage: dict[str, list[NmckItem]] = defaultdict(list)
+    for item in items:
+        parent_stage = clean_stage_number(getattr(item, "parent_stage_number", None))
+        if parent_stage:
+            child_items_by_stage[parent_stage].append(item)
+
+    duplicate_stage_totals: set[int] = set()
+    for item in items:
+        row_stage = _stage_parent_row_number(getattr(item, "row_number", None))
+        child_items = child_items_by_stage.get(row_stage or "", [])
+        if not child_items:
+            continue
+        parent_totals = _supplier_row_prices(item)
+        child_totals: dict[str, Decimal] = defaultdict(Decimal)
+        for child in child_items:
+            for source_id, value in _supplier_row_prices(child).items():
+                child_totals[source_id] += value
+        if parent_totals and parent_totals == child_totals:
+            duplicate_stage_totals.add(id(item))
+    return duplicate_stage_totals
+
+
+def _stage_parent_row_number(value: Any) -> str | None:
+    match = re.fullmatch(r"\s*(\d+)\s*\.\s*", str(value or ""))
+    return match.group(1) if match else None
+
+
+def _supplier_row_prices(item: NmckItem) -> dict[str, Decimal]:
+    quantity = normalize_decimal(item.quantity)
+    totals: dict[str, Decimal] = {}
+    for price in item.supplier_prices:
+        unit_price = normalize_decimal(price.unit_price)
+        row_total = normalize_decimal(price.row_total)
+        if row_total is None and quantity is not None and unit_price is not None:
+            row_total = quantity * unit_price
+        if row_total is not None:
+            totals[price.source_id] = row_total
+    return totals
 
 
 def _money(value: Any) -> Decimal | None:

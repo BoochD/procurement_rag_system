@@ -109,8 +109,9 @@ def test_registry_invalid_code_raises(registry):
         registry.check_okpd2("abc")
 
 
-def test_registry_does_not_cross_to_unrelated_descendant_of_broad_parent(registry):
-    result = registry.check_okpd2("25.99.29.129", "Лопата")
+@pytest.mark.parametrize("code", ["25.99.29.120", "25.99.29.129"])
+def test_registry_does_not_cross_to_unrelated_descendant_of_broad_parent(registry, code):
+    result = registry.check_okpd2(code, "Лопата")
 
     assert result.found is False
 
