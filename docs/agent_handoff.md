@@ -148,6 +148,10 @@ Important table rules:
 - simple non-staged price matrices may be parsed deterministically;
 - complex or staged ONMCK tables should be classified correctly and sent to
   the ONMCK VLM role rather than patched with layout-specific arithmetic;
+- ONMCK stage totals may duplicate child rows: `2` and `2.` are stage rows,
+  while `2.1` is a child even when `parent_stage_number` is absent. Exclude a
+  parent from aggregate totals only when every supplier total equals the sum
+  of its children; retain it when the values differ so the discrepancy is reported.
 - OOZ item/characteristic and additional-justification roles may both apply to
   the same physical table; role-specific VLM calls and cache keys must remain
   separate;

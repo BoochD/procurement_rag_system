@@ -1696,13 +1696,12 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
             )
         ]
 
-    items_by_stage: dict[str, list[NmckItem]] = defaultdict(list)
+    child_items_by_stage = _stage_child_items(items)
+    standalone_items_by_stage: dict[str, list[NmckItem]] = defaultdict(list)
     for item in items:
-        stage_number = clean_stage_number(getattr(item, "parent_stage_number", None)) or _stage_prefix(
-            getattr(item, "row_number", None)
-        )
+        stage_number = _stage_row_number(getattr(item, "row_number", None))
         if stage_number:
-            items_by_stage[stage_number].append(item)
+            standalone_items_by_stage[stage_number].append(item)
 
     failed: list[str] = []
     incomplete: list[str] = []
@@ -1710,7 +1709,9 @@ def _check_onmck_stage_prices(package: ProcurementPackageExtraction) -> list[Che
     for stage in stages:
         number = clean_stage_number(getattr(stage, "stage_number", None))
         declared = _money_amount(getattr(stage, "price", None))
-        child_items = items_by_stage.get(number or "", [])
+        child_items = child_items_by_stage.get(number or "", [])
+        if not child_items:
+            child_items = standalone_items_by_stage.get(number or "", [])
         child_totals = [_money(getattr(item, "row_total_declared", None)) for item in child_items]
         child_sum = sum((value for value in child_totals if value is not None), Decimal("0.00"))
         label = f"Этап {number or '?'}"
@@ -1827,12 +1828,6 @@ def _trademark_from_item_name(value: str | None) -> str | None:
     return match.group(1).strip(" .:") if match else None
 
 
-def _stage_prefix(value: Any) -> str | None:
-    text = str(value or "").strip()
-    match = re.match(r"(\d+)\.", text)
-    return match.group(1) if match else None
-
-
 def clean_stage_number(value: Any) -> str | None:
     text = str(value or "").strip()
     match = re.search(r"\d+", text)
@@ -1862,15 +1857,11 @@ def _supplier_total_prices(items: list[NmckItem]) -> list[tuple[str, Decimal]]:
 
 
 def _duplicate_stage_parent_item_ids(items: list[NmckItem]) -> set[int]:
-    child_items_by_stage: dict[str, list[NmckItem]] = defaultdict(list)
-    for item in items:
-        parent_stage = clean_stage_number(getattr(item, "parent_stage_number", None))
-        if parent_stage:
-            child_items_by_stage[parent_stage].append(item)
+    child_items_by_stage = _stage_child_items(items)
 
     duplicate_stage_totals: set[int] = set()
     for item in items:
-        row_stage = _stage_parent_row_number(getattr(item, "row_number", None))
+        row_stage = _stage_row_number(getattr(item, "row_number", None))
         child_items = child_items_by_stage.get(row_stage or "", [])
         if not child_items:
             continue
@@ -1884,9 +1875,29 @@ def _duplicate_stage_parent_item_ids(items: list[NmckItem]) -> set[int]:
     return duplicate_stage_totals
 
 
-def _stage_parent_row_number(value: Any) -> str | None:
-    match = re.fullmatch(r"\s*(\d+)\s*\.\s*", str(value or ""))
+def _stage_row_number(value: Any) -> str | None:
+    match = re.fullmatch(r"\s*(\d+)\s*\.?\s*", str(value or ""))
     return match.group(1) if match else None
+
+
+def _item_parent_stage_number(item: NmckItem) -> str | None:
+    explicit_parent = clean_stage_number(getattr(item, "parent_stage_number", None))
+    if explicit_parent:
+        return explicit_parent
+    match = re.fullmatch(
+        r"\s*(\d+)\s*\.\s*\d+\s*\.?\s*",
+        str(getattr(item, "row_number", None) or ""),
+    )
+    return match.group(1) if match else None
+
+
+def _stage_child_items(items: list[NmckItem]) -> dict[str, list[NmckItem]]:
+    result: dict[str, list[NmckItem]] = defaultdict(list)
+    for item in items:
+        parent_stage = _item_parent_stage_number(item)
+        if parent_stage:
+            result[parent_stage].append(item)
+    return result
 
 
 def _supplier_row_prices(item: NmckItem) -> dict[str, Decimal]:

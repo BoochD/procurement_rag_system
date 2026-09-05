@@ -303,6 +303,77 @@ def test_supplier_totals_keep_stage_parent_when_it_is_not_child_aggregate():
     ]
 
 
+def _stage_price_result(items, *, stage_price=Decimal("100"), total=Decimal("100")):
+    package = ProcurementPackageExtraction(
+        nmck_justification=NmckJustificationSchema(
+            items=items,
+            stages=[ProcurementStage(stage_number="2", price=MoneyValue(amount=stage_price))],
+            total_amount=MoneyValue(amount=total),
+        )
+    )
+    return checks_runner._check_onmck_stage_prices(package)[0]
+
+
+def test_supplier_totals_recognize_integer_parent_and_implicit_children():
+    parent = NmckItem(
+        row_number="2",
+        name="Этап 2",
+        quantity=Decimal("1"),
+        supplier_prices=[SupplierPrice(source_id="supplier_1", row_total=Decimal("100"))],
+    )
+    children = [
+        NmckItem(row_number="2.1", name="Товар 1", quantity=Decimal("1"), supplier_prices=[
+            SupplierPrice(source_id="supplier_1", row_total=Decimal("40"))
+        ]),
+        NmckItem(row_number="2.2", name="Товар 2", quantity=Decimal("1"), supplier_prices=[
+            SupplierPrice(source_id="supplier_1", row_total=Decimal("60"))
+        ]),
+    ]
+
+    assert checks_runner._supplier_total_prices([parent, *children]) == [
+        ("supplier_1", Decimal("100"))
+    ]
+
+
+def test_stage_price_uses_children_instead_of_duplicate_parent_row():
+    parent = NmckItem(row_number="2", name="Этап 2", quantity=Decimal("1"), row_total_declared=Decimal("100"))
+    children = [
+        NmckItem(row_number="2.1", name="Товар 1", quantity=Decimal("1"), row_total_declared=Decimal("40")),
+        NmckItem(row_number="2.2", name="Товар 2", quantity=Decimal("1"), row_total_declared=Decimal("60")),
+    ]
+
+    result = _stage_price_result([parent, *children])
+
+    assert result.status == "passed"
+    assert "сумма строк 100.00" in result.details["summary_lines"][0]
+
+
+def test_stage_price_reports_mismatched_parent_total_against_children():
+    children = [
+        NmckItem(row_number="2.1", name="Товар 1", quantity=Decimal("1"), row_total_declared=Decimal("40")),
+        NmckItem(row_number="2.2", name="Товар 2", quantity=Decimal("1"), row_total_declared=Decimal("60")),
+    ]
+
+    result = _stage_price_result(children, stage_price=Decimal("90"), total=Decimal("90"))
+
+    assert result.status == "failed"
+    assert "ожидалось 100.00, указано 90.00" in result.details["failed"][0]
+
+
+def test_stage_price_keeps_standalone_service_row():
+    service = NmckItem(
+        row_number="2.",
+        name="Услуга этапа 2",
+        quantity=Decimal("1"),
+        row_total_declared=Decimal("100"),
+    )
+
+    result = _stage_price_result([service])
+
+    assert result.status == "passed"
+    assert "вложенных строк 1" in result.details["summary_lines"][0]
+
+
 def _by_id(report):
     return {item.check_id: item for item in report.results}
 
