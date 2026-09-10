@@ -692,6 +692,45 @@ def test_report_renders_onmck_arithmetic_total_discrepancy():
     assert "Итог Исполнитель 1: по строкам 100.00, в строке «Итого» 100.90." in text
 
 
+def test_report_renders_supplier_row_arithmetic_mismatch_as_text():
+    report = _report(
+        _check_result(
+            "strict.onmck.arithmetic",
+            "Арифметика ОНМЦК",
+            "failed",
+            "В арифметике ОНМЦК найдены расхождения.",
+            details={
+                "arithmetic_rows": [{
+                    "item": "Поставка",
+                    "quantity": "2208",
+                    "unit": "кг",
+                    "unit_price": "20",
+                    "calculated": "44160",
+                    "declared": "44160",
+                    "status": "passed",
+                }],
+                "row_sum": "44160",
+                "onmck_total": "44160",
+                "plan_nmck": "44160",
+                "supplier_row_mismatches": [{
+                    "item": "Поставка",
+                    "supplier": "Поставщик 3",
+                    "expected": "50784",
+                    "actual": "10784",
+                }],
+                "failed_items": [],
+            },
+        )
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "Ошибки стоимости строк поставщиков:" in text
+    assert "Поставка, Поставщик 3: количество × цена = 50 784,00 руб." in text
+    assert "в ОНМЦК указано 10 784,00 руб." in text
+    assert "{'item':" not in text
+
+
 def test_report_prefers_successful_semantic_checks_over_duplicate_strict_rows():
     report = _report(
         _check_result(

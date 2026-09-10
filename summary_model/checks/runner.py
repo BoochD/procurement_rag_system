@@ -70,6 +70,7 @@ def run_checks(
     results.extend(_check_onmck_arithmetic(package))
     results.extend(_check_onmck_min_prices(package))
     results.extend(_check_onmck_items_against_ooz(package))
+    results.extend(_check_aggregate_service_volume(package))
     results.extend(_check_onmck_supplier_prices(package))
     results.extend(_check_onmck_stage_prices(package))
     results.extend(_check_commercial_offer_content(package))
@@ -78,6 +79,7 @@ def run_checks(
         llm_matches=commercial_offer_match_results,
     ))
     results.extend(_check_codes(package, "okpd2"))
+    results.extend(_check_plan_okpd2_decoded_names(package))
     results.extend(_check_codes(package, "ktru"))
     results.extend(_check_purchase_item_trademarks(package))
     results.extend(_check_plan_ground_truth(package, stage_results=stage_results))
@@ -956,8 +958,7 @@ def _check_request_attachments(package: ProcurementPackageExtraction) -> list[Ch
         )
     ]
     extra = sorted({item.document_type for item in unmatched_files if item.document_type != "unknown"})
-    count_mismatch = len(request.attachments) != len(uploaded_files)
-    if missing_attachments or count_mismatch:
+    if missing_attachments:
         status = "failed"
         message = "В обращении указаны приложения, но соответствующие файлы не найдены."
     elif extra:
@@ -1152,6 +1153,11 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
     failed = []
     incomplete = []
     arithmetic_rows: list[dict[str, Any]] = []
+    supplier_row_mismatches: list[dict[str, str]] = []
+    source_labels = {
+        source.source_id: source.supplier_name_raw or source.raw_header or source.source_id
+        for source in onmck.price_sources
+    }
     for item in onmck.items:
         quantity = normalize_decimal(item.quantity)
         unit_price = normalize_decimal(item.selected_min_unit_price)
@@ -1201,6 +1207,22 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "status": "manual_review",
             })
             incomplete.append(name)
+        for supplier_price in item.supplier_prices:
+            supplier_unit_price = normalize_decimal(supplier_price.unit_price)
+            supplier_row_total = normalize_decimal(supplier_price.row_total)
+            if quantity is None or supplier_unit_price is None or supplier_row_total is None:
+                continue
+            expected = _money(quantity * supplier_unit_price)
+            if expected == _money(supplier_row_total):
+                continue
+            supplier_label = source_labels.get(supplier_price.source_id, supplier_price.source_id)
+            supplier_row_mismatches.append({
+                "item": name,
+                "supplier": supplier_label,
+                "source_id": supplier_price.source_id,
+                "expected": _format_money(expected),
+                "actual": _format_money(supplier_row_total),
+            })
     duplicate_stage_totals = _duplicate_stage_parent_item_ids(onmck.items)
     declared_totals = [
         _money(item.row_total_declared)
@@ -1231,7 +1253,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
     failed.extend(quantity_total_mismatches)
     failed.extend(supplier_total_mismatches)
     incomplete.extend(supplier_total_incomplete)
-    if failed or total_mismatch or plan_mismatch:
+    if failed or supplier_row_mismatches or total_mismatch or plan_mismatch:
         status = "failed"
         message = "В арифметике ОНМЦК найдены расхождения."
     elif incomplete:
@@ -1264,6 +1286,7 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                 "quantity_total_mismatches": quantity_total_mismatches,
                 "supplier_total_mismatches": supplier_total_mismatches,
                 "supplier_total_incomplete": supplier_total_incomplete,
+                "supplier_row_mismatches": supplier_row_mismatches,
                 "arithmetic_rows": arithmetic_rows,
                 "summary_lines": [
                     f"строк ОНМЦК: {len(onmck.items)}",
@@ -1273,6 +1296,108 @@ def _check_onmck_arithmetic(package: ProcurementPackageExtraction) -> list[Check
                     *quantity_total_mismatches,
                     *supplier_total_mismatches,
                     *supplier_total_incomplete,
+                    *[
+                        f"{row['item']}: {row['supplier']}: количество × цена "
+                        f"{row['expected']}, указано {row['actual']}."
+                        for row in supplier_row_mismatches
+                    ],
+                ],
+            },
+        )
+    ]
+
+
+def _aggregate_quantity_value(value: str | None) -> tuple[Decimal, str, str] | None:
+    text = " ".join(str(value or "").split())
+    match = re.search(r"(\d+(?:[\s\u00a0]\d{3})*(?:[,.]\d+)?)\s*([А-Яа-яЁё]+)", text)
+    if not match:
+        return None
+    quantity = normalize_decimal(match.group(1))
+    normalized_unit = normalize_unit(match.group(2))
+    if quantity is None or not normalized_unit:
+        return None
+    return quantity, normalized_unit, match.group(2)
+
+
+def _single_nmck_aggregate_quantity(package: ProcurementPackageExtraction) -> tuple[Decimal, str, str] | None:
+    onmck = package.nmck_justification
+    if onmck is None:
+        return None
+    item_ids_to_skip = _duplicate_stage_parent_item_ids(onmck.items)
+    items = [item for item in onmck.items if id(item) not in item_ids_to_skip]
+    if len(items) != 1:
+        return None
+    item = items[0]
+    quantity = normalize_decimal(item.quantity)
+    unit = normalize_unit(item.unit)
+    raw_unit = str(item.unit or "").strip()
+    if quantity is None or not unit or not raw_unit:
+        return None
+    return quantity, unit, raw_unit
+
+
+def _format_aggregate_quantity(value: tuple[Decimal, str, str]) -> str:
+    quantity, _normalized_unit, raw_unit = value
+    return f"{_format_decimal(quantity)} {raw_unit}"
+
+
+def _check_aggregate_service_volume(package: ProcurementPackageExtraction) -> list[CheckResult]:
+    schedule = package.schedule_application
+    ooz = package.purchase_description
+    plan_value = _aggregate_quantity_value(getattr(schedule, "aggregate_quantity_text", None)) if schedule else None
+    ooz_value = _aggregate_quantity_value(getattr(ooz, "aggregate_quantity_text", None)) if ooz else None
+    onmck_value = _single_nmck_aggregate_quantity(package)
+    if plan_value is None or ooz_value is None or onmck_value is None:
+        return [
+            _result(
+                "strict.aggregate_service_volume",
+                "Общий объём услуги",
+                "not_applicable",
+                "strict",
+                "Однозначный общий объём услуги не извлечён во всех трёх источниках.",
+                fields=[
+                    "schedule_application.aggregate_quantity_text",
+                    "purchase_description.aggregate_quantity_text",
+                    "nmck_justification.items[]",
+                ],
+            )
+        ]
+    values = {
+        "Заявка в план-график": plan_value,
+        "Описание объекта закупки": ooz_value,
+        "ОНМЦК": onmck_value,
+    }
+    mismatches: list[str] = []
+    for label, value in (("ООЗ", ooz_value), ("ОНМЦК", onmck_value)):
+        if value[0] != plan_value[0]:
+            mismatches.append(
+                f"{label}: количество {_format_decimal(value[0])} вместо "
+                f"{_format_decimal(plan_value[0])} из ПГ."
+            )
+        if value[1] != plan_value[1]:
+            mismatches.append(
+                f"{label}: единица {value[2]} вместо {plan_value[2]} из ПГ."
+            )
+    status = "failed" if mismatches else "passed"
+    return [
+        _result(
+            "strict.aggregate_service_volume",
+            "Общий объём услуги",
+            status,
+            "strict",
+            "Общий объём услуги расходится между документами." if mismatches else "Общий объём услуги совпадает между документами.",
+            documents=["schedule_application", "purchase_description", "nmck_justification"],
+            fields=[
+                "schedule_application.aggregate_quantity_text",
+                "purchase_description.aggregate_quantity_text",
+                "nmck_justification.items[]",
+            ],
+            details={
+                "values": {label: _format_aggregate_quantity(value) for label, value in values.items()},
+                "mismatches": mismatches,
+                "summary_lines": [
+                    *(f"{label}: {_format_aggregate_quantity(value)}" for label, value in values.items()),
+                    *mismatches,
                 ],
             },
         )
@@ -3262,6 +3387,8 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
     summary_lines.extend(f"{DOCUMENT_LABELS.get(name, name)}: {_stages_summary(bool(stages), stages)}" for name, stages in docs)
     internal_differences = _plan_stage_internal_differences(schedule) if schedule else []
     summary_lines.extend(f"ПГ: {difference}" for difference in internal_differences)
+    invalid_dates = _invalid_stage_date_messages(schedule, docs)
+    summary_lines.extend(invalid_dates)
     comparison: dict[str, Any] = {"failed": [], "manual": [], "summary_lines": [], "difference_summary": None}
     if not has_plan_stages and not any(stages for _name, stages in docs):
         status = "passed"
@@ -3272,7 +3399,10 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
     else:
         comparison = _compare_stage_sets(comparison_plan_stages, docs)
         summary_lines.extend(comparison["summary_lines"])
-        if internal_differences:
+        if invalid_dates:
+            status = "failed"
+            message = "В этапах найдены некорректные календарные даты."
+        elif internal_differences:
             status = "failed"
             message = "В ПГ выявлены внутренние несоответствия этапов; см. пояснения перед таблицами."
         elif comparison["failed"]:
@@ -3306,6 +3436,22 @@ def _check_stages_against_plan(package: ProcurementPackageExtraction) -> CheckRe
             "stage_tables": _stage_tables(package),
         },
     )
+
+
+def _invalid_stage_date_messages(
+    schedule: Any | None,
+    docs: list[tuple[str, list[Any]]],
+) -> list[str]:
+    sources = [("schedule_application", list(getattr(schedule, "stages", []) or [])), *docs]
+    messages: list[str] = []
+    for document_name, stages in sources:
+        label = DOCUMENT_LABELS.get(document_name, document_name)
+        for stage in stages:
+            for warning in getattr(stage, "parser_warnings", []) or []:
+                text = str(warning or "").strip()
+                if text.startswith("Некорректная календарная дата этапа:"):
+                    messages.append(f"{label}: {text}")
+    return list(dict.fromkeys(messages))
 
 
 def _stage_tables(package: ProcurementPackageExtraction) -> list[dict[str, Any]]:
@@ -4006,12 +4152,22 @@ def _check_plan_national_regime_fields(
         ]
         failed_rows = [row for row in expected_rows if row["status"] == "failed"]
         unexpected_codes = _unexpected_national_regime_codes(found, expected_rows)
+        unsupported_prohibitions = [
+            code
+            for code in unscoped_prohibitions
+            if plan_codes
+            and resolution["rows"]
+            and all(row.get("status") == "not_listed" for row in resolution["rows"])
+        ]
         if registry_errors:
             status = "manual_review"
             message = "Локальная сверка строк ПП №1875 выполнена не полностью."
         elif failed_rows:
             status = "failed"
             message = "Для части ОКПД2 из ПГ не заполнены требуемые строки запретов или ограничений ПП №1875."
+        elif unsupported_prohibitions:
+            status = "failed"
+            message = "В ПГ указан запрет, хотя коды ОКПД2 не входят в перечни ПП №1875."
         elif unscoped_prohibitions:
             status = "manual_review"
             message = "В ПГ указан запрет, но не приведён код или позиция ПП №1875, к которой он относится."
@@ -4037,8 +4193,13 @@ def _check_plan_national_regime_fields(
             for row in expected_rows
         )
         summary_lines.extend(
+            f"{field_code}: запрет указан, хотя коды ОКПД2 ПГ не входят в перечни ПП №1875"
+            for field_code in unsupported_prohibitions
+        )
+        summary_lines.extend(
             f"{field_code}: запрет указан без кода или позиции ПП №1875"
             for field_code in unscoped_prohibitions
+            if field_code not in unsupported_prohibitions
         )
         if registry_errors:
             summary_lines.append(f"ошибок локальной сверки: {len(registry_errors)}")
@@ -4060,7 +4221,81 @@ def _check_plan_national_regime_fields(
                 "expected_rows": expected_rows if schedule is not None else [],
                 "registry_errors": registry_errors if schedule is not None else [],
                 "unexpected_codes": unexpected_codes if schedule is not None else [],
+                "unsupported_prohibitions": unsupported_prohibitions if schedule is not None else [],
             },
+        )
+    ]
+
+
+_GENERIC_OKPD2_NAMES = {
+    "поставка",
+    "поставка товара",
+    "оказание услуг",
+    "выполнение работ",
+}
+
+
+def _check_plan_okpd2_decoded_names(package: ProcurementPackageExtraction) -> list[CheckResult]:
+    schedule = package.schedule_application
+    decoded_rows = [
+        (normalize_code(getattr(reference, "code", None)), str(getattr(reference, "name", "") or ""))
+        for reference in (getattr(schedule, "subject_codes", []) or [])
+        if getattr(reference, "code_type", None) == "okpd2" and normalize_code(getattr(reference, "code", None))
+    ]
+    decoded_rows.extend(
+        (normalize_code(getattr(item, "okpd2_code", None)), str(getattr(item, "name", "") or ""))
+        for item in (getattr(schedule, "included_goods", []) or [])
+        if normalize_code(getattr(item, "okpd2_code", None))
+    )
+    if not decoded_rows:
+        return [
+            _result(
+                "strict.plan.okpd2_decoded_names",
+                "Расшифровка ОКПД2 в заявке",
+                "not_applicable",
+                "strict",
+                "В заявке не извлечены пары кода ОКПД2 и его расшифровки.",
+                documents=["schedule_application"],
+                fields=[
+                    "schedule_application.subject_codes",
+                    "schedule_application.included_goods",
+                ],
+            )
+        ]
+    rows: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for code, raw_name in decoded_rows:
+        name = " ".join(raw_name.split())
+        key = (code, normalize_text(name))
+        if key in seen:
+            continue
+        seen.add(key)
+        row = {"code": code, "name": name or "не указано"}
+        rows.append(row)
+        if not name or normalize_text(name) in _GENERIC_OKPD2_NAMES:
+            failures.append(row)
+    status = "failed" if failures else "passed"
+    summary_lines = [f"{row['code']}: {row['name']}" for row in rows]
+    summary_lines.extend(
+        f"{row['code']}: расшифровка «{row['name']}» не является содержательным наименованием ОКПД2."
+        for row in failures
+    )
+    return [
+        _result(
+            "strict.plan.okpd2_decoded_names",
+            "Расшифровка ОКПД2 в заявке",
+            status,
+            "strict",
+            "Для части кодов ОКПД2 в заявке указана неполная расшифровка."
+            if failures
+            else "Расшифровки ОКПД2 в заявке содержательны.",
+            documents=["schedule_application"],
+            fields=[
+                "schedule_application.subject_codes",
+                "schedule_application.included_goods",
+            ],
+            details={"rows": rows, "failed_rows": failures, "summary_lines": summary_lines},
         )
     ]
 

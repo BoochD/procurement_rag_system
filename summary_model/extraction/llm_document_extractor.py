@@ -218,6 +218,7 @@ def _merge_with_deterministic_guard(
         _prefer_list(merged, deterministic_schema, "items")
         _prefer_stages(merged, deterministic_schema)
         _prefer_scalar(merged, deterministic_schema, "purchase_subject")
+        _prefer_scalar(merged, deterministic_schema, "aggregate_quantity_text")
         _prefer_scalar(merged, deterministic_schema, "warranty_requirements_text")
         _prefer_scalar(merged, deterministic_schema, "warranty_section_text")
         _prefer_list(

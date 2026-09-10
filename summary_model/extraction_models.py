@@ -435,6 +435,7 @@ class PurchaseDescriptionSchema(BaseModel):
     delivery_place: str | None = None
     delivery_term_text: str | None = None
     delivery_term: TermValue | None = None
+    aggregate_quantity_text: str | None = None
     stages: list[ProcurementStage] = Field(default_factory=list)
     items: list[PurchaseItem] = Field(default_factory=list)
     warranty_requirements_text: str | None = None

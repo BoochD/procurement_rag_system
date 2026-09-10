@@ -31,8 +31,10 @@ INTERNAL_CHECK_ORDER = [
     "strict.onmck.arithmetic",
     "strict.onmck.min_price",
     "strict.onmck.items",
+    "strict.aggregate_service_volume",
     "strict.onmck.stage_prices",
     "strict.codes.okpd2",
+    "strict.plan.okpd2_decoded_names",
     "strict.codes.ktru",
     "strict.plan.subject",
     "strict.plan.delivery_term",
@@ -804,6 +806,21 @@ def _render_onmck_arithmetic(result: CheckResult) -> list[str]:
         f"  Итог ОНМЦК: <b>{_report_money(details.get('onmck_total'))}</b>",
         f"  НМЦК в заявке: <b>{_report_money(details.get('plan_nmck'))}</b>",
     ])
+    supplier_row_mismatches = details.get("supplier_row_mismatches")
+    if isinstance(supplier_row_mismatches, list) and supplier_row_mismatches:
+        lines.append("")
+        lines.append("  <b>Ошибки стоимости строк поставщиков:</b>")
+        for mismatch in supplier_row_mismatches:
+            if not isinstance(mismatch, dict):
+                continue
+            lines.append(
+                "  - <error>"
+                f"{_human_text(str(mismatch.get('item') or 'Позиция'))}, "
+                f"{_human_text(str(mismatch.get('supplier') or 'поставщик'))}: "
+                f"количество × цена = {_report_money(mismatch.get('expected'))}, "
+                f"в ОНМЦК указано {_report_money(mismatch.get('actual'))}"
+                "</error>"
+            )
     failed_items = details.get("failed_items")
     incomplete_items = details.get("incomplete_items")
     if isinstance(failed_items, list) and failed_items:

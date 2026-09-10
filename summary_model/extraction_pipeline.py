@@ -433,6 +433,11 @@ def _stage_from_payload(table: ParsedTable, payload: dict) -> ProcurementStage:
         if embedded_term:
             service_term_text = clean_text(embedded_term.group(1))
     stage_name = _clean_stage_name(raw_stage_name)
+    date_warnings = _invalid_stage_date_warnings(
+        start_text,
+        service_term_text,
+        execution_end_text,
+    )
     return ProcurementStage(
         stage_number=_clean_stage_number(raw_stage_number),
         stage_name=stage_name,
@@ -445,7 +450,10 @@ def _stage_from_payload(table: ParsedTable, payload: dict) -> ProcurementStage:
         price=price,
         quantity_text=clean_text(payload.get("quantity_text")) or None,
         evidence=f"{table.table_id}:r{payload.get('row_index')}",
-        parser_warnings=payload.get("warnings", []),
+        parser_warnings=list(dict.fromkeys([
+            *(payload.get("warnings", []) or []),
+            *date_warnings,
+        ])),
     )
 
 
@@ -480,6 +488,18 @@ def _last_date_from_text(text: str | None) -> date | None:
         return date(year, month, day)
     except ValueError:
         return None
+
+
+def _invalid_stage_date_warnings(*values: str | None) -> list[str]:
+    warnings: list[str] = []
+    for value in values:
+        for token in re.findall(r"\b\d{2}\.\d{2}\.\d{4}\b", clean_text(value)):
+            day, month, year = (int(part) for part in token.split("."))
+            try:
+                date(year, month, day)
+            except ValueError:
+                warnings.append(f"Некорректная календарная дата этапа: {token}.")
+    return list(dict.fromkeys(warnings))
 
 
 def _is_valid_stage(stage: ProcurementStage) -> bool:
@@ -580,7 +600,8 @@ def _stages_from_schedule_fields(fields: list[RawField]) -> list[ProcurementStag
                 quantity_text=quantity,
                 evidence="schedule_application:raw_fields",
                 parser_warnings=[
-                    "Stage inferred from schedule application text fields, not a physical stage table."
+                    "Stage inferred from schedule application text fields, not a physical stage table.",
+                    *_invalid_stage_date_warnings(service_term_text),
                 ],
             )
         )
@@ -1061,7 +1082,10 @@ def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> Schedule
         field
         for field in fields
         if re.match(r"\s*17[._]?\d", field.key or "")
-        or any(marker in (field.key or "").casefold() for marker in ("запрет", "ограничен", "преимуществ"))
+        or any(
+            marker in f"{field.key or ''} {field.value or ''}".casefold()
+            for marker in ("запрет", "ограничен", "преимуществ")
+        )
     ]
     return ScheduleApplicationSchema(
         document_title=_title(ir),
@@ -1083,6 +1107,7 @@ def _schedule_application(ir: DocumentIR, tables: list[ParsedTable]) -> Schedule
         delivery_term=_term_value(delivery_text),
         contract_execution_term_text=contract_term_text,
         contract_execution_term=_term_value(contract_term_text),
+        aggregate_quantity_text=_field_value(fields, "количество"),
         included_goods=included_goods,
         stages=stages,
         has_stages=True if stages else _bool_from_text(_field_value(fields, "этапы исполнения")),
@@ -1169,6 +1194,8 @@ def _attachment_title_parts(value: object) -> list[str]:
 
 def _request_attachments(ir: DocumentIR, text: str, tables: list[ParsedTable]) -> list[RequestAttachment]:
     table_attachments = _attachments(tables)
+    if table_attachments:
+        return table_attachments
 
     corpus = text + "\n" + "\n".join(
         table.compact_markdown
@@ -1177,9 +1204,7 @@ def _request_attachments(ir: DocumentIR, text: str, tables: list[ParsedTable]) -
     ) + "\n" + _table_rows_text(ir)
     marker = re.search(r"приложени[ея]\s*:", corpus, flags=re.IGNORECASE)
     fallback = _numbered_attachments_from_chunk(corpus[marker.end() : marker.end() + 1800]) if marker else []
-    if fallback and (not table_attachments or len(fallback) > len(table_attachments)):
-        return fallback
-    return table_attachments
+    return fallback
 
 
 def _table_rows_text(ir: DocumentIR) -> str:
@@ -1853,6 +1878,40 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
     return result
 
 
+def _aggregate_quantity_from_ooz_tables(tables: list[ParsedTable]) -> str | None:
+    """Read a single service-volume total without treating it as a product item."""
+    candidates: list[str] = []
+    for table in tables:
+        title = clean_text(table.title).casefold().replace("ё", "е")
+        if "объем" not in title or not any(marker in title for marker in ("услуг", "работ")):
+            continue
+        total_columns = [
+            header
+            for header in table.header_paths
+            if "общее количество" in clean_text(" ".join(header.parts)).casefold()
+        ]
+        if len(total_columns) != 1:
+            continue
+        header = total_columns[0]
+        header_text = clean_text(" ".join(header.parts)).casefold()
+        if "час" not in header_text:
+            continue
+        values = {
+            value
+            for row in table.logical_rows
+            if row.row_type not in {"header", "note", "total"}
+            if (raw := clean_text(row.cells_by_col.get(header.col_index)))
+            if (value := parse_decimal(raw)) is not None
+        }
+        if len(values) != 1:
+            continue
+        quantity = values.pop()
+        quantity_text = format(quantity, "f").rstrip("0").rstrip(".")
+        candidates.append(f"{quantity_text} часов")
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else None
+
+
 def _is_non_item_ooz_row(name: str | None, payload: dict[str, Any]) -> bool:
     normalized = clean_text(name).casefold()
     if not normalized:
@@ -2075,6 +2134,7 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
         delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
+        aggregate_quantity_text=_aggregate_quantity_from_ooz_tables(tables),
         stages=stages,
         items=items,
         warranty_requirements_text=(

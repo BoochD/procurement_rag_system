@@ -441,6 +441,17 @@ a compact diagnostic retained in parser warnings.
   diagnostic opt-out and must not be the production default.
 - The plan key-value table is a deterministic source for aggregate quantity
   and OKPD2/KTRU lists, including when its LLM extraction fails validation.
+- Plan national-regime rows are identified by the labels for prohibitions,
+  restrictions, and advantages; `17.x` numbering is only a fallback because
+  current plan forms can use `16.x`. SMP/SONKO preference fields are separate.
+- A service-volume comparison runs only when one aggregate quantity is
+  unambiguously available in the plan, OOZ, and ONMCK. The plan is the baseline.
+- ONMCK arithmetic validates every available supplier row total, not only the
+  selected minimum and the final total.
+- The plan OKPD2-name check rejects empty or generic action labels such as
+  `Поставка`; it is not a substitute for an official full OKPD2 classifier.
+- An attachment list extracted from the request table is authoritative. Extra
+  uploaded documents produce a warning; only missing listed files are errors.
 - KTRU characteristic comparison canonicalizes visually identical Latin and
   Cyrillic symbols. Document-local `item_id` values must never be used for
   matching positions across documents.

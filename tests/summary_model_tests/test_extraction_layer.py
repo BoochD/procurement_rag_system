@@ -6,6 +6,7 @@ from docx import Document
 from summary_model.domain.models import DocumentType, InputDocument, TableColumnIR, TableIR, TableRowIR
 from summary_model.extraction_cli import main as extraction_cli_main
 from summary_model.extraction_pipeline import (
+    _aggregate_quantity_from_ooz_tables,
     _attachment_title_parts,
     _attachment_type,
     _contract_execution_term_text,
@@ -13,13 +14,14 @@ from summary_model.extraction_pipeline import (
     _is_non_item_ooz_row,
     _link_codes_to_items_from_text,
     _price_source_requisites,
+    _stage_from_payload,
     extract_package,
 )
-from summary_model.extraction_models import CodeReference, PurchaseItem
+from summary_model.extraction_models import CodeReference, PurchaseItem, RequestAttachment
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
-from summary_model.tables.models import HeaderPath
+from summary_model.tables.models import HeaderPath, LogicalTableRow, ParsedTable
 from summary_model.tables.table_classifier import classify_parsed_table
 from summary_model.tables.table_logical_rows import normalize_header_name
 from summary_model.tables.utils import extract_money
@@ -557,6 +559,7 @@ def test_key_value_table_preserves_all_raw_fields_and_negative_values(tmp_path):
     assert plan.purchase_subject == "Поставка картриджей"
     assert plan.ktru_codes == ["20.59.12.120-00000002"]
     assert plan.nmck and plan.nmck.amount == 350000
+    assert plan.aggregate_quantity_text == "10 шт"
     assert len(plan.raw_fields) == 5
     assert "Преимущества СМП" in plan.negative_value_fields
     assert all("Иванов" not in field.key for field in plan.raw_fields)
@@ -682,6 +685,26 @@ def test_stage_table_infers_empty_stage_numbers_and_prefers_last_term_column(tmp
     assert "row order" in ooz.stages[0].parser_warnings[0]
 
 
+def test_stage_payload_preserves_impossible_calendar_date_as_warning():
+    table = ParsedTable(
+        table_id="stage-table",
+        block_id="block-1",
+        table_index=1,
+        table_type="contract_stages_table",
+        row_count=2,
+        col_count=2,
+    )
+
+    stage = _stage_from_payload(table, {
+        "stage_number": "6",
+        "service_term_text": "с 01.07.2026 по 07.13.2026",
+        "row_index": 1,
+    })
+
+    assert stage.service_end_date is None
+    assert stage.parser_warnings == ["Некорректная календарная дата этапа: 07.13.2026."]
+
+
 def test_purchase_request_extracts_text_attachment_list_from_small_table(tmp_path):
     path = tmp_path / "request_attachments.docx"
     _save_request_with_text_attachment_table(path)
@@ -701,6 +724,56 @@ def test_purchase_request_extracts_text_attachment_list_from_small_table(tmp_pat
         ("4", "purchase_description"),
         ("5", "explanatory_note"),
     ]
+
+
+def test_table_attachments_are_not_reparsed_from_duplicated_document_corpus(monkeypatch):
+    from summary_model import extraction_pipeline
+
+    expected = [
+        RequestAttachment(number="1", title_raw="Заявка в план-график"),
+        RequestAttachment(number="2", title_raw="Определение цены контракта"),
+    ]
+    monkeypatch.setattr(extraction_pipeline, "_attachments", lambda _tables: expected)
+    monkeypatch.setattr(
+        extraction_pipeline,
+        "_numbered_attachments_from_chunk",
+        lambda _chunk: [*expected, RequestAttachment(number="3", title_raw="Лето")],
+    )
+
+    actual = extraction_pipeline._request_attachments(None, "Приложения: 1. Заявка", [])
+
+    assert actual == expected
+
+
+def test_aggregate_service_volume_table_is_extracted_without_creating_product_rows():
+    table = ParsedTable(
+        table_id="ooz-table-2",
+        block_id="block-2",
+        table_index=2,
+        table_type="generic_table",
+        row_count=2,
+        col_count=3,
+        title="Таблица №2. Объем оказываемых Услуг",
+        header_paths=[
+            HeaderPath(col_index=0, parts=["Количество часов передачи видеопотоков"]),
+            HeaderPath(col_index=1, parts=["Количество средств видеонаблюдения"]),
+            HeaderPath(col_index=2, parts=["Общее количество часов передачи видеопотоков"]),
+        ],
+        logical_rows=[
+            LogicalTableRow(
+                table_id="ooz-table-2",
+                row_index=1,
+                row_type="item",
+                cells_by_col={0: "2208", 1: "1", 2: "2208"},
+            )
+        ],
+    )
+
+    assert _aggregate_quantity_from_ooz_tables([table]) == "2208 часов"
+    table.title = "Таблица №2. Объём выполняемых работ"
+    assert _aggregate_quantity_from_ooz_tables([table]) == "2208 часов"
+    table.title = "Перечень адресов предоставления видеопотоков"
+    assert _aggregate_quantity_from_ooz_tables([table]) is None
 
 
 def test_purchase_request_extracts_plain_text_attachment_lines_without_semicolons(tmp_path):

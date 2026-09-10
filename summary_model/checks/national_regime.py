@@ -12,6 +12,12 @@ FIELD_LABELS = {
     "17.3": "Преимущества",
 }
 
+_SEMANTIC_FIELD_MARKERS = {
+    "17.1": "запрет",
+    "17.2": "ограничен",
+    "17.3": "преимуществ",
+}
+
 
 def plan_national_regime_fields(schedule: Any | None) -> dict[str, str]:
     if schedule is None:
@@ -24,11 +30,26 @@ def plan_national_regime_fields(schedule: Any | None) -> dict[str, str]:
             if re.match(r"\s*17[._]?\d", str(getattr(field, "key", "") or ""))
         ]
     result: dict[str, str] = {}
+    numeric_fields: list[tuple[str, str]] = []
     for field in fields:
         key = str(getattr(field, "key", "") or "")
+        value = str(getattr(field, "value", "") or "").strip()
+        key_normalized = key.casefold()
+        value_normalized = value.casefold()
+        is_unrelated_preference = any(
+            unrelated in key_normalized for unrelated in ("смп", "сонко")
+        )
+        for field_code, marker in _SEMANTIC_FIELD_MARKERS.items():
+            if not is_unrelated_preference and (
+                marker in key_normalized or value_normalized.startswith(marker)
+            ):
+                result[field_code] = value
+                break
         match = re.search(r"17[._]?(\d)", key)
         if match:
-            result[f"17.{match.group(1)}"] = str(getattr(field, "value", "") or "").strip()
+            numeric_fields.append((f"17.{match.group(1)}", value))
+    for field_code, value in numeric_fields:
+        result.setdefault(field_code, value)
     return result
 
 

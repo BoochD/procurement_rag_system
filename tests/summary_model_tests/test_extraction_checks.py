@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from summary_model.checks import run_checks
 from summary_model.checks import runner as checks_runner
+from summary_model.checks.normalization import normalize_unit
 from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.report import build_checks_report_text, build_commercial_offer_report_text
 from summary_model.checks_cli import main as checks_cli_main
@@ -16,6 +17,7 @@ from summary_model.extraction_models import (
     AdditionalCharacteristicsJustification,
     CommercialOfferItem,
     CommercialOfferSchema,
+    CodeReference,
     ContractDraftSchema,
     ContractSpecificationItem,
     DocumentEnvelope,
@@ -1554,6 +1556,65 @@ def test_onmck_arithmetic_and_min_price_fail():
     assert checks["strict.onmck.min_price"].status == "failed"
 
 
+def test_onmck_arithmetic_checks_each_supplier_row_total():
+    package = _base_package()
+    item = package.nmck_justification.items[0]
+    item.quantity = Decimal("2208")
+    item.selected_min_unit_price = Decimal("20")
+    item.row_total_declared = Decimal("44160")
+    item.supplier_prices[0].unit_price = Decimal("20")
+    item.supplier_prices[0].row_total = Decimal("44160")
+    item.supplier_prices[1].unit_price = Decimal("21")
+    item.supplier_prices[1].row_total = Decimal("46368")
+    item.supplier_prices[2].unit_price = Decimal("23")
+    item.supplier_prices[2].row_total = Decimal("10784")
+
+    result = _by_id(run_checks(package))["strict.onmck.arithmetic"]
+
+    assert result.status == "failed"
+    assert result.details["supplier_row_mismatches"] == [{
+        "item": "Картридж",
+        "supplier": "Поставщик 3",
+        "source_id": "supplier_3",
+        "expected": "50784.00",
+        "actual": "10784.00",
+    }]
+    assert any("Поставщик 3" in line and "50784.00" in line for line in result.details["summary_lines"])
+
+
+def test_aggregate_service_volume_compares_quantity_and_unit():
+    package = _base_package()
+    package.schedule_application.aggregate_quantity_text = "3000 часов"
+    package.purchase_description.aggregate_quantity_text = "2208 часов"
+    package.nmck_justification.items = [
+        NmckItem(name="Поставка", quantity=Decimal("2208"), unit="кг")
+    ]
+
+    result = _by_id(run_checks(package))["strict.aggregate_service_volume"]
+
+    assert result.status == "failed"
+    assert result.details["values"] == {
+        "Заявка в план-график": "3000 часов",
+        "Описание объекта закупки": "2208 часов",
+        "ОНМЦК": "2208 кг",
+    }
+    assert "ООЗ: количество 2208 вместо 3000 из ПГ." in result.details["mismatches"]
+    assert "ОНМЦК: единица кг вместо часов из ПГ." in result.details["mismatches"]
+    report_text = build_checks_report_text(ProcurementChecksReport.from_results(
+        package_id=package.package_id,
+        results=[result],
+    ))
+    assert "4) Внутренний анализ перечня документов:" in report_text
+    assert "Общий объём услуги" in report_text
+    assert "Дополнительные проверки" not in report_text
+
+
+def test_normalize_unit_accepts_grammatical_hour_and_kilogram_forms():
+    assert normalize_unit("час") == normalize_unit("часов") == "ч"
+    assert normalize_unit("килограммов") == normalize_unit("кг") == "кг"
+    assert normalize_unit("часов") != normalize_unit("кг")
+
+
 def test_onmck_arithmetic_checks_summary_quantity_without_losing_money_check():
     package = _base_package()
     package.nmck_justification.totals = [
@@ -1870,6 +1931,28 @@ def test_request_attachments_reports_missing_unknown_attachment():
     assert "В обращении указано приложение, но файл не загружен" in text
 
 
+def test_request_attachments_warns_for_extra_documents_without_missing_files():
+    package = _base_package()
+    package.purchase_request = PurchaseRequestSchema(
+        attachments=[
+            RequestAttachment(
+                title_raw="Заявка на внесение в план-график",
+                normalized_document_type="schedule_application",
+            ),
+            RequestAttachment(
+                title_raw="Определение цены контракта",
+                normalized_document_type="nmck_justification",
+            ),
+        ]
+    )
+
+    result = _by_id(run_checks(package))["strict.request.attachments"]
+
+    assert result.status == "warning"
+    assert result.details["missing_attachments"] == []
+    assert "документы, которые не найдены в списке" in result.message
+
+
 def test_code_mismatch_fails_and_missing_codes_manual_review():
     package = _base_package()
     package.contract_draft.items[0].okpd2_code = "99.99.99.999"
@@ -2174,6 +2257,96 @@ def test_plan_national_regime_warns_when_prohibition_has_no_scope():
 
     assert result.status == "manual_review"
     assert "не приведён код или позиция" in result.message
+
+
+def test_plan_national_regime_uses_semantic_16x_fields_and_rejects_unsupported_prohibition():
+    class FakeRegistry:
+        def check_okpd2(self, _code):
+            return SimpleNamespace(found=False)
+
+    package = _base_package()
+    package.schedule_application.okpd2_codes = ["63.11.21.000"]
+    package.schedule_application.national_regime_fields = [
+        RawField(key="16.1.", value="Запреты; Да; -", is_empty=False),
+        RawField(key="16.2.", value="Ограничения; -", is_empty=False),
+        RawField(key="16.3.", value="Преимущества; -", is_empty=False),
+    ]
+
+    result = _by_id(run_checks(package, pp1875_registry=FakeRegistry()))[
+        "strict.plan.national_regime_fields"
+    ]
+
+    assert result.status == "failed"
+    assert "не входят в перечни" in result.message
+    assert result.details["unsupported_prohibitions"] == ["17.1"]
+    assert "Запреты; Да; -" in result.details["summary_lines"][0]
+
+
+def test_plan_national_regime_does_not_use_smp_preference_as_regime_advantage():
+    from summary_model.checks.national_regime import plan_national_regime_fields
+
+    package = _base_package()
+    package.schedule_application.national_regime_fields = [
+        RawField(key="16.3.", value="Преимущества; -", is_empty=False),
+        RawField(
+            key="Преимущества для СМП",
+            value="Преимущества предоставляются",
+            is_empty=False,
+        ),
+    ]
+
+    assert plan_national_regime_fields(package.schedule_application)["17.3"] == "Преимущества; -"
+
+
+def test_plan_okpd2_decoded_name_rejects_generic_procurement_action():
+    package = _base_package()
+    package.schedule_application.subject_codes = [
+        CodeReference(code_type="okpd2", code="63.11.21.000", name="Поставка")
+    ]
+
+    failed = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
+
+    assert failed.status == "failed"
+    assert "не является содержательным" in failed.details["summary_lines"][-1]
+
+    package.schedule_application.subject_codes[0].name = "Услуги по передаче видеопотока"
+    passed = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
+    assert passed.status == "passed"
+
+
+def test_plan_okpd2_decoded_name_checks_goods_without_ktru_only_rows():
+    package = _base_package()
+    package.schedule_application.subject_codes = []
+    package.schedule_application.included_goods = [
+        PurchaseItem(name="Поставка товара", okpd2_code="63.11.21.000"),
+        PurchaseItem(name="Картридж", ktru_code="20.59.12.120-00000002"),
+    ]
+
+    result = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
+
+    assert result.status == "failed"
+    assert result.details["failed_rows"] == [{
+        "code": "63.11.21.000",
+        "name": "Поставка товара",
+    }]
+
+
+def test_stage_check_fails_for_preserved_invalid_calendar_date():
+    package = _base_package()
+    package.schedule_application.stages = [
+        ProcurementStage(
+            stage_number="6",
+            service_term_text="с 01.07.2026 по 07.13.2026",
+            parser_warnings=["Некорректная календарная дата этапа: 07.13.2026."],
+        )
+    ]
+    package.purchase_description.stages = [ProcurementStage(stage_number="6")]
+
+    result = _by_id(run_checks(package))["strict.plan.stages"]
+
+    assert result.status == "failed"
+    assert "некорректные календарные даты" in result.message
+    assert any("07.13.2026" in line for line in result.details["summary_lines"])
 
 
 def test_plan_national_regime_requires_matching_rows_for_plan_codes():
