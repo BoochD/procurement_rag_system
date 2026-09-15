@@ -1,12 +1,16 @@
 import os
 import base64
+import tempfile
 from io import BytesIO
 from pathlib import Path
 
 from celery import Celery
 from celery.result import AsyncResult
-from django.http import FileResponse, HttpResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.views.decorators.http import require_POST
+
+from summary_model.classification.upload_router import route_upload
 
 DOCUMENT_FIELDS = (
     ("plan", "Заявка в план-график"),
@@ -39,6 +43,28 @@ def index(request):
     if "error" in request.GET:
         context["error"] = request.GET["error"]
     return render(request, "fileprocessor/index.html", context)
+
+
+@require_POST
+def classify_uploads(request):
+    uploaded_files = request.FILES.getlist("files")
+    if not uploaded_files:
+        return JsonResponse({"error": "Файлы для распределения не выбраны."}, status=400)
+    if len(uploaded_files) > 30:
+        return JsonResponse({"error": "За один раз можно распределить не более 30 файлов."}, status=400)
+
+    results = []
+    with tempfile.TemporaryDirectory(prefix="procurement-upload-routing-") as temp_dir:
+        for index, uploaded_file in enumerate(uploaded_files):
+            safe_name = Path(uploaded_file.name).name
+            temp_path = Path(temp_dir) / f"{index}_{safe_name}"
+            with temp_path.open("wb") as target:
+                for chunk in uploaded_file.chunks():
+                    target.write(chunk)
+            route = route_upload(temp_path)
+            results.append(route.as_dict(name=safe_name))
+
+    return JsonResponse({"files": results})
 
 
 def upload_and_process(request):

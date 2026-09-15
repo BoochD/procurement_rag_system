@@ -5,6 +5,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Обработка документов</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .bulk-upload {
+            border: 1px dashed #6c757d;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .routing-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            gap: .5rem;
+            align-items: center;
+        }
+        .routing-name {
+            overflow-wrap: anywhere;
+        }
+        .routing-warning {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.35rem;
+            height: 1.35rem;
+            border-radius: 50%;
+            background: #ffc107;
+            color: #212529;
+            font-weight: 700;
+            cursor: help;
+        }
+        .field-routing-warning {
+            display: none;
+            margin-left: .35rem;
+        }
+        .field-routing-warning.is-visible {
+            display: inline-flex;
+        }
+    </style>
 </head>
 <body>
     <div class="container mt-5">
@@ -31,8 +66,26 @@
 
                             <div class="row g-4">
                                 <div class="col-lg-7">
+                                    <div class="bulk-upload p-3 mb-4">
+                                        <label for="bulkDocuments" class="form-label fw-semibold mb-2">
+                                            Общая загрузка документов
+                                        </label>
+                                        <div class="form-text mt-0 mb-3">
+                                            Выберите документы комплектом или добавляйте их по одному. Система распределит их по полям ниже.
+                                        </div>
+                                        <input
+                                            type="file"
+                                            class="form-control"
+                                            id="bulkDocuments"
+                                            accept=".docx,.pdf"
+                                            multiple
+                                        >
+                                        <div id="bulkRoutingStatus" class="small text-muted mt-2" aria-live="polite"></div>
+                                        <div id="bulkRoutingList" class="mt-2"></div>
+                                    </div>
+
                                     {% for field_name, field_label in document_fields %}
-                                    <div class="mb-4">
+                                    <div class="mb-4" data-document-field="{{ field_name }}">
                                         <label for="{{ field_name }}" class="form-label">
                                             Загрузите "{{ field_label }}"
                                             {% if field_name in required_document_keys %}
@@ -40,6 +93,12 @@
                                             {% else %}
                                             <span class="text-muted">(необязательно)</span>
                                             {% endif %}
+                                            <span
+                                                class="routing-warning field-routing-warning"
+                                                id="{{ field_name }}RoutingWarning"
+                                                title="Проверьте, правильно ли классифицирован документ алгоритмом"
+                                                aria-label="Проверьте правильность распределения"
+                                            >!</span>
                                         </label>
                                         <input
                                             type="file"
@@ -95,6 +154,147 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         (function () {
+            const classifyUrl = "{% url 'fileprocessor:classify_uploads' %}";
+            const bulkInput = document.getElementById("bulkDocuments");
+            const bulkStatus = document.getElementById("bulkRoutingStatus");
+            const bulkList = document.getElementById("bulkRoutingList");
+            const csrfToken = document.querySelector("input[name='csrfmiddlewaretoken']").value;
+            const routingRows = new Map();
+            let routingCounter = 0;
+
+            function fileSignature(file) {
+                return `${file.name}:${file.size}:${file.lastModified}`;
+            }
+
+            function setInputFile(input, file) {
+                const transfer = new DataTransfer();
+                transfer.items.add(file);
+                input.files = transfer.files;
+            }
+
+            function clearInput(input) {
+                input.value = "";
+            }
+
+            function warningFor(fieldName) {
+                return document.getElementById(`${fieldName}RoutingWarning`);
+            }
+
+            function addRoutingRow(file, result, state, message) {
+                routingCounter += 1;
+                const rowId = `routing-${routingCounter}`;
+                const row = document.createElement("div");
+                row.id = rowId;
+                row.className = "routing-row py-2 border-top";
+                row.dataset.signature = fileSignature(file);
+                row.dataset.targetField = state === "assigned" ? (result.target_field || "") : "";
+
+                const name = document.createElement("div");
+                name.className = "routing-name";
+                const strong = document.createElement("div");
+                strong.className = "fw-semibold";
+                strong.textContent = file.name;
+                const detail = document.createElement("div");
+                detail.className = state === "unresolved" ? "text-danger" : "text-muted";
+                detail.textContent = message;
+                name.append(strong, detail);
+                row.appendChild(name);
+
+                if (result.needs_review) {
+                    const warning = document.createElement("span");
+                    warning.className = "routing-warning";
+                    warning.title = "Проверьте, правильно ли классифицирован документ алгоритмом";
+                    warning.textContent = "!";
+                    row.appendChild(warning);
+                } else {
+                    row.appendChild(document.createElement("span"));
+                }
+
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.className = "btn btn-sm btn-outline-secondary";
+                remove.textContent = "Удалить";
+                remove.addEventListener("click", function () {
+                    const targetField = row.dataset.targetField;
+                    if (targetField) {
+                        const target = document.getElementById(targetField);
+                        if (target && target.files.length && fileSignature(target.files[0]) === row.dataset.signature) {
+                            clearInput(target);
+                            warningFor(targetField).classList.remove("is-visible");
+                        }
+                    }
+                    routingRows.delete(row.dataset.signature);
+                    row.remove();
+                });
+                row.appendChild(remove);
+                bulkList.appendChild(row);
+                routingRows.set(row.dataset.signature, rowId);
+            }
+
+            async function classifyFiles(files) {
+                const newFiles = files.filter((file) => !routingRows.has(fileSignature(file)));
+                if (!newFiles.length) {
+                    bulkStatus.className = "small text-muted mt-2";
+                    bulkStatus.textContent = "Эти файлы уже добавлены.";
+                    return;
+                }
+
+                const formData = new FormData();
+                newFiles.forEach((file) => formData.append("files", file));
+                bulkInput.disabled = true;
+                bulkStatus.className = "small text-muted mt-2";
+                bulkStatus.textContent = "Определяем типы документов...";
+
+                try {
+                    const response = await fetch(classifyUrl, {
+                        method: "POST",
+                        headers: {"X-CSRFToken": csrfToken},
+                        body: formData,
+                    });
+                    const payload = await response.json();
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Не удалось распределить файлы.");
+                    }
+
+                    payload.files.forEach((result, index) => {
+                        const file = newFiles[index];
+                        const target = result.target_field ? document.getElementById(result.target_field) : null;
+                        if (result.auto_assign && target && !target.files.length) {
+                            setInputFile(target, file);
+                            warningFor(result.target_field).classList.toggle("is-visible", result.needs_review);
+                            addRoutingRow(
+                                file,
+                                result,
+                                "assigned",
+                                `Распределён: ${target.closest("[data-document-field]").querySelector("label").childNodes[0].textContent.trim().replace('Загрузите ', '')}`,
+                            );
+                        } else if (result.auto_assign && target) {
+                            addRoutingRow(file, result, "unresolved", `${result.reason} Поле уже занято; выберите нужный файл вручную.`);
+                        } else {
+                            addRoutingRow(file, result, "unresolved", result.reason);
+                        }
+                    });
+                    bulkStatus.className = "small text-success mt-2";
+                    bulkStatus.textContent = "Распределение обновлено.";
+                } catch (error) {
+                    bulkStatus.className = "small text-danger mt-2";
+                    bulkStatus.textContent = error.message;
+                } finally {
+                    bulkInput.disabled = false;
+                    bulkInput.value = "";
+                }
+            }
+
+            bulkInput.addEventListener("change", function () {
+                classifyFiles(Array.from(bulkInput.files || []));
+            });
+
+            document.querySelectorAll("[data-document-field] input[type='file']").forEach((input) => {
+                input.addEventListener("change", function () {
+                    warningFor(input.id).classList.remove("is-visible");
+                });
+            });
+
             const fieldName = "{{ commercial_offer_field }}";
             const addButton = document.getElementById("addCommercialOffer");
             const inputs = document.getElementById("commercialOfferInputs");
