@@ -47,6 +47,32 @@ or packs were run, what was not run, and any remaining uncertainty. Suggest a
 focused commit message after a meaningful milestone, but do not commit or push
 without an explicit user request.
 
+## Reviewing Algorithm Results
+
+Treat every report review as an evidence trace, not a plausibility check:
+
+1. Compare every `failed`, `warning`, and `manual_review` result with the exact
+   source passage and determine the expected result manually.
+2. Treat `manual_review` as a possible defect when the required facts are
+   explicitly present in the uploaded documents.
+3. Verify that every report quote comes from the correct source section and
+   that adjacent sections were not included accidentally.
+4. Inspect the complete chain when a result is wrong: source document,
+   extracted schema, section/table payload, raw model response, validation and
+   recovery diagnostics, accepted findings, and rendered report.
+5. State the precise failure layer: missing extraction, over-captured text,
+   model mistake, response-envelope problem, validation/filtering loss, check
+   logic, or report rendering.
+6. Verify both a positive and a negative fixture for the affected rule. A
+   document containing every required condition must pass; a missing or wrong
+   condition must produce a specific failure.
+7. Consider a result unfinished when its status is not explained by the
+   expected value, the value actually found, and source evidence.
+
+Do not accept a cautious-looking status as correct merely because it avoids a
+false accusation. A successful CLI exit also does not establish report
+correctness.
+
 ## What The System Does
 
 The application receives a procurement document pack and produces:

@@ -1808,26 +1808,48 @@ def _purchase_description_warranty_text(
 
 
 def _contract_responsibility_section(text: str) -> str | None:
-    section = _section_after_heading(
-        text,
-        r"(?:^|\n)\s*\d+(?:\.\d+)?\.\s*ответственн\w*\s+сторон\b",
-        max_chars=12000,
-    )
-    if section:
-        return section
-    lines = [clean_text(line) for line in text.splitlines()]
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    numbered_heading = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+(.+)$")
     for index, line in enumerate(lines):
-        lowered = line.casefold()
+        match = numbered_heading.match(line)
+        heading_text = match.group(2) if match else line
+        lowered = heading_text.casefold()
         if "ответственн" not in lowered or "сторон" not in lowered:
             continue
-        chunk_lines: list[str] = []
-        for next_line in lines[index : index + 80]:
-            if chunk_lines and re.match(r"^\d{1,2}\.\s+[А-ЯЁA-Z]", next_line):
+        heading_level = len(match.group(1).rstrip(".").split(".")) if match else None
+        chunk_lines = [line]
+        for next_line in lines[index + 1 :]:
+            next_heading = numbered_heading.match(next_line)
+            if next_heading and heading_level is not None:
+                next_level = len(next_heading.group(1).rstrip(".").split("."))
+                if next_level <= heading_level:
+                    break
+            if _is_contract_section_heading(next_line):
                 break
-            if clean_text(next_line):
-                chunk_lines.append(next_line)
-        return clean_text("\n".join(chunk_lines)) or None
+            chunk_lines.append(next_line)
+            if sum(len(value) + 1 for value in chunk_lines) >= 12000:
+                break
+        return "\n".join(chunk_lines)[:12000] or None
     return None
+
+
+def _is_contract_section_heading(line: str) -> bool:
+    """Recognize common standalone contract headings without relying on numbering."""
+    text = clean_text(line)
+    if not text or len(text) > 120 or text[-1] in ".;,:!?":
+        return False
+    normalized = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", text).casefold().replace("ё", "е")
+    heading_markers = (
+        "обеспечение исполнения контракта",
+        "срок исполнения контракта",
+        "изменение и расторжение контракта",
+        "порядок разрешения споров",
+        "обстоятельства непреодолимой силы",
+        "заключительные положения",
+        "адреса, реквизиты и подписи сторон",
+        "реквизиты и подписи сторон",
+    )
+    return any(normalized == marker or normalized.startswith(f"{marker} ") for marker in heading_markers)
 
 
 def _first_sentence_with(text: str, *markers: str) -> str | None:

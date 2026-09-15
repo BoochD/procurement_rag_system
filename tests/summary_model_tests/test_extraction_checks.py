@@ -956,6 +956,20 @@ def test_responsibility_section_parser_accepts_heading_variants_and_stops_at_nex
         assert "штраф и пеня" in section
         assert "Размер обеспечения" not in section
 
+    unnumbered = _contract_responsibility_section(
+        "Ответственность Сторон\n"
+        "Штраф заказчика составляет 1000 рублей.\n"
+        "Обеспечение исполнения Контракта\n"
+        "Обеспечение не предусмотрено.\n"
+        "Срок исполнения Контракта\n"
+        "9.3. Окончание срока не освобождает от ответственности."
+    )
+
+    assert unnumbered is not None
+    assert "1000 рублей" in unnumbered
+    assert "Обеспечение не предусмотрено" not in unnumbered
+    assert "9.3." not in unnumbered
+
 
 def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
     from summary_model.checks.penalty_llm import run_penalty_llm_checks
@@ -1001,6 +1015,20 @@ def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
                         "message": "Формула найдена.",
                         "evidence": "п. 7.8",
                         "quote": "1/300 действующей ключевой ставки",
+                    },
+                    {
+                        "label": "Штраф поставщика за стоимостное обязательство",
+                        "status": "passed",
+                        "message": "Применимая ветка найдена.",
+                        "evidence": "п. 7.7",
+                        "quote": "0,5 процента",
+                    },
+                    {
+                        "label": "Штраф поставщика за нестоимостное обязательство",
+                        "status": "passed",
+                        "message": "Применимая ветка найдена.",
+                        "evidence": "п. 7.6",
+                        "quote": "100000 рублей",
                     },
                 ],
             ), None
@@ -1181,27 +1209,64 @@ def test_penalty_llm_ignores_smp_fine_when_plan_does_not_require_subcontractors(
     assert not any("непривлечение СМП/СОНКО" in line for line in check.details["summary_lines"])
 
 
-def test_penalty_result_shows_source_clauses_when_llm_returns_no_findings():
-    from summary_model.checks.penalty_llm import ContractPenaltyLLMResult, _to_check_result
+def test_penalty_result_rejects_missing_core_findings():
+    from pydantic import ValidationError
+    from summary_model.checks.penalty_llm import CompleteContractPenaltyLLMResult
 
-    result = ContractPenaltyLLMResult(
-        status="manual_review",
-        message="Не удалось сформировать перечень.",
-        findings=[],
-    )
-    payload = {
-        "nmck": "106312006.01",
-        "expected": {"fixed_fine_amount": "100000.00"},
-        "responsibility_section_text": (
-            "7.4. Штраф заказчика составляет 100000 рублей. "
-            "7.5. Пеня начисляется в размере 1/300 ключевой ставки."
-        ),
-    }
+    try:
+        CompleteContractPenaltyLLMResult(
+            status="manual_review",
+            message="Не удалось сформировать перечень.",
+            findings=[],
+        )
+    except ValidationError as error:
+        assert "нет обязательных проверок" in str(error)
+    else:
+        raise AssertionError("Неполный ответ должен быть отклонён")
 
-    check = _to_check_result(result, payload)
 
-    assert any("7.4. Штраф заказчика" in line for line in check.details["summary_lines"])
-    assert any("7.5. Пеня начисляется" in line for line in check.details["summary_lines"])
+def test_penalty_check_retries_after_incomplete_structured_result():
+    from summary_model.checks.penalty_llm import CompleteContractPenaltyLLMResult
+    from summary_model.extraction.llm_client import StructuredLLMClient
+
+    complete_findings = [
+        {
+            "label": label,
+            "status": "passed",
+            "message": "Найдено.",
+        }
+        for label in (
+            "Штраф заказчика",
+            "Штраф поставщика за стоимостное обязательство",
+            "Штраф поставщика за нестоимостное обязательство",
+            "Пеня за просрочку",
+        )
+    ]
+
+    class Runnable:
+        calls = 0
+
+        def invoke(self, _prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return {"status": "manual_review", "message": "Общий вывод", "findings": []}
+            return {"status": "passed", "message": "Всё найдено", "findings": complete_findings}
+
+    class Model:
+        def __init__(self):
+            self.runnable = Runnable()
+
+        def with_structured_output(self, _schema, *, method, include_raw=False):
+            return self.runnable
+
+    model = Model()
+    client = StructuredLLMClient(model=model)
+    result, error = client.extract_check(CompleteContractPenaltyLLMResult, "check", "payload")
+
+    assert error is None
+    assert result is not None and result.status == "passed"
+    assert model.runnable.calls == 2
+    assert client.metrics()["retries"] == 1
 
 
 def test_semantic_delivery_place_rejects_different_house_numbers():
@@ -1299,6 +1364,27 @@ def test_penalty_llm_public_result_uses_russian_labels_and_worst_status():
                         "message": "Expected requirement was not found.",
                         "evidence": None,
                         "quote": None,
+                    },
+                    {
+                        "label": "supplier_value_obligation_percent",
+                        "status": "passed",
+                        "message": "Found.",
+                        "evidence": "п. 7.4",
+                        "quote": "10 процентов",
+                    },
+                    {
+                        "label": "supplier_non_value_obligation_amount",
+                        "status": "passed",
+                        "message": "Found.",
+                        "evidence": "п. 7.4",
+                        "quote": "1000 рублей",
+                    },
+                    {
+                        "label": "delay_peni",
+                        "status": "passed",
+                        "message": "Found.",
+                        "evidence": "п. 7.5",
+                        "quote": "1/300 ключевой ставки",
                     },
                 ],
             ), None

@@ -4,7 +4,7 @@ import json
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from summary_model.checks.models import CheckResult
 from summary_model.checks.normalization import normalize_decimal
@@ -35,6 +35,24 @@ class ContractPenaltyLLMResult(BaseModel):
     message: str
     findings: list[PenaltyCheckFinding] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class CompleteContractPenaltyLLMResult(ContractPenaltyLLMResult):
+    """Provider response contract: all core checks must be returned explicitly."""
+
+    @model_validator(mode="after")
+    def require_core_findings(self):
+        required = {
+            "Штраф заказчика",
+            "Штраф поставщика за стоимостное обязательство",
+            "Штраф поставщика за нестоимостное обязательство",
+            "Пеня за просрочку",
+        }
+        found = {_finding_label(finding.label) for finding in self.findings}
+        missing = sorted(required - found)
+        if missing:
+            raise ValueError("В findings нет обязательных проверок: " + ", ".join(missing))
+        return self
 
 
 PENALTY_CHECK_PROMPT = """
@@ -112,7 +130,7 @@ def run_penalty_llm_checks(
     payload_data = _penalty_payload(package)
     result, error = _extract_check(
         client,
-        ContractPenaltyLLMResult,
+        CompleteContractPenaltyLLMResult,
         PENALTY_CHECK_PROMPT,
         json.dumps(payload_data, ensure_ascii=False, default=str),
     )

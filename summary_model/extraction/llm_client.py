@@ -273,7 +273,11 @@ class StructuredLLMClient:
                         error=error,
                         is_retry=bool(attempt),
                     )
-                    if _is_non_retryable(error) or attempt:
+                    # A check response can be valid JSON yet violate a domain
+                    # invariant (for example, omit required findings). Give the
+                    # model one chance to return the complete structured result.
+                    non_retryable = _is_non_retryable(error) and not isinstance(error, ValidationError)
+                    if non_retryable or attempt:
                         message = f"LLM check output validation failed: {_structured_error_message(error)}"
                         self.errors.append(message)
                         return None, message
