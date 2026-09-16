@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections import Counter
 from decimal import Decimal, ROUND_HALF_UP
 from math import sqrt
 from pathlib import Path
@@ -16,6 +17,7 @@ from summary_model.checks.national_regime import (
     plan_okpd2_codes,
     resolve_plan_national_regime,
 )
+from summary_model.checks.okpd2_reference import official_okpd2_name
 from summary_model.checks.normalization import (
     normalize_code,
     normalize_decimal,
@@ -3177,12 +3179,52 @@ def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckR
         ("contract_draft", contract_subject),
         ("explanatory_note", getattr(package.explanatory_note, "subject", None) if package.explanatory_note else None),
     ]
-    return _check_text_against_plan(
-        package,
-        check_id="strict.plan.subject",
-        title="Предмет закупки",
-        schedule_value=schedule_value,
-        candidates=candidates,
+    summary_lines = [f"Заявка в план-график: {schedule_value or 'не найдено'}"]
+    present_candidates = [(name, value) for name, value in candidates if value]
+    summary_lines.extend(f"{DOCUMENT_LABELS.get(name, name)}: {value}" for name, value in present_candidates)
+    if not schedule_value:
+        status = "manual_review"
+        message = "В заявке в план-график не найдено поле для сверки: предмет закупки."
+    elif not present_candidates:
+        status = "manual_review"
+        message = "В других документах не найдены наименования предмета закупки для сверки с заявкой."
+    else:
+        comparisons = [
+            (name, *_subject_text_comparison(schedule_value, value))
+            for name, value in present_candidates
+        ]
+        failed = [name for name, status, _reason in comparisons if status == "failed"]
+        warnings = [name for name, status, _reason in comparisons if status == "warning"]
+        details = [
+            f"{DOCUMENT_LABELS.get(name, name)}: {reason}"
+            for name, status, reason in comparisons
+            if status != "passed"
+        ]
+        summary_lines.extend(details)
+        if failed:
+            status = "failed"
+            message = (
+                "Наименование предмета закупки отличается от заявки в план-график: "
+                + ", ".join(DOCUMENT_LABELS.get(name, name) for name in failed)
+                + "."
+            )
+        elif warnings:
+            status = "warning"
+            message = (
+                "Наименование предмета закупки содержит редакционное отличие от заявки в план-график: "
+                + ", ".join(DOCUMENT_LABELS.get(name, name) for name in warnings)
+                + "."
+            )
+        else:
+            status = "passed"
+            message = "Наименование предмета закупки полностью совпадает с заявкой в план-график."
+    return _result(
+        "strict.plan.subject",
+        "Предмет закупки",
+        status,
+        "strict",
+        message,
+        documents=["schedule_application", *[name for name, _value in present_candidates]],
         fields=[
             "schedule_application.purchase_subject",
             "purchase_request.purchase_subject",
@@ -3194,7 +3236,18 @@ def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckR
             ),
             "explanatory_note.subject",
         ],
+        details={"summary_lines": summary_lines},
     )
+
+
+def _subject_text_comparison(left: str, right: str) -> tuple[str, str]:
+    left_normalized = normalize_text(left)
+    right_normalized = normalize_text(right)
+    if left_normalized == right_normalized:
+        return "passed", "полное совпадение"
+    if Counter(left_normalized.split()) == Counter(right_normalized.split()):
+        return "warning", "те же слова указаны в другом порядке"
+    return "failed", "наименование отличается по составу слов"
 
 
 def _check_text_against_plan(
@@ -4227,14 +4280,6 @@ def _check_plan_national_regime_fields(
     ]
 
 
-_GENERIC_OKPD2_NAMES = {
-    "поставка",
-    "поставка товара",
-    "оказание услуг",
-    "выполнение работ",
-}
-
-
 def _check_plan_okpd2_decoded_names(package: ProcurementPackageExtraction) -> list[CheckResult]:
     schedule = package.schedule_application
     decoded_rows = [
@@ -4251,10 +4296,10 @@ def _check_plan_okpd2_decoded_names(package: ProcurementPackageExtraction) -> li
         return [
             _result(
                 "strict.plan.okpd2_decoded_names",
-                "Расшифровка ОКПД2 в заявке",
+                "Наименования ОКПД2 в заявке в план-график",
                 "not_applicable",
                 "strict",
-                "В заявке не извлечены пары кода ОКПД2 и его расшифровки.",
+                "В заявке не извлечены пары кода ОКПД2 и его наименования.",
                 documents=["schedule_application"],
                 fields=[
                     "schedule_application.subject_codes",
@@ -4264,6 +4309,7 @@ def _check_plan_okpd2_decoded_names(package: ProcurementPackageExtraction) -> li
         ]
     rows: list[dict[str, str]] = []
     failures: list[dict[str, str]] = []
+    unresolved: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for code, raw_name in decoded_rows:
         name = " ".join(raw_name.split())
@@ -4271,31 +4317,48 @@ def _check_plan_okpd2_decoded_names(package: ProcurementPackageExtraction) -> li
         if key in seen:
             continue
         seen.add(key)
-        row = {"code": code, "name": name or "не указано"}
-        rows.append(row)
-        if not name or normalize_text(name) in _GENERIC_OKPD2_NAMES:
+        matched_code, official_name = official_okpd2_name(code)
+        row = {
+            "code": code,
+            "name": name or "не указано",
+            "official_code": matched_code or "не найдено",
+            "official_name": official_name or "не найдено",
+            "status": "passed",
+        }
+        if official_name is None:
+            row["status"] = "manual_review"
+            unresolved.append(row)
+        elif not name or normalize_text(name) != normalize_text(official_name):
+            row["status"] = "failed"
             failures.append(row)
-    status = "failed" if failures else "passed"
-    summary_lines = [f"{row['code']}: {row['name']}" for row in rows]
-    summary_lines.extend(
-        f"{row['code']}: расшифровка «{row['name']}» не является содержательным наименованием ОКПД2."
-        for row in failures
-    )
+        rows.append(row)
+    status = "failed" if failures else "manual_review" if unresolved else "passed"
+    summary_lines = [
+        f"{row['code']}: в ПГ «{row['name']}»; официально «{row['official_name']}»."
+        for row in rows
+    ]
     return [
         _result(
             "strict.plan.okpd2_decoded_names",
-            "Расшифровка ОКПД2 в заявке",
+            "Наименования ОКПД2 в заявке в план-график",
             status,
             "strict",
-            "Для части кодов ОКПД2 в заявке указана неполная расшифровка."
+            "Наименования ОКПД2 в заявке не совпадают с официальным классификатором."
             if failures
-            else "Расшифровки ОКПД2 в заявке содержательны.",
+            else "Для части кодов не найдено официальное наименование в локальном справочнике."
+            if unresolved
+            else "Наименования ОКПД2 в заявке совпадают с официальным классификатором.",
             documents=["schedule_application"],
             fields=[
                 "schedule_application.subject_codes",
                 "schedule_application.included_goods",
             ],
-            details={"rows": rows, "failed_rows": failures, "summary_lines": summary_lines},
+            details={
+                "rows": rows,
+                "failed_rows": failures,
+                "unresolved_rows": unresolved,
+                "summary_lines": summary_lines,
+            },
         )
     ]
 

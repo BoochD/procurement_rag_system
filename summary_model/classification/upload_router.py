@@ -23,6 +23,13 @@ _REPORT_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+_AUXILIARY_NAME_RE = re.compile(
+    r"(?:^|[ _-])алгоритм(?:[ _-].*)?пояснен|"
+    r"(?:^|[ _-])замечани(?:[ _-]|$)|"
+    r"(?:^|[ _-])претензи(?:[ _-]|$)",
+    re.IGNORECASE,
+)
+
 _FILE_PATTERNS: dict[DocumentType, tuple[str, ...]] = {
     DocumentType.PLAN: (r"заявк.*(?:план.?график|\bпг\b)", r"план.?график"),
     DocumentType.REQUEST: (r"обращени",),
@@ -119,7 +126,7 @@ def route_upload(path: str | Path) -> UploadRoute:
     name = source.name
     suffix = source.suffix.casefold()
 
-    if name.startswith("~$") or _REPORT_NAME_RE.search(name):
+    if name.startswith("~$") or _REPORT_NAME_RE.search(name) or _AUXILIARY_NAME_RE.search(name):
         return UploadRoute(reason="Это служебный файл или готовый отчёт, а не исходный документ.")
     if suffix not in {".docx", ".pdf"}:
         return UploadRoute(reason="Формат файла не поддерживается для общей загрузки.")
@@ -137,7 +144,7 @@ def route_upload(path: str | Path) -> UploadRoute:
 
 
 def route_upload_text(file_name: str, text: str) -> UploadRoute:
-    if file_name.startswith("~$") or _REPORT_NAME_RE.search(file_name):
+    if file_name.startswith("~$") or _REPORT_NAME_RE.search(file_name) or _AUXILIARY_NAME_RE.search(file_name):
         return UploadRoute(reason="Это служебный файл или готовый отчёт, а не исходный документ.")
 
     normalized_name = _normalize(file_name)

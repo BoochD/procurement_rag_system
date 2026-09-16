@@ -139,9 +139,19 @@ def extract_package(
             elif document_type == DocumentType.ONMCK:
                 package.nmck_justification = _nmck_justification(ir, tables)
             elif document_type == DocumentType.OOZ:
-                package.purchase_description = _purchase_description(ir, tables)
+                _set_singleton_document(
+                    package,
+                    "purchase_description",
+                    _purchase_description(ir, tables),
+                    document.path.name,
+                )
             elif document_type == DocumentType.CONTRACT:
-                package.contract_draft = _contract_draft(ir, tables)
+                _set_singleton_document(
+                    package,
+                    "contract_draft",
+                    _contract_draft(ir, tables),
+                    document.path.name,
+                )
             elif document_type == DocumentType.EXPLANATORY_NOTE:
                 package.explanatory_note = _explanatory_note(ir, tables)
             elif document_type == DocumentType.COMMERCIAL_OFFER:
@@ -169,6 +179,26 @@ def extract_package(
             "Commercial offers are missing or fewer than the required count."
         )
     return package
+
+
+def _set_singleton_document(
+    package: ProcurementPackageExtraction,
+    field_name: str,
+    value: object,
+    file_name: str,
+) -> None:
+    """Keep the first source document when an auxiliary DOCX is misclassified."""
+    if getattr(package, field_name) is None:
+        setattr(package, field_name, value)
+        return
+    labels = {
+        "purchase_description": "описание объекта закупки",
+        "contract_draft": "проект контракта",
+    }
+    package.package_warnings.append(
+        f"{file_name}: повторный документ типа «{labels[field_name]}» не использован; "
+        "сохранён первый извлечённый документ этого типа."
+    )
 
 
 def _package_id(
@@ -992,11 +1022,19 @@ def _link_codes_to_items_from_text(
             continue
         ktru_matches = [match for match in matches if match.code_type == "ktru"]
         okpd2_matches = [match for match in matches if match.code_type == "okpd2"]
-        if not item.ktru_code and len(ktru_matches) == 1:
-            item.ktru_code = ktru_matches[0].code
-            item.parser_warnings.append(
-                "КТРУ проставлен из plain text документа; в таблице отдельной колонки с кодом нет."
-            )
+        if len(ktru_matches) == 1:
+            deterministic_code = ktru_matches[0].code
+            is_vlm_code = "Extracted by VLM fallback." in (item.parser_warnings or [])
+            if not item.ktru_code:
+                item.ktru_code = deterministic_code
+                item.parser_warnings.append(
+                    "КТРУ проставлен из plain text документа; в таблице отдельной колонки с кодом нет."
+                )
+            elif item.ktru_code != deterministic_code and is_vlm_code:
+                item.ktru_code = deterministic_code
+                item.parser_warnings.append(
+                    "Код КТРУ из VLM заменён на код, однозначно найденный в тексте документа."
+                )
         if not item.okpd2_code and len(okpd2_matches) == 1:
             item.okpd2_code = okpd2_matches[0].code
             item.parser_warnings.append(
@@ -1809,7 +1847,9 @@ def _purchase_description_warranty_text(
 
 def _contract_responsibility_section(text: str) -> str | None:
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    numbered_heading = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+(.+)$")
+    # A trailing dot distinguishes a clause heading (``7.4.``) from a fine
+    # amount at the start of a scale row (``1000 рублей``).
+    numbered_heading = re.compile(r"^(\d+(?:\.\d+)*\.)\s+(.+)$")
     for index, line in enumerate(lines):
         match = numbered_heading.match(line)
         heading_text = match.group(2) if match else line

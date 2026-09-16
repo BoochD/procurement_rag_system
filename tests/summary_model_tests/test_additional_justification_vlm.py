@@ -17,6 +17,7 @@ from summary_model.tables import extract_tables
 from summary_model.vlm_fallback import (
     VlmFallbackOptions,
     VlmFallbackRepairer,
+    _discard_unseen_item_codes,
     _merge_role_result,
     _normalize_single_price_service_rows,
     _parse_response,
@@ -37,6 +38,35 @@ def test_nmck_prompt_separates_stage_rows_and_single_service_prices():
     assert "never move a price into the next executor block" in prompt.casefold()
     assert "exactly one visible total for every executor" in prompt
     assert "stages MUST contain one" in prompt
+
+
+def test_vlm_item_code_absent_from_document_is_discarded():
+    table = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="ooz_items_table",
+        row_count=1,
+        col_count=1,
+        compact_json={
+            "items": [{
+                "name": "Проектор",
+                "ktru_code": "26.30.17.120-00000002",
+                "okpd2_code": "26.30.17.120",
+            }]
+        },
+    )
+
+    _discard_unseen_item_codes(
+        table,
+        allowed_ktru_codes={"26.20.17.120-00000002"},
+        allowed_okpd2_codes={"26.20.17.120"},
+    )
+
+    item = table.compact_json["items"][0]
+    assert item["ktru_code"] is None
+    assert item["okpd2_code"] is None
+    assert "отсутствующий в исходном документе" in table.parser_warnings[0]
 
 
 def _table(title: str = "Обоснование дополнительных характеристик") -> tuple[ParsedTable, TableIR]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -220,19 +221,37 @@ def _apply_delivery_place_guard(
     if len(address_parts) >= 2:
         baseline_label, baseline = address_parts[0]
         street_conflicts = [
-            f"{label}: {parts[1]}"
+            (label, parts[1])
             for label, parts in address_parts[1:]
             if baseline[0] == parts[0]
             and baseline[2] == parts[2]
             and baseline[1] != parts[1]
         ]
         if street_conflicts:
+            close_typos = all(
+                _edit_distance(baseline[1], street) <= 1
+                for _label, street in street_conflicts
+            )
+            comparison = "; ".join(
+                f"{label}: {street}" for label, street in street_conflicts
+            )
+            if close_typos:
+                return SemanticCheckFinding(
+                    check_id=finding.check_id,
+                    status="warning",
+                    message=(
+                        f"В названии улицы есть опечатка: {baseline_label} — {baseline[1]}; "
+                        f"{comparison}. Проверьте адреса."
+                    ),
+                    compared_values=finding.compared_values,
+                    evidence=finding.evidence,
+                )
             return SemanticCheckFinding(
                 check_id=finding.check_id,
                 status="failed",
                 message=(
                     f"Улица различается: {baseline_label} — {baseline[1]}; "
-                    f"{' ; '.join(street_conflicts)}. Адреса не согласованы."
+                    f"{comparison}. Адреса не согласованы."
                 ),
                 compared_values=finding.compared_values,
                 evidence=finding.evidence,
@@ -269,14 +288,37 @@ def _apply_delivery_place_guard(
 
 
 def _house_numbers(value: object) -> set[str]:
+    text = str(value or "")
     matches = re.findall(
         r"(?i)(?<![а-яa-z])(?:д(?:ом)?\.?)\s*(\d+[а-яa-z]?)",
-        str(value or ""),
+        text,
+    )
+    matches.extend(
+        re.findall(
+            r"(?i)(?:ул[.]?|улица)\s*[^,;.]+,\s*(\d+[а-яa-z]?)(?=\s*(?:,|$))",
+            text,
+        )
     )
     return {
         re.sub(r"^0+(?=\d)", "", match.casefold())
         for match in matches
     }
+
+
+def _edit_distance(left: str, right: str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
 
 
 def _same_address_core(values: list[object]) -> bool:
@@ -585,7 +627,16 @@ def _apply_subject_guard(
     if finding.check_id != "semantic.subject" or finding.status not in {"passed", "warning"}:
         return finding
 
-    baseline_terms = _subject_terms(getattr(package.schedule_application, "purchase_subject", None))
+    baseline_value = getattr(package.schedule_application, "purchase_subject", None)
+    if not baseline_value:
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="manual_review",
+            message="В заявке в план-график не найдено наименование предмета закупки.",
+            compared_values=finding.compared_values,
+            evidence=finding.evidence,
+        )
+    baseline_terms = _subject_terms(baseline_value)
     contract = package.contract_draft
     embedded_contract_subject = (
         getattr(contract.embedded_purchase_description, "purchase_subject", None)
@@ -598,22 +649,55 @@ def _apply_subject_guard(
         ("Проект контракта", embedded_contract_subject or getattr(contract, "subject", None)),
         ("Пояснительная записка", getattr(package.explanatory_note, "subject", None)),
     ]
+    if not any(value for _label, value in values):
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="manual_review",
+            message="В других документах не найдены наименования предмета закупки для сверки.",
+            compared_values=finding.compared_values,
+            evidence=finding.evidence,
+        )
     gaps = []
+    reordered = []
     for label, value in values:
         if not value:
             continue
+        if _semantic_normalize(value) == _semantic_normalize(baseline_value):
+            continue
+        if Counter(_semantic_normalize(value).split()) == Counter(
+            _semantic_normalize(baseline_value).split()
+        ):
+            reordered.append(label)
+            continue
         candidate_terms = _subject_terms(value)
         missing = sorted(set(baseline_terms) - set(candidate_terms))
+        added = sorted(set(candidate_terms) - set(baseline_terms))
+        parts = []
         if missing:
-            gaps.append(f"{label}: не названы {', '.join(baseline_terms[key] for key in missing)}")
-    if not gaps:
+            parts.append(f"не названы {', '.join(baseline_terms[key] for key in missing)}")
+        if added:
+            parts.append(f"добавлены {', '.join(candidate_terms[key] for key in added)}")
+        gaps.append(f"{label}: {'; '.join(parts) or 'наименование отличается по составу слов'}")
+    if gaps:
+        return SemanticCheckFinding(
+            check_id=finding.check_id,
+            status="failed",
+            message=(
+                "Предмет закупки не согласован: "
+                + "; ".join(gaps)
+                + "."
+            ),
+            compared_values=finding.compared_values,
+            evidence=finding.evidence,
+        )
+    if not reordered:
         return finding
     return SemanticCheckFinding(
         check_id=finding.check_id,
-        status="failed",
+        status="warning",
         message=(
-            "Предмет закупки не согласован: "
-            + "; ".join(gaps)
+            "Наименование предмета закупки содержит редакционное отличие: "
+            + ", ".join(reordered)
             + "."
         ),
         compared_values=finding.compared_values,

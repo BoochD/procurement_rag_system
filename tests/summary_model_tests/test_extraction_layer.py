@@ -14,10 +14,17 @@ from summary_model.extraction_pipeline import (
     _is_non_item_ooz_row,
     _link_codes_to_items_from_text,
     _price_source_requisites,
+    _set_singleton_document,
     _stage_from_payload,
     extract_package,
 )
-from summary_model.extraction_models import CodeReference, PurchaseItem, RequestAttachment
+from summary_model.extraction_models import (
+    CodeReference,
+    ContractDraftSchema,
+    ProcurementPackageExtraction,
+    PurchaseItem,
+    RequestAttachment,
+)
 from summary_model.ingestion import read_docx
 from summary_model.ingestion.table_normalizer import infer_header_rows
 from summary_model.tables import extract_tables
@@ -73,6 +80,39 @@ def test_read_docx_exposes_nested_stage_table(tmp_path):
 
     assert len(tables) == 2
     assert classify_parsed_table(tables[1], DocumentType.PLAN) == "contract_stages_table"
+
+
+def test_duplicate_contract_does_not_replace_first_extraction():
+    package = ProcurementPackageExtraction(package_id="duplicate-contract")
+    first = ContractDraftSchema(document_title="Исходный контракт")
+    second = ContractDraftSchema(document_title="Служебный документ")
+
+    _set_singleton_document(package, "contract_draft", first, "contract.docx")
+    _set_singleton_document(package, "contract_draft", second, "Алгоритм пояснения.docx")
+
+    assert package.contract_draft == first
+    assert "Алгоритм пояснения.docx" in package.package_warnings[0]
+
+
+def test_vlm_item_code_is_replaced_by_one_unambiguous_text_code():
+    item = PurchaseItem(
+        name="Проектор",
+        ktru_code="26.30.17.120-00000002",
+        parser_warnings=["Extracted by VLM fallback."],
+    )
+    references = [
+        CodeReference(
+            code_type="ktru",
+            code="26.20.17.120-00000002",
+            name="Проектор",
+            role="goods",
+        )
+    ]
+
+    _link_codes_to_items_from_text([item], references)
+
+    assert item.ktru_code == "26.20.17.120-00000002"
+    assert any("заменён" in warning for warning in item.parser_warnings)
 
 
 def _save_plan_with_duplicate_value_columns(path):

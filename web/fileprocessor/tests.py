@@ -7,6 +7,7 @@ from django.urls import reverse
 from docx import Document
 
 from summary_model.classification.upload_router import UploadRoute
+from summary_model.classification.upload_router import route_upload_text
 from summary_model.domain.models import DocumentType
 
 
@@ -19,6 +20,15 @@ def _docx_bytes(text: str) -> bytes:
 
 
 class UploadRoutingTests(TestCase):
+    def test_algorithm_review_document_is_not_auto_assigned(self):
+        route = route_upload_text(
+            "Алгоритм от 15.09.2026 пояснения.docx",
+            "Проект контракта Ответственность сторон",
+        )
+
+        assert route.target_field is None
+        assert route.auto_assign is False
+
     def test_classify_uploads_returns_results_in_input_order(self):
         files = [
             SimpleUploadedFile(

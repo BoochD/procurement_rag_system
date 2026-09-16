@@ -17,7 +17,7 @@ from summary_model.extraction.structured_recovery import (
 )
 from summary_model.tables.models import ParsedTable
 from summary_model.tables.table_compactor import build_compact_markdown
-from summary_model.tables.utils import clean_text
+from summary_model.tables.utils import KTRU_RE, OKPD2_RE, clean_text
 from summary_model.vlm_lab.candidates import (
     justification_candidate_reasons,
     rank_table_candidates,
@@ -72,6 +72,8 @@ class VlmFallbackRepairer:
         self.metrics["enabled"] = True
         by_id = {table.table_id: table for table in tables}
         source_by_id = _source_tables(ir)
+        allowed_ktru_codes = _document_codes(ir, KTRU_RE)
+        allowed_okpd2_codes = _document_codes(ir, OKPD2_RE)
         supports_justifications = document_type == DocumentType.OOZ
         ranked = [
             candidate
@@ -137,6 +139,11 @@ class VlmFallbackRepairer:
                 ir, document_type, original, source, candidate.role, known_items
             )
             if repaired is not None:
+                _discard_unseen_item_codes(
+                    repaired,
+                    allowed_ktru_codes=allowed_ktru_codes,
+                    allowed_okpd2_codes=allowed_okpd2_codes,
+                )
                 self._cache[cache_key] = repaired
                 repaired_by_id[original.table_id] = _merge_role_result(
                     table, repaired, candidate.role
@@ -828,6 +835,51 @@ def _merge_role_result(
     ]))
     merged.compact_markdown = build_compact_markdown(merged)
     return merged
+
+
+def _document_codes(ir: DocumentIR, pattern: re.Pattern[str]) -> set[str]:
+    parts = []
+    for block in ir.blocks:
+        if block.text:
+            parts.append(block.text)
+        if block.table:
+            parts.extend(
+                value for row in block.table.matrix() for value in row if value
+            )
+    return set(pattern.findall("\n".join(parts)))
+
+
+def _discard_unseen_item_codes(
+    table: ParsedTable,
+    *,
+    allowed_ktru_codes: set[str],
+    allowed_okpd2_codes: set[str],
+) -> None:
+    """Do not let a VLM repair invent a code absent from the source DOCX."""
+    items = table.compact_json.get("items")
+    if not isinstance(items, list):
+        return
+    discarded: list[str] = []
+    allowed_by_field = {
+        "ktru_code": allowed_ktru_codes,
+        "okpd2_code": allowed_okpd2_codes,
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for field_name, allowed_codes in allowed_by_field.items():
+            value = clean_text(item.get(field_name))
+            if value and allowed_codes and value not in allowed_codes:
+                item[field_name] = None
+                discarded.append(f"{field_name}={value}")
+    if not discarded:
+        return
+    table.parser_warnings = list(dict.fromkeys([
+        *table.parser_warnings,
+        "VLM вернула код, отсутствующий в исходном документе; код отброшен: "
+        + ", ".join(discarded),
+    ]))
+    table.compact_markdown = build_compact_markdown(table)
 
 
 def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedTable:

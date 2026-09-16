@@ -63,6 +63,19 @@ def test_discovery_accepts_pdf_request_and_explanatory_note(tmp_path):
     assert ignored == []
 
 
+def test_discovery_ignores_algorithm_review_document(tmp_path):
+    (tmp_path / "3. заявка в ПГ.docx").write_bytes(b"plan")
+    (tmp_path / "Алгоритм от 15.09.2026 пояснения.docx").write_bytes(b"review")
+
+    selected, ignored = full_pipeline_cli.discover_uploaded_documents(tmp_path)
+
+    assert [item["key"] for item in selected] == ["plan"]
+    assert ignored == [{
+        "name": "Алгоритм от 15.09.2026 пояснения.docx",
+        "reason": "auxiliary review document",
+    }]
+
+
 def test_full_pipeline_cli_uses_web_pipeline_and_writes_diagnostics(tmp_path, monkeypatch):
     input_dir = tmp_path / "pack"
     output_dir = tmp_path / "output"

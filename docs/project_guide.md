@@ -448,8 +448,13 @@ a compact diagnostic retained in parser warnings.
   unambiguously available in the plan, OOZ, and ONMCK. The plan is the baseline.
 - ONMCK arithmetic validates every available supplier row total, not only the
   selected minimum and the final total.
-- The plan OKPD2-name check rejects empty or generic action labels such as
-  `Поставка`; it is not a substitute for an official full OKPD2 classifier.
+- The plan OKPD2-name check compares each extracted code/name pair with the
+  bundled official ОК 034-2014 reference. The reference is generated from the
+  official Rosstat archive and is used locally, without a runtime API request.
+- The procurement-subject comparison uses the plan as baseline. Equal text
+  after technical normalization passes; the same words in another order are a
+  warning; an added, missing, or replaced word is a confirmed error. The
+  semantic result cannot relax this deterministic status.
 - An attachment list extracted from the request table is authoritative. Extra
   uploaded documents produce a warning; only missing listed files are errors.
 - KTRU characteristic comparison canonicalizes visually identical Latin and
@@ -458,6 +463,11 @@ a compact diagnostic retained in parser warnings.
 - Missing delivery periods or places trigger a focused structured LLM repair
   for that document. It preserves repeated occurrences with distinct evidence
   and is skipped when both fields are already populated.
+- Address comparison normalizes only address formatting. A one-character typo
+  in a street name is a warning; a different street or house number is an error.
+- The contract responsibility section may include monetary scale rows beginning
+  with a number. Only a dotted clause number such as `8.` or `8.1.` ends a
+  numbered responsibility section; `1000 рублей` remains part of the section.
 - LLM prompts define strict output formats consumed by HTML and DOCX rendering; prompt changes can affect report formatting.
 - The report renderer only understands a small tag set. New tags require changes in both HTML rendering expectations and `build_result_docx_bytes`.
 - Avoid coupling UI text, Celery payload keys, and `summary_model.web_service` input keys accidentally; they form the user-facing document contract.

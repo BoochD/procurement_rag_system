@@ -39,6 +39,13 @@ ROLE_ORDER = {
 
 MEDIA_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 
+_AUXILIARY_FILE_RE = re.compile(
+    r"(?:^|[ _-])алгоритм(?:[ _-].*)?пояснен|"
+    r"(?:^|[ _-])замечани(?:[ _-]|$)|"
+    r"(?:^|[ _-])претензи(?:[ _-]|$)",
+    re.IGNORECASE,
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -191,6 +198,9 @@ def discover_uploaded_documents(input_dir: Path) -> tuple[list[dict[str, Any]], 
             continue
         if path.name.casefold().startswith("analysis_result"):
             ignored.append({"name": path.name, "reason": "generated report"})
+            continue
+        if _AUXILIARY_FILE_RE.search(path.stem.casefold().replace("ё", "е")):
+            ignored.append({"name": path.name, "reason": "auxiliary review document"})
             continue
         role = detect_document_role(path)
         if role is None:

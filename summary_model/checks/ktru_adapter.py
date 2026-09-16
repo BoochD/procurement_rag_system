@@ -87,6 +87,7 @@ def run_ktru_characteristic_checks(
     unavailable: list[str] = []
     invalid_values: list[str] = []
     missing_required: list[str] = []
+    duplicate_characteristics: list[str] = []
     extra_characteristics: list[str] = []
     forbidden_extra: list[str] = []
     extra_reasons: list[str] = []
@@ -128,10 +129,35 @@ def run_ktru_characteristic_checks(
             has_ktru_characteristics=bool(legal_lookup),
         )
         _append_unique(extra_reasons, extra_allowed["reason"])
+        seen_characteristics: set[tuple[str, str, str]] = set()
 
         for characteristic in item.characteristics:
             if not characteristic.name:
                 continue
+            duplicate_key = (
+                _name_key(characteristic.name),
+                _name_key(characteristic.value),
+                _unit_key(characteristic.unit),
+            )
+            if duplicate_key in seen_characteristics:
+                label = _char_label(item, characteristic.name, characteristic.value)
+                _append_unique(duplicate_characteristics, label)
+                characteristic_rows.append(
+                    {
+                        "ktru_code": ktru_code,
+                        "item_name": item.name,
+                        "characteristic_name": characteristic.name,
+                        "ooz_value": characteristic.value,
+                        "ooz_unit": characteristic.unit,
+                        "ktru_allowed_values": [],
+                        "ktru_unit": None,
+                        "required": False,
+                        "status": "failed",
+                        "message": "характеристика с таким же значением повторяется в ООЗ",
+                    }
+                )
+                continue
+            seen_characteristics.add(duplicate_key)
             legal_item = _lookup_legal_characteristic(legal_lookup, characteristic.name)
             if legal_item is None:
                 label = _char_label(item, characteristic.name, characteristic.value)
@@ -217,13 +243,13 @@ def run_ktru_characteristic_checks(
     if unavailable:
         characteristic_status = "manual_review"
         characteristic_message = "Часть карточек КТРУ недоступна, проверка характеристик неполная."
-    if invalid_values or missing_required:
+    if invalid_values or missing_required or duplicate_characteristics:
         characteristic_status = "failed"
         characteristic_message = "Найдены ошибки в значениях или обязательных характеристиках КТРУ."
     identity_statuses = {row["status"] for row in item_identity_rows}
     if "failed" in identity_statuses:
         characteristic_status = "failed"
-        characteristic_message = "Найдены ошибки в характеристиках или единицах измерения позиций КТРУ."
+        characteristic_message = "Найдены ошибки в наименованиях, характеристиках или единицах измерения позиций КТРУ."
     elif "manual_review" in identity_statuses and characteristic_status == "passed":
         characteristic_status = "manual_review"
         characteristic_message = "Наименование или единица измерения части позиций требуют проверки."
@@ -250,6 +276,7 @@ def run_ktru_characteristic_checks(
                 "item_identity_rows": item_identity_rows,
                 "invalid_values": invalid_values,
                 "missing_required": missing_required,
+                "duplicate_characteristics": duplicate_characteristics,
                 "unavailable_ktru": unavailable,
                 "summary_lines": [
                     f"позиций с КТРУ: {len(items)}",
@@ -257,6 +284,7 @@ def run_ktru_characteristic_checks(
                     f"проверено характеристик: {checked_characteristics}",
                     f"ошибок значений: {len(invalid_values)}",
                     f"отсутствующих обязательных: {len(missing_required)}",
+                    f"повторяющихся характеристик: {len(duplicate_characteristics)}",
                     f"недоступных карточек: {len(unavailable)}",
                     *([f"недоступные КТРУ: {', '.join(unavailable[:5])}"] if unavailable else []),
                 ],
@@ -1106,8 +1134,8 @@ def _item_identity_row(
     if reference_name:
         name_status = (
             "passed"
-            if item.name and _purchase_names_match(item.name, reference_name)
-            else "manual_review"
+            if item.name and _ktru_names_match(item.name, reference_name)
+            else "failed"
         )
     else:
         name_status = "not_checked"
@@ -1134,6 +1162,11 @@ def _item_identity_row(
         "unit_status": unit_status,
         "status": status,
     }
+
+
+def _ktru_names_match(left: str | None, right: str | None) -> bool:
+    """KTRU item identity requires the catalogue name, not one shared token."""
+    return bool(_name_key(left) and _name_key(left) == _name_key(right))
 
 
 def _characteristic_row_message(

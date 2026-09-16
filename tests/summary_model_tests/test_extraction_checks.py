@@ -662,8 +662,10 @@ def test_smp_sonko_standard_terms_detected_only_when_required_by_plan():
 def test_plan_ground_truth_text_fields_warn_on_mismatch_and_pass_on_match():
     package = _base_package()
     package.schedule_application.purchase_subject = "Поставка картриджей"
+    package.purchase_request.purchase_subject = "Поставка картриджей"
     package.purchase_description.purchase_subject = "Поставка картриджей"
     package.contract_draft.subject = "Поставка картриджей"
+    package.explanatory_note.subject = "Поставка картриджей"
     package.schedule_application.delivery_term_text = "15 рабочих дней"
     package.purchase_description.delivery_term_text = "15 рабочих дней"
     package.contract_draft.delivery_term_text = "30 календарных дней"
@@ -679,6 +681,34 @@ def test_plan_ground_truth_text_fields_warn_on_mismatch_and_pass_on_match():
     assert checks["strict.plan.delivery_term"].status == "warning"
     assert checks["strict.plan.delivery_place"].status == "passed"
     assert checks["strict.plan.contract_execution_term"].status == "passed"
+
+
+def test_plan_subject_requires_full_word_match():
+    package = _base_package()
+    package.schedule_application.purchase_subject = "Поставка столов и инвентаря"
+    package.purchase_request.purchase_subject = None
+    package.purchase_description.purchase_subject = "Поставка столов"
+    package.contract_draft.subject = "Поставка столов и инвентаря"
+    package.explanatory_note.subject = None
+
+    subject = _by_id(run_checks(package))["strict.plan.subject"]
+
+    assert subject.status == "failed"
+    assert "ООЗ: наименование отличается по составу слов" in subject.details["summary_lines"]
+
+
+def test_plan_subject_warns_only_when_words_are_reordered():
+    package = _base_package()
+    package.schedule_application.purchase_subject = "Поставка столов и инвентаря"
+    package.purchase_request.purchase_subject = None
+    package.purchase_description.purchase_subject = "Инвентаря и столов поставка"
+    package.contract_draft.subject = "Поставка столов и инвентаря"
+    package.explanatory_note.subject = None
+
+    subject = _by_id(run_checks(package))["strict.plan.subject"]
+
+    assert subject.status == "warning"
+    assert "ООЗ: те же слова указаны в другом порядке" in subject.details["summary_lines"]
 
 
 def test_plan_ground_truth_missing_plan_value_requires_manual_review():
@@ -969,6 +999,26 @@ def test_responsibility_section_parser_accepts_heading_variants_and_stops_at_nex
     assert "1000 рублей" in unnumbered
     assert "Обеспечение не предусмотрено" not in unnumbered
     assert "9.3." not in unnumbered
+
+
+def test_responsibility_section_parser_keeps_fine_scale_rows_without_heading_dot():
+    from summary_model.extraction_pipeline import _contract_responsibility_section
+
+    section = _contract_responsibility_section(
+        "7. Ответственность Сторон\n"
+        "7.4. Штраф заказчика устанавливается в следующем порядке:\n"
+        "1000 рублей, если цена Контракта не превышает 3 млн рублей;\n"
+        "5000 рублей, если цена Контракта составляет от 3 млн до 50 млн рублей.\n"
+        "7.6. Штраф поставщика составляет 5 процентов цены Контракта.\n"
+        "8. Обеспечение исполнения Контракта\n"
+        "8.1. Размер обеспечения составляет 5%."
+    )
+
+    assert section is not None
+    assert "1000 рублей" in section
+    assert "5000 рублей" in section
+    assert "5 процентов" in section
+    assert "Размер обеспечения" not in section
 
 
 def test_dedicated_penalty_llm_receives_full_section_and_applicable_threshold():
@@ -1314,6 +1364,28 @@ def test_semantic_delivery_place_accepts_same_address_with_formatting_difference
 
     assert guarded.status == "passed"
     assert "Internal" not in guarded.message
+
+
+def test_semantic_delivery_place_warns_about_one_character_street_typo():
+    from summary_model.checks.semantic_llm import (
+        SemanticCheckFinding,
+        _apply_delivery_place_guard,
+    )
+
+    package = _base_package()
+    package.schedule_application.delivery_place = "г. Новосибирск, ул. Свердлова, д. 14"
+    package.purchase_description.delivery_place = "г. Новосибирск, ул. Сврдлова, 14"
+    package.contract_draft.delivery_place = "г. Новосибирск, ул. Свердлова, 14"
+    finding = SemanticCheckFinding(
+        check_id="semantic.delivery_place",
+        status="passed",
+        message="Адреса совпадают.",
+    )
+
+    guarded = _apply_delivery_place_guard(package, finding)
+
+    assert guarded.status == "warning"
+    assert "опечатка" in guarded.message
 
 
 def test_penalty_llm_is_not_called_without_usable_responsibility_section():
@@ -2384,7 +2456,7 @@ def test_plan_national_regime_does_not_use_smp_preference_as_regime_advantage():
     assert plan_national_regime_fields(package.schedule_application)["17.3"] == "Преимущества; -"
 
 
-def test_plan_okpd2_decoded_name_rejects_generic_procurement_action():
+def test_plan_okpd2_name_is_checked_against_local_official_reference():
     package = _base_package()
     package.schedule_application.subject_codes = [
         CodeReference(code_type="okpd2", code="63.11.21.000", name="Поставка")
@@ -2393,14 +2465,20 @@ def test_plan_okpd2_decoded_name_rejects_generic_procurement_action():
     failed = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
 
     assert failed.status == "failed"
-    assert "не является содержательным" in failed.details["summary_lines"][-1]
+    assert failed.details["rows"] == [{
+        "code": "63.11.21.000",
+        "name": "Поставка",
+        "official_code": "63.11.21.000",
+        "official_name": "Услуги по передаче потокового видео",
+        "status": "failed",
+    }]
 
-    package.schedule_application.subject_codes[0].name = "Услуги по передаче видеопотока"
+    package.schedule_application.subject_codes[0].name = "Услуги по передаче потокового видео"
     passed = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
     assert passed.status == "passed"
 
 
-def test_plan_okpd2_decoded_name_checks_goods_without_ktru_only_rows():
+def test_plan_okpd2_name_checks_explicit_code_name_pairs_for_included_goods():
     package = _base_package()
     package.schedule_application.subject_codes = []
     package.schedule_application.included_goods = [
@@ -2414,7 +2492,26 @@ def test_plan_okpd2_decoded_name_checks_goods_without_ktru_only_rows():
     assert result.details["failed_rows"] == [{
         "code": "63.11.21.000",
         "name": "Поставка товара",
+        "official_code": "63.11.21.000",
+        "official_name": "Услуги по передаче потокового видео",
+        "status": "failed",
     }]
+
+
+def test_plan_okpd2_name_uses_parent_when_procurement_code_ends_with_zero_group():
+    package = _base_package()
+    package.schedule_application.subject_codes = [
+        CodeReference(
+            code_type="okpd2",
+            code="25.99.29.000",
+            name="Изделия из недрагоценных металлов прочие, не включенные в другие группировки",
+        )
+    ]
+
+    result = _by_id(run_checks(package))["strict.plan.okpd2_decoded_names"]
+
+    assert result.status == "passed"
+    assert result.details["rows"][0]["official_code"] == "25.99.29"
 
 
 def test_stage_check_fails_for_preserved_invalid_calendar_date():
@@ -2609,6 +2706,18 @@ class FakeKtruRegistry:
         return Result()
 
 
+class StrictItemKtruRegistry(FakeKtruRegistry):
+    def get_ktru_common_info(self, ktru_code):
+        return {
+            "name": "Телевизор",
+            "unit": "Штука",
+            "okpd2_code": "20.59.12.120",
+        }
+
+    def get_ktru_characteristics_detailed(self, ktru_code):
+        return {"Цвет": {"values": ["Черный"], "required": False}}
+
+
 class PlanKtruRegistry(FakeKtruRegistry):
     def check_ktru(self, ktru_code, name=None):
         class Result:
@@ -2683,6 +2792,28 @@ def test_ktru_adapter_checks_characteristics_without_docx_parsing():
     assert results["manual.ktru.additional"].details["extra_characteristics"]
     assert results["manual.ktru.characteristics"].details["characteristic_rows"]
     assert results["manual.ktru.additional"].details["additional_rows"]
+
+
+def test_ktru_reports_item_name_mismatch_and_exact_duplicate_characteristic():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    item = package.purchase_description.items[0]
+    item.name = "Телевизор цифровой"
+    item.characteristics = [
+        PurchaseItemCharacteristic(name="Цвет", value="Черный"),
+        PurchaseItemCharacteristic(name="Цвет", value="Черный"),
+    ]
+
+    results = {
+        result.check_id: result
+        for result in run_ktru_characteristic_checks(package, registry=StrictItemKtruRegistry())
+    }
+    characteristics = results["manual.ktru.characteristics"]
+
+    assert characteristics.status == "failed"
+    assert characteristics.details["item_identity_rows"][0]["name_status"] == "failed"
+    assert characteristics.details["duplicate_characteristics"]
 
 
 def test_ktru_live_registry_uses_codes_from_schedule_application():

@@ -475,6 +475,37 @@ def test_report_shows_missing_plan_ktru_card():
     assert "КТРУ 52.69.67.228-00000228 не найден в каталоге zakupki.gov.ru." in text
 
 
+def test_report_shows_official_okpd2_name_comparison_before_pp1875():
+    report = _report(
+        _check_result(
+            "strict.plan.okpd2_decoded_names",
+            "Наименования ОКПД2 в заявке в план-график",
+            "failed",
+            "Наименования ОКПД2 в заявке не совпадают с официальным классификатором.",
+            details={
+                "rows": [{
+                    "code": "63.11.21.000",
+                    "name": "Поставка",
+                    "official_name": "Услуги по передаче потокового видео",
+                    "status": "failed",
+                }],
+            },
+        ),
+        _check_result(
+            "manual.national_regime_1875",
+            "Национальный режим / ПП №1875",
+            "passed",
+            "Проверка выполнена.",
+        ),
+    )
+
+    text = build_checks_report_text(report)
+
+    assert "2.1) Проверка наименований ОКПД2 в заявке в план-график:" in text
+    assert "| 63.11.21.000 | Поставка | Услуги по передаче потокового видео | <error>ОШИБКА</error> |" in text
+    assert text.index("2.1) Проверка наименований") < text.index("3) Проверка ОКПД2 на вхождение")
+
+
 def test_report_localizes_public_technical_terms_and_hides_service_rows():
     report = _report(
         _check_result(

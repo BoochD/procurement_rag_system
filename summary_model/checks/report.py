@@ -34,7 +34,6 @@ INTERNAL_CHECK_ORDER = [
     "strict.aggregate_service_volume",
     "strict.onmck.stage_prices",
     "strict.codes.okpd2",
-    "strict.plan.okpd2_decoded_names",
     "strict.codes.ktru",
     "strict.plan.subject",
     "strict.plan.delivery_term",
@@ -239,6 +238,8 @@ def build_checks_report_text(report: ProcurementChecksReport) -> str:
     lines.append("")
     lines.extend(_render_ktru_registry_section(by_id))
     lines.append("")
+    lines.extend(_render_plan_okpd2_names_section(by_id))
+    lines.append("")
     lines.extend(_render_pp1875_section(by_id))
     lines.append("")
     lines.extend(
@@ -269,6 +270,9 @@ def _hidden_strict_check_ids(by_id: dict[str, CheckResult]) -> set[str]:
         semantic = by_id.get(semantic_id)
         strict = by_id.get(strict_id)
         if semantic is None:
+            continue
+        if semantic_id == "semantic.subject" and semantic.status not in {"passed", "warning", "failed"}:
+            hidden.add(semantic_id)
             continue
         if _semantic_result_unavailable(semantic):
             if strict is not None:
@@ -445,6 +449,43 @@ def _render_commercial_offer_section(by_id: dict[str, CheckResult]) -> list[str]
     if comparison is not None:
         lines.extend(_render_commercial_offer_comparison(comparison))
     lines.extend(_render_trademark_table(by_id.get("manual.ktru.trademarks")))
+    return lines
+
+
+def _render_plan_okpd2_names_section(by_id: dict[str, CheckResult]) -> list[str]:
+    result = by_id.get("strict.plan.okpd2_decoded_names")
+    lines = ["2.1) Проверка наименований ОКПД2 в заявке в план-график:"]
+    if result is None:
+        lines.append("- не выполнялась")
+        return lines
+    rows = result.details.get("rows") if result.details else None
+    if not isinstance(rows, list) or not rows:
+        lines.extend(_render_result(result))
+        return lines
+    lines.append(
+        f"- <b>Наименования ОКПД2</b> - {STATUS_LABELS[result.status]}. "
+        f"{_human_text(result.report_text)}"
+    )
+    lines.extend([
+        "",
+        "| Код ОКПД2 | Наименование в ПГ | Официальное наименование ОКПД2 | Статус |",
+        "| :--- | :--- | :--- | :---: |",
+    ])
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "manual_review")
+        label = STATUS_LABELS.get(status, "ТРЕБУЕТ ПРОВЕРКИ")
+        tag = {"passed": "ok", "failed": "error", "manual_review": "warn"}.get(status)
+        rendered_status = f"<{tag}>{label}</{tag}>" if tag else label
+        lines.append(
+            "| {code} | {name} | {official} | {status} |".format(
+                code=_table_cell(row.get("code")),
+                name=_table_cell(row.get("name")),
+                official=_table_cell(row.get("official_name")),
+                status=rendered_status,
+            )
+        )
     return lines
 
 
