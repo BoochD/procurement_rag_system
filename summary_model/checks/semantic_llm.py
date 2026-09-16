@@ -127,7 +127,11 @@ def _apply_warranty_guard(
     embedded = getattr(contract, "embedded_purchase_description", None) if contract else None
     embedded_value = getattr(embedded, "warranty_requirements_text", None)
     contract_value = getattr(contract, "warranty_text", None)
-    if status == "passed" and not embedded_value and (
+    ooz_value = getattr(package.purchase_description, "warranty_requirements_text", None)
+    if not ooz_value:
+        status = "failed"
+        message = "В ООЗ не найдены явные гарантийные требования."
+    elif status == "passed" and not embedded_value and (
         not contract_value or _warranty_reference_only(contract_value)
     ):
         status = "manual_review"
@@ -135,9 +139,7 @@ def _apply_warranty_guard(
             "В проекте контракта найдена только ссылка на ООЗ; "
             "фактические гарантийные сроки в приложении не извлечены."
         )
-    elif status == "passed" and _warranty_numeric_terms(embedded_value or contract_value) != _warranty_numeric_terms(
-        getattr(package.purchase_description, "warranty_requirements_text", None)
-    ):
+    elif status == "passed" and _warranty_numeric_terms(embedded_value or contract_value) != _warranty_numeric_terms(ooz_value):
         status = "warning"
         message = (
             "Гарантийные сроки или иные числовые условия различаются; "

@@ -1547,7 +1547,7 @@ def test_warranty_semantic_payload_prefers_embedded_contract_terms():
     assert "Проект контракта: ПНР: 12 месяцев." in summary
 
 
-def test_warranty_guard_rejects_passed_result_based_only_on_reference():
+def test_warranty_guard_fails_when_ooz_has_no_explicit_terms():
     from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_warranty_guard
 
     package = _base_package()
@@ -1563,8 +1563,9 @@ def test_warranty_guard_rejects_passed_result_based_only_on_reference():
 
     result = _apply_warranty_guard(package, finding)
 
-    assert result.status == "manual_review"
-    assert "только ссылка" in result.message
+    assert result.status == "failed"
+    assert "ООЗ" in result.message
+    assert _by_id(run_checks(package))["strict.plan.warranty"].status == "failed"
 
 
 def test_warranty_guard_downgrades_different_explicit_terms_to_warning():
@@ -2323,7 +2324,11 @@ def test_additional_participant_requirements_use_twenty_million_boundary():
     schedule.nmck = MoneyValue(amount=Decimal("20000000.01"))
     assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "failed"
 
-    schedule.additional_requirements_raw = "Не установлены"
+    for value in ("Нет", "Не установлены", "-", "не предусмотрено"):
+        schedule.additional_requirements_raw = value
+        assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "failed"
+
+    schedule.additional_requirements_raw = "Наличие опыта исполнения аналогичных контрактов"
     assert _by_id(run_checks(package))["strict.plan.additional_participant_requirements"].status == "passed"
 
 

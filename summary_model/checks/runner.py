@@ -3743,12 +3743,12 @@ def _check_warranty_between_ooz_and_contract(package: ProcurementPackageExtracti
         f"ООЗ: {ooz_value or 'не найдено'}",
         f"Проект контракта: {contract_value or 'не найдено'}",
     ]
-    if not ooz_value and not contract_value:
+    if not ooz_value:
+        status = "failed"
+        message = "В ООЗ не найдены явные гарантийные требования."
+    elif not contract_value:
         status = "manual_review"
-        message = "Гарантийные требования не извлечены из ООЗ и проекта контракта."
-    elif not ooz_value or not contract_value:
-        status = "manual_review"
-        message = "Гарантийные требования найдены только в одном из документов."
+        message = "Гарантийные требования найдены в ООЗ, но не извлечены из проекта контракта."
     elif _text_values_match(ooz_value, contract_value):
         status = "passed"
         message = "Гарантийные требования совпадают по нормализованному тексту."
@@ -3797,12 +3797,12 @@ def _check_additional_participant_requirements(
     elif nmck <= threshold:
         status = "not_applicable"
         message = "НМЦК не превышает 20 млн руб.; проверка заполненности строки о дополнительных требованиях не применяется."
-    elif raw_value:
+    elif raw_value and not _is_negative_additional_requirements_value(raw_value):
         status = "passed"
         message = "Строка о дополнительных требованиях к участникам закупки заполнена в заявке в план-график."
     else:
         status = "failed"
-        message = "При НМЦК свыше 20 млн руб. строка о дополнительных требованиях к участникам закупки не заполнена или не извлечена из ПГ."
+        message = "При НМЦК свыше 20 млн руб. дополнительные требования к участникам закупки не установлены или не извлечены из ПГ."
 
     return _result(
         "strict.plan.additional_participant_requirements",
@@ -3822,6 +3822,22 @@ def _check_additional_participant_requirements(
             ],
         },
     )
+
+
+def _is_negative_additional_requirements_value(value: str) -> bool:
+    raw = str(value).strip()
+    if raw in {"-", "–", "—"}:
+        return True
+    normalized = normalize_text(raw).strip(" .:;")
+    return normalized in {
+        "нет",
+        "не установлено",
+        "не установлены",
+        "не предусмотрено",
+        "не предусмотрены",
+        "отсутствует",
+        "отсутствуют",
+    }
 
 
 def _check_application_security(
