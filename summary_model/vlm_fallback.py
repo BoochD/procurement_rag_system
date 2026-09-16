@@ -889,13 +889,29 @@ def _merge_nmck_role_result(base: ParsedTable, repaired: ParsedTable) -> ParsedT
         # per supplier. The generic matrix parser has no reliable structure for
         # that shape, so the dedicated VLM extraction owns this table entirely.
         merged = repaired.model_copy(deep=True)
+        merged.table_type = "nmck_staged_calculation_table"
         source_headers = base.compact_json.get("price_sources") or []
         if source_headers:
             merged.compact_json["price_sources"] = source_headers
+        base_items = base.compact_json.get("items") or []
+        repaired_items = merged.compact_json.get("items") or []
+        merged.compact_json["items"] = _merge_staged_nmck_records(
+            base_items,
+            repaired_items,
+            safe_fields=("row_index", "row_number", "parent_stage_number", "name", "unit", "quantity_raw"),
+        )
         base_stages = base.compact_json.get("stages") or []
-        if base_stages and not merged.compact_json.get("stages"):
-            merged.compact_json["stages"] = base_stages
-            merged.table_type = "nmck_staged_calculation_table"
+        repaired_stages = merged.compact_json.get("stages") or []
+        merged_stages = _merge_staged_nmck_records(
+            base_stages,
+            repaired_stages,
+            safe_fields=("stage_number", "stage_name", "unit", "quantity_raw", "quantity_text", "row_index"),
+            match_fields=("stage_number", "row_index"),
+        )
+        if merged_stages:
+            merged.compact_json["stages"] = merged_stages
+        else:
+            merged.compact_json.pop("stages", None)
         merged.parser_warnings = list(dict.fromkeys([
             *base.parser_warnings,
             *repaired.parser_warnings,
@@ -949,6 +965,45 @@ def _find_nmck_item_match(
             if index not in matched and repaired_item.get(key) == value:
                 return index
     return None
+
+
+def _merge_staged_nmck_records(
+    base_records: object,
+    repaired_records: object,
+    *,
+    safe_fields: tuple[str, ...],
+    match_fields: tuple[str, ...] = ("row_index", "row_number"),
+) -> list[dict[str, Any]]:
+    """Keep VLM values, but do not let it delete rows or basic row metadata."""
+    base_rows = [dict(item) for item in base_records or [] if isinstance(item, dict)]
+    repaired_rows = [dict(item) for item in repaired_records or [] if isinstance(item, dict)]
+    result: list[dict[str, Any]] = []
+    matched: set[int] = set()
+    for base_row in base_rows:
+        match_index = None
+        for field in match_fields:
+            value = clean_text(str(base_row.get(field) or ""))
+            if not value:
+                continue
+            candidates = [
+                index
+                for index, row in enumerate(repaired_rows)
+                if index not in matched and clean_text(str(row.get(field) or "")) == value
+            ]
+            if len(candidates) == 1:
+                match_index = candidates[0]
+                break
+        if match_index is None:
+            result.append(base_row)
+            continue
+        matched.add(match_index)
+        merged_row = dict(repaired_rows[match_index])
+        for field in safe_fields:
+            if not _has_value(merged_row.get(field)) and _has_value(base_row.get(field)):
+                merged_row[field] = base_row[field]
+        result.append(merged_row)
+    result.extend(row for index, row in enumerate(repaired_rows) if index not in matched)
+    return result
 
 
 def _merge_nmck_item(base_item: dict[str, Any], repaired_item: dict[str, Any]) -> dict[str, Any]:

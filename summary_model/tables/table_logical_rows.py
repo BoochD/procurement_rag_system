@@ -377,9 +377,22 @@ def _quantity_header_unit(paths: list[HeaderPath], quantity_index: int | None) -
     if quantity_index is None:
         return None
     path = next((item for item in paths if item.col_index == quantity_index), None)
-    text = " ".join(path.parts).casefold() if path else ""
-    if re.search(r"\bшт(?:\.|\b)|штук", text):
-        return "шт."
+    text = " ".join(path.parts).casefold().replace("*", " ") if path else ""
+    unit_patterns = (
+        (r"\b(?:усл(?:овн\w*)?\s*\.?\s*ед(?:иниц\w*)?)\b", "усл. ед."),
+        (r"\b(?:шт(?:\.|\b)|штук\w*)", "шт."),
+        (r"\b(?:ед(?:\.|\b)|единиц\w*)", "ед."),
+        (r"\b(?:компл(?:\.|\b)|комплект\w*)", "компл."),
+        (r"\b(?:килограмм\w*|кг(?:\.|\b))", "кг"),
+        (r"\b(?:час\w*|ч(?:\.|\b))", "ч"),
+        (r"\b(?:литр\w*|л(?:\.|\b))", "л"),
+        (r"\b(?:метр\w*|м(?:\.|\b))", "м"),
+        (r"\bпар(?:а|ы)?\b", "пара"),
+        (r"\bрулон\w*", "рулон"),
+    )
+    for pattern, unit in unit_patterns:
+        if re.search(pattern, text):
+            return unit
     return None
 
 
@@ -486,7 +499,7 @@ def _nmck_cells_by_header(
     cells_by_header = {
         "row_number": row_number,
         "name": _value(row, name_index),
-        "unit": _value(row, unit_index),
+        "unit": _value(row, unit_index) or _quantity_header_unit(paths, quantity_index),
         "quantity": _value(row, quantity_index),
         "selected_min_unit_price": _value(row, selected_index),
         "row_total_declared": _value(row, total_index),
@@ -596,10 +609,10 @@ def _nmck_staged_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTa
         cells_by_header = _nmck_cells_by_header(row, paths, mapping, row_number)
         cleaned_number = clean_text(row_number)
         is_child_item = bool(re.fullmatch(r"\d+\.\d+\.?", cleaned_number))
-        is_stage = bool(
-            re.fullmatch(r"\d+\.?", cleaned_number)
-            and ("этап" in lowered or re.search(r"\(\s*\d+\s*этап", lowered))
-        )
+        # The table has already been classified as staged. Every top-level
+        # integer row is therefore an execution stage even when its title is
+        # corrupted and no longer contains the word "этап".
+        is_stage = bool(re.fullmatch(r"\d+\.?", cleaned_number))
         if not is_stage and not is_child_item:
             continue
         logical.append(

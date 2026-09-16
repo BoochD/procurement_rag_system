@@ -300,6 +300,47 @@ def test_staged_nmck_vlm_merge_keeps_parser_stages_when_vlm_omits_them():
     assert merged.compact_json["stages"] == base.compact_json["stages"]
 
 
+def test_staged_nmck_vlm_merge_cannot_drop_one_parser_stage():
+    base = ParsedTable(
+        table_id="table-1",
+        block_id="block-1",
+        table_index=1,
+        table_type="nmck_staged_calculation_table",
+        row_count=4,
+        col_count=4,
+        compact_json={
+            "items": [
+                {"row_index": 2, "row_number": "1", "name": "Подготовка"},
+                {"row_index": 3, "row_number": "2", "name": "Поставка ручек", "unit": "кг"},
+                {"row_index": 4, "row_number": "3", "name": "Завершение"},
+            ],
+            "stages": [
+                {"stage_number": "1", "stage_name": "Подготовка", "row_index": 2},
+                {"stage_number": "2", "stage_name": "Поставка ручек", "row_index": 3},
+                {"stage_number": "3", "stage_name": "Завершение", "row_index": 4},
+            ],
+        },
+    )
+    repaired = base.model_copy(deep=True)
+    repaired.compact_json = {
+        "items": [
+            {"row_index": 2, "row_number": "1", "name": "Подготовка"},
+            {"row_index": 4, "row_number": "3", "name": "Завершение"},
+        ],
+        "stages": [
+            {"stage_number": "1", "stage_name": "Подготовка", "row_index": 2},
+            {"stage_number": "3", "stage_name": "Завершение", "row_index": 4},
+        ],
+    }
+
+    merged = _merge_role_result(base, repaired, "nmck_calculation")
+
+    assert [stage["stage_number"] for stage in merged.compact_json["stages"]] == ["1", "2", "3"]
+    restored = next(item for item in merged.compact_json["items"] if item["row_number"] == "2")
+    assert restored["name"] == "Поставка ручек"
+    assert restored["unit"] == "кг"
+
+
 def test_single_price_service_stage_uses_the_same_value_as_row_total():
     compact_json = {
         "items": [{

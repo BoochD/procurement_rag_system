@@ -1023,7 +1023,7 @@ def test_onmck_table_accepts_executor_price_sources(tmp_path):
 
 
 def test_nmck_single_service_price_columns_are_not_paired():
-    from summary_model.tables.table_logical_rows import _nmck_cells_by_header
+    from summary_model.tables.table_logical_rows import _nmck_cells_by_header, _quantity_header_unit
 
     paths = [
         HeaderPath(col_index=0, parts=["№ п/п"], normalized_name="row_number"),
@@ -1050,6 +1050,26 @@ def test_nmck_single_service_price_columns_are_not_paired():
     assert [values[f"supplier_{index}.row_total"] for index in range(1, 4)] == [
         "4 790,00", "4 700,00", "4 562,77"
     ]
+    assert _quantity_header_unit(
+        [HeaderPath(col_index=2, parts=["Кол-во, *кг."], normalized_name="quantity")],
+        2,
+    ) == "кг"
+
+
+def test_staged_onmck_keeps_corrupted_middle_stage_by_row_structure(tmp_path):
+    path = tmp_path / "staged_onmck_corrupted_middle.docx"
+    _save_staged_onmck(path)
+    document = Document(path)
+    document.tables[0].cell(4, 1).text = "Поставка ручек"
+    document.save(path)
+
+    package = extract_package(
+        [InputDocument(path=path, type_hint=DocumentType.ONMCK, display_name="onmck")]
+    )
+
+    assert package.nmck_justification is not None
+    assert [stage.stage_number for stage in package.nmck_justification.stages] == ["1", "2", "3"]
+    assert package.nmck_justification.stages[1].stage_name == "Поставка ручек"
 
 
 def test_staged_onmck_keeps_stage_rows_and_leaf_items_separate(tmp_path):

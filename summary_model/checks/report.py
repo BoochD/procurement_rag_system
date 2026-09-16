@@ -30,6 +30,7 @@ INTERNAL_CHECK_ORDER = [
     "strict.nmck.amounts",
     "strict.onmck.arithmetic",
     "strict.onmck.min_price",
+    "strict.onmck.structure",
     "strict.onmck.items",
     "strict.aggregate_service_volume",
     "strict.onmck.stage_prices",

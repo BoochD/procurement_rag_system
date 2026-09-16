@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from summary_model.checks import run_checks
 from summary_model.checks import runner as checks_runner
+from summary_model.checks.nmck_layout import build_nmck_row_layout
 from summary_model.checks.normalization import normalize_unit
 from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.report import build_checks_report_text, build_commercial_offer_report_text
@@ -1867,6 +1868,68 @@ def test_onmck_item_names_fail_when_no_ooz_item_matches():
     assert result.status == "failed"
     assert "Список товарных позиций" in result.message
     assert any("Стол*" in line for line in result.details["summary_lines"])
+
+
+def test_nmck_layout_ignores_empty_plan_stage_flag():
+    package = _base_package()
+    package.schedule_application.has_stages = True
+    package.schedule_application.stages = []
+    package.nmck_justification.stages = []
+
+    layout = build_nmck_row_layout(package)
+
+    assert layout.mode == "products"
+    assert layout.roles == ("product",)
+
+
+def test_nmck_layout_classifies_mixed_rows_without_reading_stage_titles():
+    package = _base_package()
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", stage_name="Подготовка"),
+        ProcurementStage(stage_number="2", stage_name="Поставка"),
+        ProcurementStage(stage_number="3", stage_name="Завершение"),
+    ]
+    package.nmck_justification.items = [
+        NmckItem(row_number="1.", name="Подготовка"),
+        NmckItem(row_number="2.1", parent_stage_number="2", name="Сервер"),
+        NmckItem(row_number="3", name="Повреждённое название"),
+    ]
+
+    layout = build_nmck_row_layout(package)
+
+    assert layout.mode == "mixed"
+    assert layout.roles == ("stage", "stage_item", "stage")
+
+
+def test_onmck_structure_reports_damaged_middle_stage_and_invalid_header_unit():
+    package = _base_package()
+    expected_stages = [
+        ProcurementStage(stage_number="1", stage_name="Подготовка"),
+        ProcurementStage(stage_number="2", stage_name="Оказание услуг"),
+        ProcurementStage(stage_number="3", stage_name="Завершение"),
+    ]
+    package.schedule_application.has_stages = True
+    package.schedule_application.stages = [stage.model_copy(deep=True) for stage in expected_stages]
+    package.purchase_description.stages = [stage.model_copy(deep=True) for stage in expected_stages]
+    package.contract_draft.stages = [stage.model_copy(deep=True) for stage in expected_stages]
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", stage_name="Подготовка", quantity_text="1 шт."),
+        ProcurementStage(stage_number="2", stage_name="Поставка ручек", quantity_text="3 кг"),
+        ProcurementStage(stage_number="3", stage_name="Завершение", quantity_text="Услуги - 1 усл. ед."),
+    ]
+    package.nmck_justification.items = [
+        NmckItem(row_number="1", name="Подготовка"),
+        NmckItem(row_number="2", name="Поставка ручек"),
+        NmckItem(row_number="3", name="Завершение"),
+    ]
+
+    results = _by_id(run_checks(package))
+    result = results["strict.onmck.structure"]
+
+    assert result.status == "failed"
+    assert any("Этап 2" in line and "не соответствует" in line for line in result.details["failed"])
+    assert any("единица «кг»" in line for line in result.details["failed"])
+    assert results["strict.onmck.items"].status == "not_applicable"
 
 
 def test_onmck_printed_supplier_total_is_compared_with_row_sum():

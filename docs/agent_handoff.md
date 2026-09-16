@@ -178,6 +178,16 @@ Important table rules:
   while `2.1` is a child even when `parent_stage_number` is absent. Exclude a
   parent from aggregate totals only when every supplier total equals the sum
   of its children; retain it when the values differ so the discrepancy is reported.
+- Classify ONMCK row roles once from the extracted table hierarchy. In a table
+  already recognized as staged, one top-level row per stage number is a stage
+  even when its title is corrupted; compound rows such as `2.1` are stage
+  items. Do not use `schedule_application.has_stages` alone because an empty
+  embedded plan table may set that flag.
+- Keep stage rows out of product quantity/unit matching. Compare their names
+  and dates with OOZ/contract stages, validate stage totals separately, and
+  report a non-count unit inherited from an ONMCK quantity header (for example
+  `kg`) as a stage-table error. Mixed-table child goods still use the ordinary
+  OOZ/contract/commercial-offer item checks.
 - OOZ item/characteristic and additional-justification roles may both apply to
   the same physical table; role-specific VLM calls and cache keys must remain
   separate;

@@ -17,6 +17,7 @@ from summary_model.checks.national_regime import (
     plan_okpd2_codes,
     resolve_plan_national_regime,
 )
+from summary_model.checks.nmck_layout import NmckRowLayout, build_nmck_row_layout
 from summary_model.checks.okpd2_reference import official_okpd2_name
 from summary_model.checks.normalization import (
     normalize_code,
@@ -65,13 +66,15 @@ def run_checks(
     commercial_offer_match_results: list[dict[str, Any]] | None = None,
 ) -> ProcurementChecksReport:
     results: list[CheckResult] = []
+    nmck_layout = build_nmck_row_layout(package)
     results.extend(_check_package_completeness(package))
     results.extend(_check_request_attachments(package))
     results.extend(_check_schedule_completeness(package))
     results.extend(_check_nmck_amounts(package))
     results.extend(_check_onmck_arithmetic(package))
     results.extend(_check_onmck_min_prices(package))
-    results.extend(_check_onmck_items_against_ooz(package))
+    results.extend(_check_onmck_structure(package, nmck_layout))
+    results.extend(_check_onmck_items_against_ooz(package, nmck_layout))
     results.extend(_check_aggregate_service_volume(package))
     results.extend(_check_onmck_supplier_prices(package))
     results.extend(_check_onmck_stage_prices(package))
@@ -79,6 +82,7 @@ def run_checks(
     results.extend(_check_commercial_offers_against_onmck(
         package,
         llm_matches=commercial_offer_match_results,
+        layout=nmck_layout,
     ))
     results.extend(_check_codes(package, "okpd2"))
     results.extend(_check_plan_okpd2_decoded_names(package))
@@ -480,6 +484,7 @@ def _check_commercial_offers_against_onmck(
     package: ProcurementPackageExtraction,
     *,
     llm_matches: list[dict[str, Any]] | None = None,
+    layout: NmckRowLayout | None = None,
 ) -> list[CheckResult]:
     offers = list(package.commercial_offers or [])
     onmck = package.nmck_justification
@@ -509,6 +514,7 @@ def _check_commercial_offers_against_onmck(
             )
         ]
 
+    layout = layout or build_nmck_row_layout(package)
     source_ids = _nmck_supplier_source_ids(onmck.items)
     offer_by_source, source_warnings = _match_offers_to_price_sources(
         offers,
@@ -563,7 +569,7 @@ def _check_commercial_offers_against_onmck(
             criterion_failures["subject"].append(message)
 
     for nmck_item_index, nmck_item in enumerate(onmck.items):
-        is_stage_row = _is_nmck_stage_row(nmck_item, onmck.stages)
+        is_stage_row = layout.role_for(nmck_item_index) == "stage"
         item_label = _item_label(nmck_item)
         offer_prices: list[tuple[str, Decimal]] = []
         row_manual_start = len(manual)
@@ -1500,6 +1506,10 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
             (price, *_nmck_effective_unit_price(item, price))
             for price in item.supplier_prices
         ]
+        has_derived_missing_price = any(
+            derived and normalize_decimal(getattr(price, "unit_price", None)) is None
+            for price, _value, derived in effective_prices
+        )
         source_prices = [
             (price.source_id, value)
             for price, value, _derived in effective_prices
@@ -1508,7 +1518,13 @@ def _check_onmck_min_prices(package: ProcurementPackageExtraction) -> list[Check
         prices = [price for _source_id, price in source_prices if price is not None]
         found_source_ids = {source_id for source_id, _price in source_prices}
         selected = normalize_decimal(item.selected_min_unit_price)
-        if explicit_missing or not prices or selected is None or (expected_source_ids and found_source_ids != expected_source_ids):
+        if (
+            explicit_missing
+            or has_derived_missing_price
+            or not prices
+            or selected is None
+            or (expected_source_ids and found_source_ids != expected_source_ids)
+        ):
             if explicit_missing:
                 failed.append({"item": _item_label(item), "reason": explicit_missing[0]})
                 explicit_missing_prices.extend(explicit_missing)
@@ -1656,11 +1672,193 @@ def _nmck_effective_unit_price(item: NmckItem, price: Any) -> tuple[Decimal | No
     return None, False
 
 
-def _check_onmck_items_against_ooz(package: ProcurementPackageExtraction) -> list[CheckResult]:
+def _check_onmck_structure(
+    package: ProcurementPackageExtraction,
+    layout: NmckRowLayout | None = None,
+) -> list[CheckResult]:
+    onmck = package.nmck_justification
+    layout = layout or build_nmck_row_layout(package)
+    if onmck is None or layout.mode in {"empty", "products"}:
+        return [
+            _result(
+                "strict.onmck.structure",
+                "Структура этапных строк ОНМЦК",
+                "not_applicable",
+                "strict",
+                "Этапные строки в ОНМЦК не найдены.",
+                fields=["nmck_justification.stages", "nmck_justification.items"],
+            )
+        ]
+
+    ooz_by_number = _stages_by_number(
+        getattr(package.purchase_description, "stages", []) if package.purchase_description else []
+    )
+    contract_by_number = _stages_by_number(
+        getattr(package.contract_draft, "stages", []) if package.contract_draft else []
+    )
+    failures: list[str] = []
+    manual: list[str] = []
+    summary_lines = [
+        f"Режим таблицы ОНМЦК: {'смешанная' if layout.mode == 'mixed' else 'этапная'}.",
+    ]
+    invalid_units: list[tuple[str, str]] = []
+
+    for stage in onmck.stages:
+        number = clean_stage_number(getattr(stage, "stage_number", None))
+        if not number:
+            manual.append("В ОНМЦК найден этап без распознанного номера.")
+            continue
+        actual_name = _canonical_stage_name(getattr(stage, "stage_name", None))
+        references = [
+            ("ООЗ", _canonical_stage_name(getattr(ooz_by_number.get(number), "stage_name", None))),
+            ("Проект контракта", _canonical_stage_name(getattr(contract_by_number.get(number), "stage_name", None))),
+        ]
+        references = [(label, name) for label, name in references if name]
+        reference_names = [name for _label, name in references]
+        references_agree = not reference_names or all(
+            _stage_names_match(reference_names[0], name) for name in reference_names[1:]
+        )
+        if not references_agree:
+            manual.append(
+                f"Этап {number}: наименования в ООЗ и проекте контракта различаются; "
+                "эталон для ОНМЦК не определён."
+            )
+        elif references and not actual_name:
+            manual.append(f"Этап {number}: наименование в ОНМЦК не распознано.")
+        elif references and not all(_stage_names_match(actual_name, name) for name in reference_names):
+            reference_label = " / ".join(label for label, _name in references)
+            reference_name = getattr(ooz_by_number.get(number), "stage_name", None) or getattr(
+                contract_by_number.get(number), "stage_name", None
+            )
+            failures.append(
+                f"Этап {number}: наименование ОНМЦК «{getattr(stage, 'stage_name', None) or 'не найдено'}» "
+                f"не соответствует {reference_label} «{reference_name}»."
+            )
+        raw_unit = _stage_quantity_unit(getattr(stage, "quantity_text", None))
+        if raw_unit and not _is_count_like_stage_unit(raw_unit):
+            invalid_units.append((number, raw_unit))
+
+    if invalid_units:
+        distinct_units = {normalize_text(unit) for _number, unit in invalid_units}
+        if len(distinct_units) == 1 and len(invalid_units) == len(onmck.stages):
+            unit = invalid_units[0][1]
+            numbers = ", ".join(number for number, _unit in invalid_units)
+            failures.append(
+                f"В колонке количества этапной ОНМЦК указана единица «{unit}»; "
+                f"она не применима к этапам {numbers}."
+            )
+        else:
+            failures.extend(
+                f"Этап {number}: в колонке количества ОНМЦК указана несоответствующая единица «{unit}»."
+                for number, unit in invalid_units
+            )
+
+    status = "failed" if failures else "manual_review" if manual else "passed"
+    message = (
+        "В структуре этапных строк ОНМЦК найдены расхождения."
+        if failures
+        else "Часть этапных строк ОНМЦК требует ручной проверки."
+        if manual
+        else "Структура и наименования этапных строк ОНМЦК согласованы с ООЗ и проектом контракта."
+    )
+    return [
+        _result(
+            "strict.onmck.structure",
+            "Структура этапных строк ОНМЦК",
+            status,
+            "strict",
+            message,
+            documents=["nmck_justification", "purchase_description", "contract_draft"],
+            fields=[
+                "nmck_justification.stages",
+                "purchase_description.stages",
+                "contract_draft.stages",
+            ],
+            details={
+                "mode": layout.mode,
+                "summary_lines": [*summary_lines, *failures, *manual],
+                "failed": failures,
+                "manual": manual,
+            },
+        )
+    ]
+
+
+def _stages_by_number(stages: list[Any]) -> dict[str, Any]:
+    return {
+        number: stage
+        for stage in stages
+        if (number := clean_stage_number(getattr(stage, "stage_number", None)))
+    }
+
+
+def _canonical_stage_name(value: str | None) -> str:
+    text = str(value or "")
+    text = re.sub(r"\(\s*\d+\s*этап\b.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*\d+\s*этап\s*[-–—:.]?\s*", "", text, flags=re.IGNORECASE)
+    return normalize_text(text.rstrip(" )].,;:"))
+
+
+def _stage_names_match(left: str | None, right: str | None) -> bool:
+    return _names_close(left, right) or _offer_names_support(left, right)
+
+
+def _stage_quantity_unit(value: str | None) -> str | None:
+    text = " ".join(str(value or "").replace("*", " ").split())
+    if not text:
+        return None
+    match = re.search(
+        r"[-+]?\d+(?:[.,]\d+)?\s*([A-Za-zА-Яа-яЁё. ]+?)\s*$",
+        text,
+    )
+    return match.group(1).strip(" .,:;") if match else None
+
+
+def _is_count_like_stage_unit(value: str) -> bool:
+    unit = normalize_text(value)
+    return unit in {
+        "шт",
+        "штука",
+        "штук",
+        "ед",
+        "единица",
+        "единиц",
+        "усл ед",
+        "условная единица",
+        "условных единиц",
+        "компл",
+        "комплект",
+        "пара",
+        "набор",
+        "этап",
+    }
+
+
+def _check_onmck_items_against_ooz(
+    package: ProcurementPackageExtraction,
+    layout: NmckRowLayout | None = None,
+) -> list[CheckResult]:
     onmck = package.nmck_justification
     ooz = package.purchase_description
-    nmck_items = [item for item in (getattr(onmck, "items", []) or []) if _is_nmck_product_item(item)]
+    layout = layout or build_nmck_row_layout(package)
+    all_items = list(getattr(onmck, "items", []) or [])
+    nmck_items = [
+        item
+        for index, item in enumerate(all_items)
+        if layout.role_for(index) in {"product", "stage_item"}
+    ]
     ooz_items = list(getattr(ooz, "items", []) or []) if ooz else []
+    if not nmck_items and layout.mode == "stages":
+        return [
+            _result(
+                "strict.onmck.items",
+                "Наименования позиций ОНМЦК и ООЗ",
+                "not_applicable",
+                "strict",
+                "ОНМЦК содержит только этапные строки; отдельных товарных позиций для сверки нет.",
+                fields=["nmck_justification.items", "nmck_justification.stages"],
+            )
+        ]
     if not nmck_items or not ooz_items:
         return [
             _result(
@@ -1711,11 +1909,6 @@ def _check_onmck_items_against_ooz(package: ProcurementPackageExtraction) -> lis
     ]
 
 
-def _is_nmck_product_item(item: NmckItem) -> bool:
-    name = normalize_text(getattr(item, "name", None))
-    return bool(name) and not getattr(item, "parent_stage_number", None) and not re.search(r"\b\d+\s*этап\b", name)
-
-
 def _same_item_identity(left: NmckItem, right: PurchaseItem) -> bool:
     return _names_close(left.name, right.name)
 
@@ -1744,15 +1937,27 @@ def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[
     expected_source_ids = set(source_labels)
     for index, item in enumerate(onmck.items, 1):
         item_missing = _explicit_missing_supplier_prices(item, source_labels)
+        effective_prices = [
+            (price, *_nmck_effective_unit_price(item, price))
+            for price in item.supplier_prices
+        ]
+        has_derived_missing_price = any(
+            derived and normalize_decimal(getattr(price, "unit_price", None)) is None
+            for price, _value, derived in effective_prices
+        )
         price_pairs = [
             (price.source_id, value)
-            for price in item.supplier_prices
-            for value, _derived in [_nmck_effective_unit_price(item, price)]
+            for price, value, _derived in effective_prices
             if value is not None
         ]
         prices = [price for _source_id, price in price_pairs if price is not None]
         found_source_ids = {source_id for source_id, _price in price_pairs}
-        if item_missing or not prices or (expected_source_ids and found_source_ids != expected_source_ids):
+        if (
+            item_missing
+            or has_derived_missing_price
+            or not prices
+            or (expected_source_ids and found_source_ids != expected_source_ids)
+        ):
             if item_missing:
                 explicit_missing.extend(item_missing)
                 summary_lines.extend(item_missing)
@@ -2565,15 +2770,6 @@ def _check_offer_row_total(
         failures.append(
             f"{item_label}: {_commercial_offer_name(offer)} итог строки {_format_money(total)} не равен количество × цена {_format_money(quantity * unit_price)}"
         )
-
-
-def _is_nmck_stage_row(item: NmckItem, stages: list[Any]) -> bool:
-    """Keep execution-stage rows out of the product-only commercial-offer check."""
-    return any(
-        _names_close(item.name, getattr(stage, "stage_name", None))
-        for stage in stages
-        if getattr(stage, "stage_name", None)
-    )
 
 
 def _match_reference_purchase_item(
