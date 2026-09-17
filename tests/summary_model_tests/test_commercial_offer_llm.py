@@ -157,6 +157,50 @@ def test_deterministic_matcher_uses_verified_supplier_order_for_full_offer():
     assert all(reasons[index] == "позиция найдена однозначно" for index in range(3))
 
 
+def test_deterministic_matcher_matches_dated_stages_despite_wrong_nmck_unit():
+    nmck_items = [
+        NmckItem(
+            name=(
+                "Техническая поддержка оборудования "
+                "(2 этап, с 01.12.2026 по 28.02.2027 включительно)"
+            ),
+            quantity=Decimal("3"),
+            unit="кг",
+        ),
+        NmckItem(
+            name=(
+                "Техническая поддержка оборудования "
+                "(3 этап, с 01.03.2027 по 31.05.2027 включительно)"
+            ),
+            quantity=Decimal("1"),
+            unit="кг",
+        ),
+    ]
+    offer_items = [
+        CommercialOfferItem(
+            name=(
+                "Техническая поддержка оборудования "
+                "с 01.12.2026 по 28.02.2027 включительно"
+            ),
+            quantity=Decimal("1"),
+            unit="шт.",
+        ),
+        CommercialOfferItem(
+            name=(
+                "Техническая поддержка оборудования "
+                "с 01.03.2027 по 31.05.2027 включительно"
+            ),
+            quantity=Decimal("1"),
+            unit="шт.",
+        ),
+    ]
+
+    matches, reasons = _match_offer_items(nmck_items, offer_items)
+
+    assert matches == {0: 0, 1: 1}
+    assert all(reasons[index] == "позиция найдена однозначно" for index in range(2))
+
+
 def test_verified_supplier_order_rejects_price_mismatch():
     nmck_items = [
         NmckItem(

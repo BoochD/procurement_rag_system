@@ -188,6 +188,11 @@ Important table rules:
   report a non-count unit inherited from an ONMCK quantity header (for example
   `kg`) as a stage-table error. Mixed-table child goods still use the ordinary
   OOZ/contract/commercial-offer item checks.
+- When a commercial offer contains the same service stages, match a stage by
+  its unique stated period and service name before comparing quantity, unit,
+  and price. An erroneous technical unit in ONMCK (for example `kg` instead
+  of `шт.`) is a result of the comparison, not a reason to leave the stage
+  unmatched.
 - OOZ item/characteristic and additional-justification roles may both apply to
   the same physical table; role-specific VLM calls and cache keys must remain
   separate;

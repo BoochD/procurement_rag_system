@@ -2486,6 +2486,10 @@ def _match_offer_items(
         lambda nmck, offer: _same_code(nmck.okpd2_code, offer.okpd2_code)
         and _offer_names_support(nmck.name, offer.name)
     )
+    # In an ONMCK made of service stages, a bad technical quantity/unit must
+    # not prevent us from matching the same dated stage in a commercial offer.
+    # Quantity and unit are checked separately after this one-to-one match.
+    assign_unique(_stage_offer_identity_matches)
     name_scores = {
         (nmck_index, offer_index): _offer_name_score(nmck_item.name, offer_item.name)
         for nmck_index, nmck_item in enumerate(nmck_items)
@@ -2581,6 +2585,47 @@ def _ordered_offer_pair_matches(
     nmck_unit = normalize_unit(nmck_item.unit)
     offer_unit = normalize_unit(offer_item.unit)
     return not (nmck_unit and offer_unit and nmck_unit != offer_unit)
+
+
+_STAGE_NUMBER_RE = re.compile(r"\b\d+\s*этап\b", flags=re.IGNORECASE)
+_STAGE_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
+
+
+def _stage_offer_identity_matches(
+    nmck_item: NmckItem,
+    offer_item: CommercialOfferItem,
+) -> bool:
+    """Match a service stage by its stated period, independent of its unit."""
+    nmck_name = str(nmck_item.name or "")
+    offer_name = str(offer_item.name or "")
+    if not _STAGE_NUMBER_RE.search(nmck_name):
+        return False
+    nmck_dates = _stage_dates_in_name(nmck_name)
+    if not nmck_dates or nmck_dates != _stage_dates_in_name(offer_name):
+        return False
+    return _offer_names_support(
+        _stage_name_without_period(nmck_name),
+        _stage_name_without_period(offer_name),
+    )
+
+
+def _stage_dates_in_name(value: str) -> tuple[str, ...]:
+    return tuple(
+        f"{int(day):02d}.{int(month):02d}.{year}"
+        for day, month, year in _STAGE_DATE_RE.findall(value)
+    )
+
+
+def _stage_name_without_period(value: str) -> str:
+    text = _STAGE_NUMBER_RE.sub("", value)
+    text = _STAGE_DATE_RE.sub("", text)
+    text = re.sub(
+        r"\b(?:с|по|даты|дата|заключения|контракта|включительно)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 def _item_quantity(item: Any) -> Decimal | None:
