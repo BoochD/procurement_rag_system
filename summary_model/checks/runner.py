@@ -18,7 +18,10 @@ from summary_model.checks.national_regime import (
     resolve_plan_national_regime,
 )
 from summary_model.checks.nmck_layout import NmckRowLayout, build_nmck_row_layout
-from summary_model.checks.okpd2_reference import official_okpd2_name
+from summary_model.checks.okpd2_reference import (
+    official_okpd2_is_service,
+    official_okpd2_name,
+)
 from summary_model.checks.normalization import (
     normalize_code,
     normalize_decimal,
@@ -1352,6 +1355,23 @@ def _format_aggregate_quantity(value: tuple[Decimal, str, str]) -> str:
 def _check_aggregate_service_volume(package: ProcurementPackageExtraction) -> list[CheckResult]:
     schedule = package.schedule_application
     ooz = package.purchase_description
+    is_service, service_reason = _plan_has_service_volume(schedule)
+    if not is_service:
+        return [
+            _result(
+                "strict.aggregate_service_volume",
+                "Общий объём услуги",
+                "not_applicable",
+                "strict",
+                f"Проверка общего объёма услуги не применяется: {service_reason}",
+                fields=[
+                    "schedule_application.okpd2_codes",
+                    "schedule_application.ktru_codes",
+                    "schedule_application.included_goods",
+                    "schedule_application.aggregate_quantity_text",
+                ],
+            )
+        ]
     plan_value = _aggregate_quantity_value(getattr(schedule, "aggregate_quantity_text", None)) if schedule else None
     ooz_value = _aggregate_quantity_value(getattr(ooz, "aggregate_quantity_text", None)) if ooz else None
     onmck_value = _single_nmck_aggregate_quantity(package)
@@ -1410,6 +1430,29 @@ def _check_aggregate_service_volume(package: ProcurementPackageExtraction) -> li
             },
         )
     ]
+
+
+def _plan_has_service_volume(schedule: Any) -> tuple[bool, str]:
+    if schedule is None:
+        return False, "заявка в план-график не загружена."
+    if getattr(schedule, "ktru_codes", None) or getattr(schedule, "included_goods", None):
+        return False, "в ПГ есть КТРУ или выделенные товарные позиции."
+    explicit_codes = [
+        normalize_code(getattr(reference, "code", None))
+        for reference in (getattr(schedule, "subject_codes", None) or [])
+        if getattr(reference, "code_type", None) == "okpd2"
+        and normalize_code(getattr(reference, "code", None))
+    ]
+    codes = list(dict.fromkeys(explicit_codes or getattr(schedule, "okpd2_codes", None) or []))
+    if not codes:
+        return False, "в ПГ не извлечён ОКПД2 услуги."
+    statuses = [official_okpd2_is_service(code) for code in codes]
+    if all(status is True for status in statuses):
+        return True, ""
+    unresolved = [code for code, status in zip(codes, statuses) if status is None]
+    if unresolved:
+        return False, f"для ОКПД2 {', '.join(unresolved)} нет официального наименования в локальном справочнике."
+    return False, "ОКПД2 ПГ не подтверждает, что закупается только услуга."
 
 
 def _nmck_total_quantity_mismatches(items: list[NmckItem], totals: list[Any]) -> list[str]:

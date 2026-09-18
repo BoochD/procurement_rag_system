@@ -445,7 +445,9 @@ a compact diagnostic retained in parser warnings.
   restrictions, and advantages; `17.x` numbering is only a fallback because
   current plan forms can use `16.x`. SMP/SONKO preference fields are separate.
 - A service-volume comparison runs only when one aggregate quantity is
-  unambiguously available in the plan, OOZ, and ONMCK. The plan is the baseline.
+  unambiguously available in the plan, OOZ, and ONMCK, the plan has no KTRU or
+  separate goods, and every plan OKPD2 is identified as a service from its
+  local official title. The plan is the baseline.
 - ONMCK arithmetic validates every available supplier row total, not only the
   selected minimum and the final total.
 - The plan OKPD2-name check compares each extracted code/name pair with the

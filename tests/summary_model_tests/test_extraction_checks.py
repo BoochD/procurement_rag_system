@@ -11,6 +11,7 @@ from summary_model.checks import run_checks
 from summary_model.checks import runner as checks_runner
 from summary_model.checks.nmck_layout import build_nmck_row_layout
 from summary_model.checks.normalization import normalize_unit
+from summary_model.checks.okpd2_reference import official_okpd2_is_service
 from summary_model.checks.models import ProcurementChecksReport
 from summary_model.checks.report import build_checks_report_text, build_commercial_offer_report_text
 from summary_model.checks_cli import main as checks_cli_main
@@ -1744,6 +1745,8 @@ def test_onmck_arithmetic_checks_each_supplier_row_total():
 
 def test_aggregate_service_volume_compares_quantity_and_unit():
     package = _base_package()
+    package.schedule_application.okpd2_codes = ["62.09.20.190"]
+    package.schedule_application.ktru_codes = []
     package.schedule_application.aggregate_quantity_text = "3000 часов"
     package.purchase_description.aggregate_quantity_text = "2208 часов"
     package.nmck_justification.items = [
@@ -1767,6 +1770,28 @@ def test_aggregate_service_volume_compares_quantity_and_unit():
     assert "4) Внутренний анализ перечня документов:" in report_text
     assert "Общий объём услуги" in report_text
     assert "Дополнительные проверки" not in report_text
+
+
+def test_aggregate_service_volume_does_not_apply_to_goods_code():
+    package = _base_package()
+    package.schedule_application.okpd2_codes = ["25.99.29.120"]
+    package.schedule_application.ktru_codes = []
+    package.schedule_application.aggregate_quantity_text = "3000 штук"
+    package.purchase_description.aggregate_quantity_text = "2208 штук"
+    package.nmck_justification.items = [
+        NmckItem(name="Лопаты", quantity=Decimal("2208"), unit="шт")
+    ]
+
+    result = _by_id(run_checks(package))["strict.aggregate_service_volume"]
+
+    assert result.status == "not_applicable"
+    assert "ОКПД2 ПГ не подтверждает" in result.message
+
+
+def test_official_okpd2_service_detection_uses_local_official_name():
+    assert official_okpd2_is_service("62.09.20.190") is True
+    assert official_okpd2_is_service("25.99.29.120") is False
+    assert official_okpd2_is_service("99.99.99.999") is None
 
 
 def test_normalize_unit_accepts_grammatical_hour_and_kilogram_forms():
