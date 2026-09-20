@@ -7,6 +7,10 @@ import re
 from typing import Callable, Iterable
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from summary_model.domain.models import (
@@ -647,35 +651,123 @@ def build_report_docx_bytes(
         document_labels=document_labels,
     )
     document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.8)
+    section.right_margin = Inches(0.8)
+
+    styles = document.styles
+    normal = styles["Normal"]
+    normal.font.name = "Aptos"
+    normal.font.size = Pt(9.5)
+    normal.paragraph_format.space_after = Pt(4)
+    normal.paragraph_format.line_spacing = 1.05
+    for style_name, size, color in (
+        ("Title", 18, RGBColor(0x16, 0x2D, 0x4D)),
+        ("Heading 1", 13, RGBColor(0x16, 0x2D, 0x4D)),
+        ("Heading 2", 11, RGBColor(0x20, 0x4A, 0x6E)),
+        ("Heading 3", 10, RGBColor(0x20, 0x4A, 0x6E)),
+    ):
+        style = styles[style_name]
+        style.font.name = "Aptos Display" if style_name != "Heading 3" else "Aptos"
+        style.font.size = Pt(size)
+        style.font.bold = True
+        style.font.color.rgb = color
+        style.paragraph_format.space_before = Pt(8 if style_name != "Title" else 0)
+        style.paragraph_format.space_after = Pt(4)
+        style.paragraph_format.keep_with_next = True
+
+    if "Report Source" not in styles:
+        source_style = styles.add_style("Report Source", WD_STYLE_TYPE.PARAGRAPH)
+        source_style.base_style = styles["Normal"]
+    else:
+        source_style = styles["Report Source"]
+    source_style.font.name = "Aptos"
+    source_style.font.size = Pt(8.5)
+    source_style.font.color.rgb = RGBColor(0x66, 0x70, 0x78)
+    source_style.paragraph_format.left_indent = Inches(0.25)
+    source_style.paragraph_format.space_after = Pt(2)
+
+    def _shade(paragraph, fill: str) -> None:
+        properties = paragraph._p.get_or_add_pPr()
+        shading = properties.find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            properties.append(shading)
+        shading.set(qn("w:fill"), fill)
+
+    def _set_keep(paragraph, keep_lines: bool = False) -> None:
+        properties = paragraph._p.get_or_add_pPr()
+        keep_next = OxmlElement("w:keepNext")
+        properties.append(keep_next)
+        if keep_lines:
+            keep = OxmlElement("w:keepLines")
+            properties.append(keep)
+
+    def _add_status_line(content: str):
+        paragraph = document.add_paragraph(style="List Bullet")
+        paragraph.paragraph_format.space_after = Pt(4)
+        paragraph.paragraph_format.line_spacing = 1.05
+        match = re.search(r"—\s*(ОШИБКА|ТРЕБУЕТ ПРОВЕРКИ|ПРОВЕРКА ПРОПУЩЕНА)\b", content)
+        if match:
+            prefix = content[: match.start()]
+            status = match.group(1)
+            suffix = content[match.end() :]
+            paragraph.add_run(prefix)
+            status_run = paragraph.add_run(f"— {status}")
+            status_run.bold = True
+            status_run.font.color.rgb = STATUS_COLORS[
+                next(key for key, value in STATUS_MARKERS.items() if value == status)
+            ]
+            paragraph.add_run(suffix)
+        else:
+            paragraph.add_run(content)
+        return paragraph
+
+    def _add_source_line(content: str):
+        paragraph = document.add_paragraph(style="Report Source")
+        paragraph.add_run(content.strip())
+        _shade(paragraph, "F3F5F7")
+        return paragraph
+
     for index, line in enumerate(text.splitlines()):
         stripped = line.strip()
         if not stripped:
             continue
         if index == 0:
-            document.add_heading(stripped, level=1)
+            title = document.add_paragraph(style="Title")
+            title.add_run(stripped)
+            title.paragraph_format.space_after = Pt(10)
             continue
         if stripped[0:1].isdigit() and ") " in stripped[:4]:
-            document.add_heading(stripped, level=2)
+            heading = document.add_heading(stripped, level=1)
+            _set_keep(heading)
             continue
         if stripped.endswith(":") and not stripped.startswith("-"):
-            document.add_heading(stripped[:-1], level=3)
+            heading = document.add_heading(stripped[:-1], level=2)
+            _set_keep(heading)
+            continue
+        if stripped.startswith("Источник:") or stripped.startswith("  Источник:"):
+            _add_source_line(stripped)
             continue
         if stripped.startswith("- "):
-            paragraph = document.add_paragraph(style="List Bullet")
             content = stripped[2:]
+            _add_status_line(content)
+            continue
         else:
             paragraph = document.add_paragraph()
             content = stripped
             if line.startswith("  "):
                 paragraph.paragraph_format.left_indent = Inches(0.35)
         paragraph.paragraph_format.space_after = Pt(3)
-        run = paragraph.add_run(content)
-        if "— ОШИБКА" in content:
-            run.font.color.rgb = STATUS_COLORS[FindingStatus.FAILED]
-        elif "ТРЕБУЕТ ПРОВЕРКИ" in content:
-            run.font.color.rgb = STATUS_COLORS[FindingStatus.UNCERTAIN]
-        elif "ПРОВЕРКА ПРОПУЩЕНА" in content:
-            run.font.color.rgb = STATUS_COLORS[FindingStatus.SKIPPED]
+        paragraph.add_run(content)
+
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    footer_run = footer.add_run("Результат проверки закупочной документации")
+    footer_run.font.size = Pt(8)
+    footer_run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
     buffer = BytesIO()
     document.save(buffer)
