@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from summary_model.checks.models import CheckResult
+from summary_model.checks.normalization import normalize_subject_text
 from summary_model.extraction.llm_client import StructuredLLMClient
 from summary_model.extraction_models import ProcurementPackageExtraction
 from shared_modules.llm_models import OPENAI_NANO_MODEL
@@ -595,7 +596,16 @@ def _semantic_normalize(value: object) -> str:
 
 
 def _warranty_numeric_terms(value: object) -> set[str]:
-    return set(re.findall(r"\d+(?:[.,]\d+)?", _semantic_normalize(value)))
+    text = _semantic_normalize(value)
+    return {
+        f"{number.replace(',', '.')} {unit}"
+        for number, unit in re.findall(
+            r"(?<![\d.])(\d+(?:[.,]\d+)?)\s*"
+            r"(процент(?:а|ов)?|%|дн(?:я|ей)?|дн|сут(?:ок|ки)?|"
+            r"месяц(?:а|ев)?|мес|год(?:а|ов)?|лет|час(?:а|ов)?|ч)\b",
+            text,
+        )
+    }
 
 
 _SUBJECT_STOP_TERMS = {
@@ -614,7 +624,7 @@ _SUBJECT_STOP_TERMS = {
 
 
 def _subject_terms(value: object) -> dict[str, str]:
-    words = re.findall(r"[а-яё]{5,}", _semantic_normalize(value))
+    words = re.findall(r"[а-яё]{5,}", normalize_subject_text(value))
     return {
         word[:7]: word
         for word in words
@@ -664,10 +674,10 @@ def _apply_subject_guard(
     for label, value in values:
         if not value:
             continue
-        if _semantic_normalize(value) == _semantic_normalize(baseline_value):
+        if normalize_subject_text(value) == normalize_subject_text(baseline_value):
             continue
-        if Counter(_semantic_normalize(value).split()) == Counter(
-            _semantic_normalize(baseline_value).split()
+        if Counter(normalize_subject_text(value).split()) == Counter(
+            normalize_subject_text(baseline_value).split()
         ):
             reordered.append(label)
             continue

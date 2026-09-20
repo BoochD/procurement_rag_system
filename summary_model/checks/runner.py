@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections import Counter
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from math import sqrt
 from pathlib import Path
@@ -26,6 +27,7 @@ from summary_model.checks.normalization import (
     normalize_code,
     normalize_decimal,
     normalize_money,
+    normalize_subject_text,
     normalize_text,
     normalize_unit,
 )
@@ -357,9 +359,10 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
         quantity = normalize_decimal(item.quantity)
         unit_price = _money(item.unit_price)
         total = _money(item.total_price)
+        billing_quantity = _commercial_offer_billing_quantity(offer, item)
         effective_total = total
         if effective_total is None and quantity is not None and unit_price is not None:
-            effective_total = _money(quantity * unit_price)
+            effective_total = _money(quantity * (billing_quantity or Decimal("1")) * unit_price)
             derived_rows += 1
         if effective_total is not None:
             item_totals.append(effective_total)
@@ -374,13 +377,21 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
             )
             continue
         checked_rows += 1
-        calculated = _money(quantity * unit_price)
+        calculated = _money(quantity * (billing_quantity or Decimal("1")) * unit_price)
         if total is not None and calculated != total:
-            row_errors += 1
-            failures.append(
-                f"{label}, {item_label}: итог строки {_format_money(total)} не равен "
-                f"количество × цена {_format_money(calculated)}"
-            )
+            if billing_quantity is None and _is_service_tariff_item(offer, item):
+                manual.append(
+                    f"{label}, {item_label}: итог строки {_format_money(total)} нельзя "
+                    "проверить по простой формуле количество × цена; в КП указана "
+                    "тарифная услуга, но расчётный объём не распознан"
+                )
+            else:
+                row_errors += 1
+                multiplier = "количество × расчётный объём × цена" if billing_quantity else "количество × цена"
+                failures.append(
+                    f"{label}, {item_label}: итог строки {_format_money(total)} не равен "
+                    f"{multiplier} {_format_money(calculated)}"
+                )
 
     if derived_rows:
         manual.append(
@@ -418,6 +429,57 @@ def _commercial_offer_arithmetic(label: str, offer: Any) -> dict[str, Any]:
         "failures": failures,
         "manual_review": manual,
     }
+
+
+def _commercial_offer_billing_quantity(offer: Any, item: Any) -> Decimal | None:
+    return _commercial_offer_billing_measure(offer, item)[0]
+
+
+def _commercial_offer_billing_measure(offer: Any, item: Any) -> tuple[Decimal | None, str | None]:
+    explicit = normalize_decimal(getattr(item, "billing_quantity", None))
+    if explicit is not None and explicit > 0:
+        return explicit, normalize_unit(getattr(item, "billing_unit", None)) or None
+    texts = (
+        getattr(item, "billing_quantity_raw", None),
+        getattr(item, "delivery_term_text", None),
+        getattr(item, "evidence_text", None),
+        getattr(offer, "delivery_term_text", None),
+    )
+    candidates: set[tuple[Decimal, str]] = set()
+    for value in texts:
+        for raw, raw_unit in re.findall(
+            r"(?<!\d)(\d+(?:[\s\xa0]\d{3})*(?:[.,]\d+)?)\s*"
+            r"(час(?:а|ов)?|ч\.?|дн(?:я|ей)?|сут(?:ок|ки)?|месяц(?:а|ев)?|км)\b",
+            str(value or ""),
+            flags=re.IGNORECASE,
+        ):
+            parsed = normalize_decimal(raw)
+            if parsed is not None and parsed > 0:
+                candidates.add((parsed, normalize_unit(raw_unit)))
+    if len(candidates) != 1 or not _is_service_tariff_item(offer, item):
+        return None, None
+    quantity = normalize_decimal(getattr(item, "quantity", None))
+    unit_price = _money(getattr(item, "unit_price", None))
+    total = _money(getattr(item, "total_price", None))
+    if quantity in (None, 0) or unit_price in (None, 0) or total is None:
+        return None, None
+    candidate, unit = next(iter(candidates))
+    return (candidate, unit) if _money(quantity * candidate * unit_price) == total else (None, None)
+
+
+def _is_service_tariff_item(offer: Any, item: Any) -> bool:
+    text = normalize_text(
+        " ".join(
+            str(value or "")
+            for value in (
+                getattr(offer, "purchase_subject", None),
+                getattr(item, "name", None),
+                getattr(item, "billing_unit", None),
+                getattr(item, "unit_price_raw", None),
+            )
+        )
+    )
+    return any(marker in text for marker in ("услуг", "тариф", "за час", "в час", "за день", "за месяц"))
 
 
 def _commercial_offer_vat_arithmetic(label: str, offer: Any) -> dict[str, Any]:
@@ -523,6 +585,7 @@ def _check_commercial_offers_against_onmck(
         offers,
         onmck.price_sources,
         required_source_ids=source_ids,
+        supplier_items=onmck.items,
     )
     item_matches: dict[str, dict[int, int]] = {}
     item_match_reasons: dict[str, dict[int, str]] = {}
@@ -655,6 +718,15 @@ def _check_commercial_offers_against_onmck(
                     manual=manual,
                     criterion_failures=criterion_failures,
                     criterion_manual=criterion_manual,
+                    skip_ooz_item_match=(
+                        len(onmck.items) == 1
+                        and bool(
+                            getattr(package.purchase_description, "aggregate_quantity_text", None)
+                            if package.purchase_description
+                            else None
+                        )
+                        and _match_reference_purchase_item(nmck_item, ooz_items) is None
+                    ),
                 )
             _check_offer_row_total(item_label, offer, offer_item, failures, manual)
 
@@ -820,13 +892,28 @@ def _offer_source_reference_rows(
         offer_total = _money(getattr(getattr(offer, "total_amount", None), "amount", None)) if offer else None
         status = "passed"
         reasons: list[str] = []
+        invalid_source_dates = _invalid_calendar_date_tokens(
+            " ".join(
+                str(value or "")
+                for value in (
+                    getattr(source, "raw_header", None) if source else None,
+                    source_number,
+                )
+            )
+        )
         if offer is None:
             status = "manual_review"
             reasons.append("соответствующее КП не найдено")
-        elif not source_number or not source_date:
+        if invalid_source_dates:
+            status = "failed"
+            reasons.append(
+                "в реквизитах ОНМЦК указана некорректная дата "
+                + ", ".join(invalid_source_dates)
+            )
+        elif offer is not None and (not source_number or not source_date):
             status = "manual_review"
             reasons.append("номер или дата источника в ОНМЦК не извлечены")
-        else:
+        elif offer is not None:
             if not _same_requisite_number(source_number, offer_number):
                 status = "failed"
                 reasons.append("исходящий номер не совпадает")
@@ -857,6 +944,20 @@ def _offer_source_reference_rows(
             }
         )
     return rows, failures, manual
+
+
+def _invalid_calendar_date_tokens(value: str) -> list[str]:
+    invalid: list[str] = []
+    for token in re.findall(r"(?<!\d)\d{1,2}\.\d{1,2}\.\d{4,}(?!\d)", value or ""):
+        parts = token.split(".")
+        if len(parts[2]) != 4:
+            invalid.append(token)
+            continue
+        try:
+            date(int(parts[2]), int(parts[1]), int(parts[0]))
+        except ValueError:
+            invalid.append(token)
+    return list(dict.fromkeys(invalid))
 
 
 def _same_requisite_number(left: object, right: object) -> bool:
@@ -2367,6 +2468,7 @@ def _match_offers_to_price_sources(
     sources: list[PriceSource],
     *,
     required_source_ids: list[str] | None = None,
+    supplier_items: list[NmckItem] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     by_source: dict[str, Any] = {}
     warnings: list[str] = []
@@ -2401,6 +2503,20 @@ def _match_offers_to_price_sources(
             elif len(candidates) > 1:
                 warnings.append(f"{_supplier_label(source.source_id)}: несколько КП совпали по исходящему номеру/дате")
         if matched is None:
+            source_signature = _supplier_price_signature(supplier_items or [], source.source_id)
+            if source_signature:
+                candidates = [
+                    offer
+                    for offer in unmatched
+                    if _offer_price_signature(offer) == source_signature
+                ]
+                if len(candidates) == 1:
+                    matched = candidates[0]
+                    warnings.append(
+                        f"{_supplier_label(source.source_id)}: реквизиты не дали точного "
+                        "совпадения, КП сопоставлено по последовательности цен"
+                    )
+        if matched is None:
             index = _source_index(source.source_id)
             if index is not None and 0 <= index - 1 < len(offers):
                 positional_offer = offers[index - 1]
@@ -2429,6 +2545,30 @@ def _match_offers_to_price_sources(
         else:
             warnings.append(f"{_supplier_label(source.source_id)}: соответствующее КП не найдено")
     return by_source, warnings
+
+
+def _supplier_price_signature(items: list[NmckItem], source_id: str) -> tuple[Decimal, ...]:
+    values = []
+    for item in items:
+        price = next(
+            (
+                _money(candidate.unit_price)
+                for candidate in item.supplier_prices
+                if str(candidate.source_id) == str(source_id)
+            ),
+            None,
+        )
+        if price is not None:
+            values.append(price)
+    return tuple(values)
+
+
+def _offer_price_signature(offer: Any) -> tuple[Decimal, ...]:
+    return tuple(
+        price
+        for item in (getattr(offer, "items", []) or [])
+        if (price := _money(getattr(item, "unit_price", None))) is not None
+    )
 
 
 def _source_requisites_partially_match(
@@ -2580,17 +2720,26 @@ def _match_offer_items(
     if (
         source_id
         and len(remaining_nmck) == len(remaining_offers)
-        and len(remaining_nmck) >= 2
+        and len(remaining_nmck) >= 1
     ):
         ordered_pairs = list(zip(remaining_nmck, remaining_offers))
-        if all(
-            _ordered_offer_pair_matches(
-                nmck_items[nmck_index],
-                offer_items[offer_index],
+        pairs_match = (
+            _single_offer_price_matches(
+                nmck_items[ordered_pairs[0][0]],
+                offer_items[ordered_pairs[0][1]],
                 source_id,
             )
-            for nmck_index, offer_index in ordered_pairs
-        ):
+            if len(ordered_pairs) == 1
+            else all(
+                _ordered_offer_pair_matches(
+                    nmck_items[nmck_index],
+                    offer_items[offer_index],
+                    source_id,
+                )
+                for nmck_index, offer_index in ordered_pairs
+            )
+        )
+        if pairs_match:
             for nmck_index, offer_index in ordered_pairs:
                 matches[nmck_index] = offer_index
                 used_offer_indexes.add(offer_index)
@@ -2602,6 +2751,29 @@ def _match_offer_items(
         else:
             _item, reasons[nmck_index] = _match_offer_item(nmck_item, offer_items)
     return matches, reasons
+
+
+def _single_offer_price_matches(
+    nmck_item: NmckItem,
+    offer_item: CommercialOfferItem,
+    source_id: str,
+) -> bool:
+    prices = [
+        normalize_decimal(price.unit_price)
+        for price in nmck_item.supplier_prices
+        if str(price.source_id) == str(source_id)
+    ]
+    offer_price = normalize_decimal(offer_item.unit_price)
+    nmck_name = normalize_text(nmck_item.name)
+    offer_name = normalize_text(offer_item.name)
+    generic_nmck_name = nmck_name in {"поставка", "услуга", "оказание услуг", "работы"}
+    return (
+        generic_nmck_name
+        and "услуг" in offer_name
+        and len(prices) == 1
+        and prices[0] is not None
+        and prices[0] == offer_price
+    )
 
 
 def _ordered_offer_pair_matches(
@@ -2757,8 +2929,37 @@ def _compare_offer_item_to_reference(
     manual: list[str],
     criterion_failures: dict[str, list[str]],
     criterion_manual: dict[str, list[str]],
+    skip_ooz_item_match: bool = False,
 ) -> None:
-    if offer_item.quantity is None:
+    if not _offer_names_support(nmck_item.name, offer_item.name):
+        message = (
+            f"{item_label}: {_commercial_offer_name(offer)} наименование "
+            f"'{offer_item.name or 'не распознано'}' не совпадает с ОНМЦК "
+            f"'{nmck_item.name or 'не распознано'}'"
+        )
+        failures.append(message)
+        criterion_failures["subject"].append(message)
+    billing_quantity, billing_unit = _commercial_offer_billing_measure(offer, offer_item)
+    tariff_without_measure = (
+        billing_quantity is None
+        and _is_service_tariff_item(offer, offer_item)
+        and _money(offer_item.total_price) is not None
+        and _money(offer_item.unit_price) is not None
+        and normalize_decimal(offer_item.quantity) is not None
+        and _money(normalize_decimal(offer_item.quantity) * _money(offer_item.unit_price))
+        != _money(offer_item.total_price)
+    )
+    compared_quantity = billing_quantity if billing_quantity is not None else offer_item.quantity
+    compared_unit = billing_unit if billing_quantity is not None else offer_item.unit
+    if tariff_without_measure:
+        message = (
+            f"{item_label}: {_commercial_offer_name(offer)} расчётный объём и его "
+            "единица для тарифной услуги не распознаны"
+        )
+        manual.append(message)
+        criterion_manual["quantity"].append(message)
+        criterion_manual["unit"].append(message)
+    elif compared_quantity is None:
         message = f"{item_label}: {_commercial_offer_name(offer)} количество в КП не распознано"
         manual.append(message)
         criterion_manual["quantity"].append(message)
@@ -2766,13 +2967,15 @@ def _compare_offer_item_to_reference(
         message = f"{item_label}: количество в ОНМЦК не распознано"
         manual.append(message)
         criterion_manual["quantity"].append(message)
-    elif nmck_item.quantity is not None and normalize_decimal(offer_item.quantity) != normalize_decimal(nmck_item.quantity):
+    elif nmck_item.quantity is not None and normalize_decimal(compared_quantity) != normalize_decimal(nmck_item.quantity):
         message = (
-            f"{item_label}: {_commercial_offer_name(offer)} количество {offer_item.quantity} не совпадает с ОНМЦК {nmck_item.quantity}"
+            f"{item_label}: {_commercial_offer_name(offer)} количество {compared_quantity} не совпадает с ОНМЦК {nmck_item.quantity}"
         )
         failures.append(message)
         criterion_failures["quantity"].append(message)
-    if not offer_item.unit:
+    if tariff_without_measure:
+        pass
+    elif not compared_unit:
         message = f"{item_label}: {_commercial_offer_name(offer)} единица измерения в КП не распознана"
         manual.append(message)
         criterion_manual["unit"].append(message)
@@ -2780,12 +2983,14 @@ def _compare_offer_item_to_reference(
         message = f"{item_label}: единица измерения в ОНМЦК не распознана"
         manual.append(message)
         criterion_manual["unit"].append(message)
-    elif nmck_item.unit and normalize_unit(offer_item.unit) != normalize_unit(nmck_item.unit):
+    elif nmck_item.unit and normalize_unit(compared_unit) != normalize_unit(nmck_item.unit):
         message = (
-            f"{item_label}: {_commercial_offer_name(offer)} единица '{offer_item.unit}' не совпадает с ОНМЦК '{nmck_item.unit}'"
+            f"{item_label}: {_commercial_offer_name(offer)} единица '{compared_unit}' не совпадает с ОНМЦК '{nmck_item.unit}'"
         )
         failures.append(message)
         criterion_failures["unit"].append(message)
+    if skip_ooz_item_match:
+        return
     ooz_item = _match_reference_purchase_item(nmck_item, ooz_items)
     if ooz_item is None:
         message = f"{item_label}: позиция ООЗ не сопоставлена для проверки количества и единицы"
@@ -2793,23 +2998,27 @@ def _compare_offer_item_to_reference(
         criterion_manual["quantity"].append(message)
         criterion_manual["unit"].append(message)
     else:
-        if offer_item.unit and not ooz_item.unit:
+        if tariff_without_measure:
+            pass
+        elif compared_unit and not ooz_item.unit:
             message = f"{item_label}: единица измерения в ООЗ не распознана"
             manual.append(message)
             criterion_manual["unit"].append(message)
-        elif offer_item.unit and ooz_item.unit and normalize_unit(offer_item.unit) != normalize_unit(ooz_item.unit):
+        elif compared_unit and ooz_item.unit and normalize_unit(compared_unit) != normalize_unit(ooz_item.unit):
             message = (
-                f"{item_label}: {_commercial_offer_name(offer)} единица '{offer_item.unit}' не совпадает с ООЗ '{ooz_item.unit}'"
+                f"{item_label}: {_commercial_offer_name(offer)} единица '{compared_unit}' не совпадает с ООЗ '{ooz_item.unit}'"
             )
             failures.append(message)
             criterion_failures["unit"].append(message)
-        if offer_item.quantity is not None and ooz_item.quantity is None:
+        if tariff_without_measure:
+            pass
+        elif compared_quantity is not None and ooz_item.quantity is None:
             message = f"{item_label}: количество в ООЗ не распознано"
             manual.append(message)
             criterion_manual["quantity"].append(message)
-        elif offer_item.quantity is not None and ooz_item.quantity is not None and normalize_decimal(offer_item.quantity) != normalize_decimal(ooz_item.quantity):
+        elif compared_quantity is not None and ooz_item.quantity is not None and normalize_decimal(compared_quantity) != normalize_decimal(ooz_item.quantity):
             message = (
-                f"{item_label}: {_commercial_offer_name(offer)} количество {offer_item.quantity} не совпадает с ООЗ {ooz_item.quantity}"
+                f"{item_label}: {_commercial_offer_name(offer)} количество {compared_quantity} не совпадает с ООЗ {ooz_item.quantity}"
             )
             failures.append(message)
             criterion_failures["quantity"].append(message)
@@ -2854,9 +3063,21 @@ def _check_offer_row_total(
                 f"{item_label}: {_commercial_offer_name(offer)} итог строки нельзя проверить"
             )
         return
-    if quantity is not None and unit_price is not None and _money(quantity * unit_price) != total:
+    if quantity is not None and unit_price is not None:
+        billing_quantity = _commercial_offer_billing_quantity(offer, offer_item)
+        calculated = _money(quantity * (billing_quantity or Decimal("1")) * unit_price)
+        if calculated == total:
+            return
+        if billing_quantity is None and _is_service_tariff_item(offer, offer_item):
+            manual.append(
+                f"{item_label}: {_commercial_offer_name(offer)} тарифный объём для "
+                "проверки итога строки не распознан"
+            )
+            return
+        multiplier = "количество × расчётный объём × цена" if billing_quantity else "количество × цена"
         failures.append(
-            f"{item_label}: {_commercial_offer_name(offer)} итог строки {_format_money(total)} не равен количество × цена {_format_money(quantity * unit_price)}"
+            f"{item_label}: {_commercial_offer_name(offer)} итог строки {_format_money(total)} "
+            f"не равен {multiplier} {_format_money(calculated)}"
         )
 
 
@@ -3176,10 +3397,21 @@ def _okpd2_codes_from_ktru(codes: list[Any]) -> set[str]:
 
 
 def _check_funding_source(package: ProcurementPackageExtraction) -> list[CheckResult]:
-    schedule_value = package.schedule_application.funding_source_text if package.schedule_application else None
+    schedule = package.schedule_application
+    schedule_value = schedule.funding_source_text if schedule else None
     contract_value = package.contract_draft.funding_source if package.contract_draft else None
     schedule_norm = normalize_text(schedule_value)
     contract_norm = normalize_text(contract_value)
+    related_plan_values = [
+        str(field.value)
+        for field in (getattr(schedule, "raw_fields", []) or [])
+        if field.value
+        and any(
+            marker in normalize_text(field.key)
+            for marker in ("источник финансирования", "государственной ведомственной программы")
+        )
+    ]
+    schedule_context = normalize_text(" ".join([str(schedule_value or ""), *related_plan_values]))
     if not schedule_norm or not contract_norm:
         status = "manual_review"
         message = "Источник финансирования отсутствует в одном из документов."
@@ -3192,9 +3424,15 @@ def _check_funding_source(package: ProcurementPackageExtraction) -> list[CheckRe
     elif schedule_norm == contract_norm or schedule_norm in contract_norm or contract_norm in schedule_norm:
         status = "passed"
         message = "Источник финансирования совпадает по нормализованному тексту."
-    else:
+    elif _funding_facts_conflict(schedule_context, contract_norm):
         status = "failed"
-        message = "Источник финансирования различается между заявкой и контрактом."
+        message = "Источник финансирования содержит противоречащие сведения в заявке и контракте."
+    elif _funding_facts_agree(schedule_context, contract_norm):
+        status = "passed"
+        message = "Источник финансирования согласован по виду финансирования и периоду."
+    else:
+        status = "warning"
+        message = "Источник финансирования указан с разной детализацией; явное противоречие не найдено."
     return [
         _result(
             "strict.funding_source",
@@ -3204,9 +3442,35 @@ def _check_funding_source(package: ProcurementPackageExtraction) -> list[CheckRe
             message,
             documents=["schedule_application", "contract_draft"],
             fields=["schedule_application.funding_source_text", "contract_draft.funding_source"],
-            details={"schedule_application": schedule_value, "contract_draft": contract_value},
+            details={
+                "schedule_application": schedule_value,
+                "schedule_related_fields": related_plan_values,
+                "contract_draft": contract_value,
+            },
         )
     ]
+
+
+def _funding_facts_agree(left: str, right: str) -> bool:
+    left_years = set(re.findall(r"\b20\d{2}\b", left))
+    right_years = set(re.findall(r"\b20\d{2}\b", right))
+    years_agree = not left_years or not right_years or bool(left_years & right_years)
+    def has_lbo(value: str) -> bool:
+        return "лбо" in value or all(stem in value for stem in ("лимит", "бюджетн", "обязательств"))
+
+    both_lbo = has_lbo(left) and has_lbo(right)
+    return years_agree and both_lbo
+
+
+def _funding_facts_conflict(left: str, right: str) -> bool:
+    left_years = set(re.findall(r"\b20\d{2}\b", left))
+    right_years = set(re.findall(r"\b20\d{2}\b", right))
+    if left_years and right_years and left_years.isdisjoint(right_years):
+        return True
+    levels = ("федеральн", "областн", "местн")
+    left_levels = {level for level in levels if level in left}
+    right_levels = {level for level in levels if level in right}
+    return bool(left_levels and right_levels and left_levels.isdisjoint(right_levels))
 
 
 def _is_structured_eis_reference(value: str | None) -> bool:
@@ -3525,8 +3789,8 @@ def _check_subject_against_plan(package: ProcurementPackageExtraction) -> CheckR
 
 
 def _subject_text_comparison(left: str, right: str) -> tuple[str, str]:
-    left_normalized = normalize_text(left)
-    right_normalized = normalize_text(right)
+    left_normalized = normalize_subject_text(left)
+    right_normalized = normalize_subject_text(right)
     if left_normalized == right_normalized:
         return "passed", "полное совпадение"
     if Counter(left_normalized.split()) == Counter(right_normalized.split()):
@@ -3565,7 +3829,11 @@ def _check_text_against_plan(
         mismatches = [
             (name, value)
             for name, value in present_candidates
-            if not _text_values_match(schedule_value, value)
+            if not (
+                _address_values_match(schedule_value, value)
+                if check_id == "strict.plan.delivery_place"
+                else _text_values_match(schedule_value, value)
+            )
         ]
         if not mismatches:
             status = "passed"
@@ -3591,6 +3859,29 @@ def _text_values_match(left: str | None, right: str | None) -> bool:
     if not left_norm or not right_norm:
         return False
     return left_norm == right_norm or left_norm in right_norm or right_norm in left_norm
+
+
+def _address_values_match(left: str | None, right: str | None) -> bool:
+    def normalized(value: str | None) -> str:
+        text = normalize_text(value)
+        aliases = (
+            (r"\bг о\b", "городской округ"),
+            (r"\bобл\b", "область"),
+            (r"\bг\b", "город"),
+            (r"\bул\b", "улица"),
+            (r"\bд\b", "дом"),
+        )
+        for pattern, replacement in aliases:
+            text = re.sub(pattern, replacement, text)
+        return " ".join(text.split())
+
+    left_norm = normalized(left)
+    right_norm = normalized(right)
+    return bool(
+        left_norm
+        and right_norm
+        and (left_norm == right_norm or left_norm in right_norm or right_norm in left_norm)
+    )
 
 
 def _is_eis_structured_placeholder(value: str | None) -> bool:
@@ -4060,6 +4351,9 @@ def _check_securities(package: ProcurementPackageExtraction) -> list[CheckResult
     method = getattr(schedule, "procurement_method", None) if schedule else None
     application_exception = _security_exception_note(schedule, kind="application")
     contract_exception = _security_exception_note(schedule, kind="contract")
+    method_conflict = _procurement_method_conflict_note(package)
+    application_exception = application_exception or method_conflict
+    contract_exception = contract_exception or method_conflict
     return [
         _check_application_security(application_security, nmck, method, application_exception),
         _check_contract_security_limits(schedule_contract_security, nmck, method, contract_exception),
@@ -4134,9 +4428,6 @@ def _check_application_security(
     if method == "single_supplier":
         status = "not_applicable"
         message = "Для закупки у единственного поставщика базовая проверка обеспечения заявки не применяется."
-    elif exception_note:
-        status = "manual_review"
-        message = f"Базовый диапазон обеспечения заявки не применён автоматически: {exception_note}"
     elif value is None:
         status = "manual_review"
         message = "Размер обеспечения заявки не извлечён из заявки в план-график."
@@ -4149,6 +4440,12 @@ def _check_application_security(
     elif percent is None:
         status = "manual_review"
         message = "Условие об обеспечении заявки найдено, но размер не распознан."
+    elif percent == 0 and nmck <= Decimal("1000000"):
+        status = "passed"
+        message = "При НМЦК не более 1 млн руб. обеспечение заявки может не устанавливаться."
+    elif exception_note:
+        status = "manual_review"
+        message = f"Базовый диапазон обеспечения заявки не применён автоматически: {exception_note}"
     elif percent == 0 and method is None:
         status = "manual_review"
         message = "Указано 0%, но способ закупки не извлечён: применимость обеспечения заявки требует проверки."
@@ -4170,7 +4467,18 @@ def _check_application_security(
         fields=["schedule_application.application_security", "schedule_application.nmck"],
         details={
             "summary_lines": [
-                _security_limit_line("Обеспечение заявки", nmck, percent, *(_application_security_limits(nmck) if nmck is not None else (None, None))),
+                _security_limit_line(
+                    "Обеспечение заявки",
+                    nmck,
+                    percent,
+                    *(
+                        (Decimal("0"), Decimal("1"))
+                        if nmck is not None and nmck <= Decimal("1000000") and percent == 0
+                        else _application_security_limits(nmck)
+                        if nmck is not None
+                        else (None, None)
+                    ),
+                ),
                 _security_summary("Заявка в план-график", value),
             ],
         },
@@ -4267,6 +4575,20 @@ def _check_warranty_security_limits(value: Any, nmck: Decimal | None) -> CheckRe
 
 def _application_security_limits(nmck: Decimal) -> tuple[Decimal, Decimal]:
     return (Decimal("0.5"), Decimal("1")) if nmck <= Decimal("20000000") else (Decimal("0.5"), Decimal("5"))
+
+
+def _procurement_method_conflict_note(package: ProcurementPackageExtraction) -> str | None:
+    sources = (
+        ("ПГ", getattr(package.schedule_application, "procurement_method", None)),
+        ("обращение", getattr(package.purchase_request, "procurement_method", None)),
+        ("пояснительная записка", getattr(package.explanatory_note, "procurement_method", None)),
+    )
+    known = [(label, value) for label, value in sources if value not in (None, "", "unknown", "other")]
+    if len({value for _label, value in known}) <= 1:
+        return None
+    labels = {"single_supplier": "единственный поставщик", "auction": "аукцион", "competition": "конкурс", "request_for_quotations": "запрос котировок"}
+    rendered = ", ".join(f"{label}: {labels.get(value, value)}" for label, value in known)
+    return f"в документах расходится способ закупки ({rendered})"
 
 
 def _contract_security_limits(nmck: Decimal) -> tuple[Decimal, Decimal]:

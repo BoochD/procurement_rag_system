@@ -2193,7 +2193,16 @@ def _purchase_description(ir: DocumentIR, tables: list[ParsedTable]) -> Purchase
         okpd2_codes=unique_codes(OKPD2_RE, text),
         ktru_codes=unique_codes(KTRU_RE, text),
         subject_codes=subject_codes,
-        delivery_place=_line_after_marker(text, "место поставки", "адрес поставки"),
+        delivery_place=(
+            _delivery_place_from_ooz_section(text)
+            or _line_after_marker(
+                text,
+                "место оказания услуг",
+                "место поставки товара",
+                "место поставки",
+                "адрес поставки",
+            )
+        ),
         delivery_term_text=delivery_text,
         delivery_term=_term_value(delivery_text),
         aggregate_quantity_text=_aggregate_quantity_from_ooz_tables(tables),

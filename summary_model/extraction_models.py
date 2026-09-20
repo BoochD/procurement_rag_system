@@ -280,6 +280,9 @@ class CommercialOfferItem(BaseModel):
     unit: str | None = None
     quantity: Decimal | None = None
     quantity_raw: str | None = None
+    billing_quantity: Decimal | None = None
+    billing_quantity_raw: str | None = None
+    billing_unit: str | None = None
     unit_price: Decimal | None = None
     unit_price_raw: str | None = None
     total_price: Decimal | None = None

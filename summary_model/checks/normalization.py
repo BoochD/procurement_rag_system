@@ -15,6 +15,18 @@ def normalize_text(value: Any) -> str:
     return " ".join(text.split())
 
 
+def normalize_subject_text(value: Any) -> str:
+    """Normalize a subject while dropping only explicit drafting aliases."""
+    text = str(value or "").replace("\xa0", " ")
+    text = re.sub(
+        r"\(\s*далее\s*(?:[-–—:]\s*)?(?:именуем(?:ый|ая|ое)\s+)?[^)]{1,80}\)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return normalize_text(text)
+
+
 def normalize_code(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip()
 

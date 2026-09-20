@@ -20,7 +20,7 @@ from summary_model.extraction.structured_recovery import StructuredRecovery, rec
 from summary_model.extraction_models import CommercialOfferItem, CommercialOfferSchema, MoneyValue
 
 
-COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.4.0"
+COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.5.0"
 
 
 @dataclass
@@ -48,7 +48,8 @@ COMMERCIAL_OFFER_VLM_PROMPT = """
 - дату КП;
 - предмет закупки;
 - строки ТРУ: наименование, ОКПД2/КТРУ если есть, товарный знак, модель,
-  единица, количество, цена за единицу, итог строки;
+  единица, количество, дополнительный расчётный объём услуги, цена за единицу,
+  итог строки;
 - итоговую сумму КП;
 - НДС: текст, ставка, сумма, включён/не включён;
 - срок поставки/оказания услуг;
@@ -58,6 +59,13 @@ COMMERCIAL_OFFER_VLM_PROMPT = """
 Правила:
 - Не придумывай строки и реквизиты.
 - Не пересчитывай НДС, если в документе неоднозначно.
+- Для тарифной услуги различай количество объектов и расчётный объём. Например,
+  `1 видеопоток`, `2208 часов`, `20 руб. за видеопоток в час` означает:
+  quantity=1, unit=`видеопоток`, billing_quantity=2208,
+  billing_unit=`час`, unit_price=20, total_price=44160. Это общее правило для
+  тарифов за час/день/месяц/километр и подобных измеримых объёмов, а не правило
+  только для видеопотока. Не записывай срок в billing_quantity, если документ
+  не задаёт числовой объём явно.
 - Если поле не видно или не уверенно распознано, оставь null и добавь
   понятное предупреждение в parser_warnings.
 - Товарный знак и модель клади в отдельные поля item.trademark/item.model.
@@ -241,6 +249,7 @@ def _normalize_vlm_offer_payload(data: dict[str, Any]) -> dict[str, Any]:
             normalized_item = dict(item)
             for field_name in (
                 "quantity",
+                "billing_quantity",
                 "unit_price",
                 "total_price",
                 "vat_rate",

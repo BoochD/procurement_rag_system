@@ -61,19 +61,26 @@ def run_ktru_characteristic_checks(
         if item.ktru_code
     ]
     if not items:
+        no_ktru_in_plan = plan_registry_result.status == "not_applicable"
+        empty_status = "not_applicable" if no_ktru_in_plan else "manual_review"
+        empty_reason = (
+            "КТРУ не указан в ПГ и ООЗ; проверка не применяется."
+            if no_ktru_in_plan
+            else "В ООЗ не найдены позиции с КТРУ для проверки."
+        )
         return [
             plan_registry_result,
             _result(
                 "manual.ktru.characteristics",
                 "КТРУ-характеристики",
-                "manual_review",
-                "В ООЗ не найдены позиции с КТРУ для проверки характеристик.",
+                empty_status,
+                empty_reason,
             ),
             _result(
                 "manual.ktru.additional",
                 "Дополнительные характеристики КТРУ",
-                "manual_review",
-                "В ООЗ не найдены позиции с КТРУ для проверки дополнительных характеристик.",
+                empty_status,
+                empty_reason,
             ),
         ]
 
@@ -340,8 +347,8 @@ def _check_plan_ktru_registry(
         return _result(
             "manual.ktru.plan_registry",
             "Коды КТРУ из заявки в план-график",
-            "manual_review",
-            "В заявке в план-график не найдены коды КТРУ для проверки через zakupki.gov.ru.",
+            "not_applicable",
+            "В заявке в план-график КТРУ не указан; проверка наличия кодов в каталоге не применяется.",
             {"ktru_cards": [], "source_document": "schedule_application"},
         )
 

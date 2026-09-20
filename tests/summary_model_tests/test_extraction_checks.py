@@ -3751,6 +3751,8 @@ def test_commercial_offer_vlm_normalizes_russian_dates_and_money_strings():
                 {
                     "name": "Сервер",
                     "quantity": "4",
+                    "billing_quantity": "2 208",
+                    "billing_unit": "час",
                     "unit_price": "10 470 000,00",
                     "total_price": "41 880 000,00",
                 }
@@ -3763,6 +3765,189 @@ def test_commercial_offer_vlm_normalizes_russian_dates_and_money_strings():
     assert str(offer.offer_date) == "2026-04-30"
     assert offer.items[0].unit_price == Decimal("10470000.00")
     assert offer.items[0].total_price == Decimal("41880000.00")
+    assert offer.items[0].billing_quantity == Decimal("2208")
+
+
+def test_commercial_offer_arithmetic_supports_explicit_service_billing_volume():
+    offer = CommercialOfferSchema(
+        supplier_name="ООО Тариф",
+        total_amount=MoneyValue(amount=Decimal("44160")),
+        items=[
+            CommercialOfferItem(
+                name="Оказание услуг по предоставлению видеопотока",
+                unit="видеопоток",
+                quantity=Decimal("1"),
+                billing_quantity=Decimal("2208"),
+                billing_unit="час",
+                unit_price=Decimal("20"),
+                total_price=Decimal("44160"),
+            )
+        ],
+    )
+
+    result = checks_runner._commercial_offer_arithmetic("КП №1", offer)
+
+    assert result["status"] == "passed"
+    assert result["calculated_total"] == "44160.00"
+
+
+def test_commercial_offer_arithmetic_recovers_explicit_duration_and_does_not_accuse_unknown_tariff():
+    explicit = CommercialOfferSchema(
+        purchase_subject="Оказание услуг по предоставлению видеопотока",
+        delivery_term_text="продолжительность - 2208 часов",
+        total_amount=MoneyValue(amount=Decimal("48576")),
+        items=[CommercialOfferItem(name="Услуги", quantity=1, unit_price=22, total_price=48576)],
+    )
+    unknown = CommercialOfferSchema(
+        purchase_subject="Оказание услуг по предоставлению видеопотока",
+        delivery_term_text="с 15.09.2026 по 15.12.2026",
+        total_amount=MoneyValue(amount=Decimal("50784")),
+        items=[CommercialOfferItem(name="Услуги", quantity=1, unit_price=23, total_price=50784)],
+    )
+    flat_fee = CommercialOfferSchema(
+        purchase_subject="Оказание услуг сопровождения",
+        delivery_term_text="срок оказания услуг 3 месяца",
+        total_amount=MoneyValue(amount=Decimal("100")),
+        items=[CommercialOfferItem(name="Услуги сопровождения", quantity=1, unit_price=100, total_price=100)],
+    )
+
+    assert checks_runner._commercial_offer_arithmetic("КП №2", explicit)["status"] == "passed"
+    unknown_result = checks_runner._commercial_offer_arithmetic("КП №3", unknown)
+    assert unknown_result["status"] == "manual_review"
+    assert not unknown_result["failures"]
+    assert checks_runner._commercial_offer_arithmetic("КП №4", flat_fee)["status"] == "passed"
+
+
+def test_subject_comparison_ignores_only_explicit_drafting_alias():
+    left = "Оказание услуг по передаче видеопотока"
+    right = "Оказание услуг по передаче видеопотока (далее - Услуга)"
+
+    assert checks_runner._subject_text_comparison(left, right)[0] == "passed"
+    assert checks_runner._subject_text_comparison(left, "Оказание услуг по передаче данных")[0] == "failed"
+
+
+def test_warranty_guard_ignores_clause_number_but_keeps_real_duration():
+    from summary_model.checks.semantic_llm import SemanticCheckFinding, _apply_warranty_guard
+
+    package = _base_package()
+    package.purchase_description.warranty_requirements_text = "4.2. Гарантийный срок не установлен."
+    package.contract_draft.warranty_text = "Гарантийный срок не установлен."
+    finding = SemanticCheckFinding(
+        check_id="semantic.warranty",
+        status="passed",
+        message="Гарантийные условия совпадают.",
+    )
+
+    assert _apply_warranty_guard(package, finding).status == "passed"
+
+
+def test_ooz_delivery_place_does_not_absorb_appendix_object_address():
+    from summary_model.extraction_pipeline import _delivery_place_from_ooz_section
+
+    text = """Описание объекта закупки
+1.4. Место оказания Услуг: г. Новосибирск, ул. Свердлова, д. 14.
+2. Требования к услуге
+Приложение. Место размещения камеры: г. Новосибирск, ул. Караваева, д. 1.
+"""
+
+    result = _delivery_place_from_ooz_section(text)
+
+    assert "Свердлова" in result
+    assert "Караваева" not in result
+
+
+def test_address_comparison_allows_abbreviations_but_not_street_typos():
+    full = "Российская Федерация, Новосибирская область, город Новосибирск, улица Свердлова, дом 14"
+    abbreviated = "Российская Федерация, Новосибирская обл., г. Новосибирск, ул. Свердлова, д. 14"
+    typo = "Российская Федерация, Новосибирская обл., г. Новосибирск, ул. Сврдлова, д. 14"
+
+    assert checks_runner._address_values_match(full, abbreviated)
+    assert not checks_runner._address_values_match(full, typo)
+
+
+def test_zero_application_security_is_allowed_below_one_million_and_method_conflict_is_visible():
+    package = _base_package()
+    package.schedule_application.nmck = MoneyValue(amount=Decimal("44160.50"))
+    package.schedule_application.procurement_method = "auction"
+    package.schedule_application.application_security = SecurityValue(raw="0%", value_percent=Decimal("0"))
+    package.schedule_application.contract_security = SecurityValue(raw="0%", value_percent=Decimal("0"))
+    package.purchase_request.procurement_method = "single_supplier"
+
+    checks = _by_id(run_checks(package))
+
+    assert checks["strict.application_security"].status == "passed"
+    assert checks["strict.plan.contract_security_limits"].status == "manual_review"
+    assert "расходится способ закупки" in checks["strict.plan.contract_security_limits"].message
+
+
+def test_no_ktru_in_plan_and_ooz_is_not_applicable():
+    from summary_model.checks.ktru_adapter import run_ktru_characteristic_checks
+
+    package = _base_package()
+    package.schedule_application.ktru_codes = []
+    package.purchase_description.items = []
+
+    results = {
+        item.check_id: item
+        for item in run_ktru_characteristic_checks(package, registry=object())
+    }
+
+    assert results["manual.ktru.plan_registry"].status == "not_applicable"
+    assert results["manual.ktru.characteristics"].status == "not_applicable"
+    assert results["manual.ktru.additional"].status == "not_applicable"
+
+
+def test_invalid_onmck_source_date_is_an_explicit_failure_after_price_signature_match():
+    offer = CommercialOfferSchema(
+        outgoing_number="5617/32",
+        outgoing_date=date(2026, 8, 24),
+        total_amount=MoneyValue(amount=Decimal("44160")),
+        items=[CommercialOfferItem(name="Услуга", quantity=1, unit_price=20, total_price=44160)],
+    )
+    source = PriceSource(
+        source_id="supplier_1",
+        raw_header="Исполнитель 1 (письмо №1 от 30.01.20276)",
+        outgoing_letter_number="1 от 30.01.20276",
+    )
+    item = NmckItem(
+        name="Услуга",
+        supplier_prices=[SupplierPrice(source_id="supplier_1", unit_price=20, row_total=44160)],
+    )
+
+    matched, _warnings = checks_runner._match_offers_to_price_sources(
+        [offer], [source], supplier_items=[item]
+    )
+    rows, failures, _manual = checks_runner._offer_source_reference_rows(
+        [offer],
+        NmckJustificationSchema(price_sources=[source], items=[item]),
+        matched,
+        ["supplier_1"],
+    )
+
+    assert matched["supplier_1"] is offer
+    assert rows[0]["status"] == "failed"
+    assert any("30.01.20276" in failure for failure in failures)
+
+
+def test_funding_source_accepts_same_lbo_period_and_program_with_different_detail():
+    package = _base_package()
+    package.schedule_application.funding_source_text = (
+        "КБК 194 0410 2230104950 242 226, лимиты бюджетных обязательств 2026 г."
+    )
+    package.schedule_application.raw_fields.append(
+        RawField(
+            key="Наименование мероприятия государственной программы",
+            value="Государственная программа Новосибирской области Безопасный город",
+        )
+    )
+    package.contract_draft.funding_source = (
+        "Областной бюджет Новосибирской области, программа Безопасный город, "
+        "лимиты бюджетных обязательств 2026 года"
+    )
+
+    result = _by_id(run_checks(package))["strict.funding_source"]
+
+    assert result.status == "passed"
 
 
 def test_commercial_offer_text_layer_restores_requisites_and_leaf_items():

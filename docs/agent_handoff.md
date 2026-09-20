@@ -193,6 +193,13 @@ Important table rules:
   and price. An erroneous technical unit in ONMCK (for example `kg` instead
   of `шт.`) is a result of the comparison, not a reason to leave the stage
   unmatched.
+- Commercial-offer service tariffs may use two multipliers, for example one
+  video stream times 2208 hours times a per-hour tariff. Keep the object count
+  in `quantity` and the explicit tariff volume in `billing_quantity`/
+  `billing_unit`. If the tariff volume is not explicit or was not extracted,
+  require manual review instead of reporting a false arithmetic failure.
+- An absent KTRU code in both the plan and OOZ means the KTRU checks are not
+  applicable. It is not a missing-data warning.
 - OOZ item/characteristic and additional-justification roles may both apply to
   the same physical table; role-specific VLM calls and cache keys must remain
   separate;
