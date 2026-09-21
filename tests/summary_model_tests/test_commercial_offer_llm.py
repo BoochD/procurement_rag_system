@@ -1,5 +1,6 @@
 from decimal import Decimal
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from summary_model.checks import run_checks
@@ -11,7 +12,13 @@ from summary_model.checks.commercial_offer_llm import (
     _has_non_price_support,
     _validate_decisions,
 )
-from summary_model.commercial_offer_vlm import COMMERCIAL_OFFER_VLM_PROMPT
+from summary_model.commercial_offer_vlm import (
+    COMMERCIAL_OFFER_VLM_PROMPT,
+    REQUISITES_REVIEW_PROMPT,
+    RequisitesReviewSchema,
+    _apply_requisites_review,
+    _needs_requisites_review,
+)
 from summary_model.commercial_offer_lab import run as commercial_offer_lab
 from summary_model.extraction_models import (
     CommercialOfferItem,
@@ -39,6 +46,63 @@ def test_commercial_offer_vlm_prompt_requires_footer_term_and_vat_scan():
     assert "Срок оказания Услуг: с даты заключения контракта по 21.08.2026" in COMMERCIAL_OFFER_VLM_PROMPT
     assert "в том числе НДС 5%" in COMMERCIAL_OFFER_VLM_PROMPT
     assert "смешанный режим" in COMMERCIAL_OFFER_VLM_PROMPT
+
+
+def test_commercial_offer_vlm_prompt_separates_incoming_and_outgoing_requisites():
+    assert "Вх. №" in COMMERCIAL_OFFER_VLM_PROMPT
+    assert "б/н" in COMMERCIAL_OFFER_VLM_PROMPT
+    assert "Не используй входящую отметку заказчика" in REQUISITES_REVIEW_PROMPT
+
+
+def test_scanned_offer_requires_requisites_review_but_text_pdf_does_not():
+    path = Path("offer.pdf")
+    assert _needs_requisites_review(path, [{"page": 1, "text": ""}])
+    assert not _needs_requisites_review(path, [{"page": 1, "text": "Printed PDF text"}])
+
+
+def test_requisites_review_confirms_blank_number_and_handwritten_date():
+    offer = CommercialOfferSchema(outgoing_number="wrong", outgoing_date="2026-08-21")
+    review = RequisitesReviewSchema(
+        status="blank_number",
+        outgoing_date="2026-08-25",
+        raw_requisites="б/н от 25.08.2026",
+    )
+
+    result = _apply_requisites_review(offer, review)
+
+    assert result.outgoing_number == "б/н"
+    assert str(result.outgoing_date) == "2026-08-25"
+    assert str(result.offer_date) == "2026-08-25"
+
+
+def test_uncertain_handwritten_requisites_do_not_keep_guessed_values():
+    offer = CommercialOfferSchema(outgoing_number="P-01/25", outgoing_date="2026-08-21")
+    review = RequisitesReviewSchema(
+        status="uncertain",
+        warning="номер написан от руки и читается неоднозначно",
+    )
+
+    result = _apply_requisites_review(offer, review)
+
+    assert result.outgoing_number is None
+    assert result.outgoing_date is None
+    assert result.offer_date is None
+    assert "требуют ручной проверки" in result.parser_warnings[0]
+
+
+def test_uncertain_handwritten_number_keeps_confirmed_date():
+    offer = CommercialOfferSchema(outgoing_number="P-01/25", outgoing_date="2026-08-21")
+    review = RequisitesReviewSchema(
+        status="uncertain",
+        outgoing_date="2026-08-25",
+        warning="рукописный номер читается неоднозначно",
+    )
+
+    result = _apply_requisites_review(offer, review)
+
+    assert result.outgoing_number is None
+    assert str(result.outgoing_date) == "2026-08-25"
+    assert str(result.offer_date) == "2026-08-25"
 
 
 def test_payload_contains_offer_once_for_multiple_unmatched_rows():

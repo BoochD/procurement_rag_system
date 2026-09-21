@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -20,7 +20,7 @@ from summary_model.extraction.structured_recovery import StructuredRecovery, rec
 from summary_model.extraction_models import CommercialOfferItem, CommercialOfferSchema, MoneyValue
 
 
-COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.5.0"
+COMMERCIAL_OFFER_VLM_PROMPT_VERSION = "commercial-offer-vlm-1.6.0"
 
 
 @dataclass
@@ -29,6 +29,7 @@ class CommercialOfferVlmOptions:
     model: str = OPENAI_VLM_MODEL
     max_pages: int = 8
     pdf_zoom: float = 2.0
+    requisites_zoom: float = 4.0
 
 
 @dataclass
@@ -98,7 +99,42 @@ COMMERCIAL_OFFER_VLM_PROMPT = """
   это в `vat_text` как смешанный режим; явно напечатанный итоговый `vat_amount`
   скопируй, но не рассчитывай его самостоятельно, если общей суммы нет;
 - не путай НДС с гарантийным сроком, сроком действия КП или процентом скидки.
+- Входящая отметка заказчика `Вх. № ... от ...` не является исходящим номером
+  или датой КП. Исходящие реквизиты берутся только из шапки/бланка автора КП.
+- Явная отметка `б/н` означает, что исходящий номер отсутствует: верни
+  outgoing_number=`б/н`, а не null и не входящий номер.
 """.strip()
+
+
+REQUISITES_REVIEW_PROMPT = """
+Ты проверяешь только исходящие реквизиты автора коммерческого предложения на
+увеличенном фрагменте его первой страницы. Верни строгую RequisitesReviewSchema.
+
+Найди исходящий номер и дату автора КП. Не используй входящую отметку заказчика:
+строка `Вх. № ...` никогда не является исходящим номером КП.
+
+Правила:
+- Если явно написано `б/н`, верни status=`blank_number` и
+  outgoing_number=`б/н`; дату заполни, если она видна.
+- Если номер и/или дата написаны от руки, перепиши их только при уверенном
+  чтении. Не исправляй и не угадывай похожие символы.
+- Если номер читается неуверенно, но дата читается уверенно, верни
+  status=`uncertain`, outgoing_number=null и дату в outgoing_date. Такую дату
+  нужно сохранить, а номер пометить коротким предупреждением.
+- Если не читаются ни номер, ни дата, верни status=`uncertain`,
+  outgoing_number=null, outgoing_date=null и короткое предупреждение.
+- Если номер и дата подтверждены, верни status=`confirmed`.
+- В raw_requisites коротко скопируй видимую запись без интерпретации.
+- outgoing_date верни в формате YYYY-MM-DD.
+""".strip()
+
+
+class RequisitesReviewSchema(BaseModel):
+    outgoing_number: str | None = None
+    outgoing_date: str | None = None
+    status: Literal["confirmed", "blank_number", "uncertain", "not_visible"]
+    raw_requisites: str | None = None
+    warning: str | None = None
 
 
 def extract_commercial_offer_with_vlm(
@@ -159,6 +195,21 @@ def extract_commercial_offer_with_vlm(
         )
 
         offer = _merge_offer_with_deterministic(vlm_offer, deterministic_offer)
+        requisites_review = None
+        if _needs_requisites_review(path, images):
+            try:
+                requisites_review, review_response = _review_handwritten_requisites(
+                    path,
+                    model=options.model,
+                    zoom=options.requisites_zoom,
+                )
+                responses.append(review_response)
+                offer = _apply_requisites_review(offer, requisites_review)
+            except Exception as error:
+                offer.parser_warnings.append(
+                    "Не удалось дополнительно проверить исходящие реквизиты КП: "
+                    f"{type(error).__name__}."
+                )
         offer, aggregate_rows_removed = _remove_proven_aggregate_items(offer)
         offer, reference_rows_removed = _remove_noncommercial_reference_items(offer)
         if not _offer_has_content(offer):
@@ -172,6 +223,7 @@ def extract_commercial_offer_with_vlm(
             "aggregate_rows_removed": aggregate_rows_removed,
             "reference_rows_removed": reference_rows_removed,
             "structured_recovery": _recovery_metrics(recovery),
+            "requisites_review": _requisites_review_metrics(requisites_review),
             "duration_seconds": round(time.perf_counter() - started, 3),
         }
         return CommercialOfferVlmResult(offer, metrics)
@@ -219,6 +271,98 @@ def _recovery_metrics(recovery: StructuredRecovery) -> dict[str, Any]:
         "warnings": recovery.all_warnings,
         "lossy_warnings": recovery.lossy_warnings,
     }
+
+
+def _requisites_review_metrics(review: RequisitesReviewSchema | None) -> dict[str, Any]:
+    if review is None:
+        return {"performed": False}
+    return {
+        "performed": True,
+        "status": review.status,
+        "raw_requisites": review.raw_requisites,
+        "warning": review.warning,
+    }
+
+
+def _needs_requisites_review(path: Path, images: list[dict[str, Any]]) -> bool:
+    return (
+        path.suffix.casefold() == ".pdf"
+        and bool(images)
+        and not str(images[0].get("text") or "").strip()
+    )
+
+
+def _review_handwritten_requisites(
+    path: Path,
+    *,
+    model: str,
+    zoom: float,
+) -> tuple[RequisitesReviewSchema, dict[str, Any]]:
+    images = _requisites_header_images(path, zoom=zoom)
+    if not images:
+        raise ValueError("не удалось выделить шапку первой страницы КП")
+    payload = {
+        "schema_version": "commercial-offer-requisites-review-1.0.0",
+        "file_name": path.name,
+        "scope": "header_of_first_page_only",
+    }
+    response = _call_vlm(
+        images,
+        payload=payload,
+        model=model,
+        system_prompt=REQUISITES_REVIEW_PROMPT,
+        schema=RequisitesReviewSchema,
+        schema_name="commercial_offer_requisites_review",
+    )
+    content = response["choices"][0]["message"]["content"]
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("VLM вернула не объект реквизитов КП")
+    return RequisitesReviewSchema.model_validate(data), response
+
+
+def _apply_requisites_review(
+    offer: CommercialOfferSchema,
+    review: RequisitesReviewSchema,
+) -> CommercialOfferSchema:
+    result = offer.model_copy(deep=True)
+    previous_date = result.outgoing_date
+    reviewed_date = _parse_date(review.outgoing_date or "")
+
+    if review.status == "confirmed":
+        if review.outgoing_number:
+            result.outgoing_number = review.outgoing_number.strip()
+        if reviewed_date is not None:
+            result.outgoing_date = reviewed_date
+            if result.offer_date in (None, previous_date):
+                result.offer_date = reviewed_date
+    elif review.status == "blank_number":
+        result.outgoing_number = "б/н"
+        if reviewed_date is not None:
+            result.outgoing_date = reviewed_date
+            if result.offer_date in (None, previous_date):
+                result.offer_date = reviewed_date
+    else:
+        # A plausible full-page number must not survive an inconclusive crop.
+        # A date which the focused crop read confidently is independent evidence
+        # and remains useful even when the handwritten number cannot be read.
+        result.outgoing_number = None
+        if reviewed_date is not None:
+            result.outgoing_date = reviewed_date
+            if result.offer_date in (None, previous_date):
+                result.offer_date = reviewed_date
+        else:
+            result.outgoing_date = None
+            if result.offer_date == previous_date:
+                result.offer_date = None
+        warning = review.warning or "исходящие реквизиты на скане не удалось подтвердить"
+        result.parser_warnings.append(
+            "Исходящие реквизиты КП требуют ручной проверки: "
+            f"{warning}."
+        )
+
+    result.parser_warnings = list(dict.fromkeys(result.parser_warnings))
+    return result
 
 
 def _normalize_vlm_offer_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -452,6 +596,28 @@ def _pdf_images(path: Path, *, max_pages: int, pdf_zoom: float) -> list[dict[str
     return result
 
 
+def _requisites_header_images(path: Path, *, zoom: float) -> list[dict[str, Any]]:
+    try:
+        import fitz  # type: ignore
+    except ImportError as error:
+        raise RuntimeError("Для VLM-парсинга PDF КП нужен пакет PyMuPDF.") from error
+
+    with fitz.open(path) as document:
+        if not document:
+            return []
+        page = document[0]
+        # In commercial offers, outgoing requisites are conventionally placed
+        # in the header. The upper half keeps the crop broad enough for varied
+        # letterhead layouts while making handwritten digits legible to VLM.
+        header = fitz.Rect(0, 0, page.rect.width, page.rect.height * 0.55)
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(zoom, zoom),
+            clip=header,
+            alpha=False,
+        )
+        return [{"page": 1, "mime": "image/png", "data": pixmap.tobytes("png")}]
+
+
 def _page_text_payload(images: list[dict[str, Any]], *, total_limit: int = 40000) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     remaining = total_limit
@@ -584,10 +750,12 @@ def _looks_like_unit(value: str) -> bool:
 
 
 def _parse_date(value: str) -> Any:
-    try:
-        return datetime.strptime(value, "%d.%m.%Y").date()
-    except ValueError:
-        return None
+    for pattern in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _merge_offer_with_deterministic(

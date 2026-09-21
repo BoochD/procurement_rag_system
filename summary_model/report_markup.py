@@ -63,7 +63,10 @@ def _mark_statuses(text: str) -> str:
 
 
 def _restore_allowed_tags(text: str) -> str:
-    for tag in ("b", "u", "ins", "ok", "warn", "error", "big"):
+    # These tags are emitted by the report renderer and consumed by both the
+    # browser and DOCX exporter. Restore every supported formatting tag after
+    # escaping source text, otherwise document labels render as literal markup.
+    for tag in ("b", "u", "ins", "ok", "warn", "error", "big", "doc", "note"):
         text = text.replace(f"&lt;{tag}&gt;", f"<{tag}>")
         text = text.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
     return text

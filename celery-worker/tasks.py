@@ -9,7 +9,9 @@ from celery import shared_task
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.enum.section import WD_ORIENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.shared import Inches, Pt, RGBColor
 from summary_model.report_markup import mark_report_text
 from summary_model.web_service import WebPipelineOptions, process_uploaded_documents
 
@@ -115,15 +117,109 @@ def _apply_note_frame(paragraph) -> None:
     paragraph_properties.append(borders)
 
 
+def _set_cell_shading(cell, fill: str) -> None:
+    properties = cell._tc.get_or_add_tcPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill)
+    properties.append(shading)
+
+
+def _set_cell_margins(cell, *, top: int = 70, start: int = 90, bottom: int = 70, end: int = 90) -> None:
+    properties = cell._tc.get_or_add_tcPr()
+    margins = properties.first_child_found_in("w:tcMar")
+    if margins is None:
+        margins = OxmlElement("w:tcMar")
+        properties.append(margins)
+    for side, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        node = margins.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            margins.append(node)
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def _repeat_header_row(row) -> None:
+    properties = row._tr.get_or_add_trPr()
+    marker = OxmlElement("w:tblHeader")
+    marker.set(qn("w:val"), "true")
+    properties.append(marker)
+
+
+def _table_column_widths(headers: list[str], available_width: float) -> list[float]:
+    weights = []
+    for index, header in enumerate(headers):
+        normalized = header.casefold()
+        if "статус" in normalized:
+            weight = 0.8
+        elif any(token in normalized for token in ("позиция", "наименование", "поставщик", "источник")):
+            weight = 2.15 if index == 0 else 1.8
+        elif "номер" in normalized or "дата" in normalized:
+            weight = 1.8
+        elif any(token in normalized for token in ("количество", "коэф", "доля")):
+            weight = 1.0
+        else:
+            weight = 1.15
+        weights.append(weight)
+    total = sum(weights) or 1
+    return [available_width * weight / total for weight in weights]
+
+
+def _format_table(table, headers: list[str], available_width: float) -> None:
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    column_widths = _table_column_widths(headers, available_width)
+    compact = len(headers) >= 7
+    font_size = Pt(7.5 if compact else 8.5)
+
+    for row_index, row in enumerate(table.rows):
+        if row_index == 0:
+            _repeat_header_row(row)
+        for column_index, cell in enumerate(row.cells):
+            width = Inches(column_widths[column_index])
+            cell.width = width
+            table.columns[column_index].width = width
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            _set_cell_margins(cell)
+            if row_index == 0:
+                _set_cell_shading(cell, "1F4E78")
+            elif row_index % 2 == 0:
+                _set_cell_shading(cell, "F4F7FA")
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.line_spacing = 1
+                for run in paragraph.runs:
+                    run.font.name = "Aptos"
+                    run.font.size = font_size
+                    if row_index == 0:
+                        run.font.bold = True
+                        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+
 def build_result_docx_bytes(ai_response: str) -> bytes:
     """
     Собирает docx-файл из текстового ответа модели с поддержкой таблиц, заголовков и переносов строк.
     """
     document = Document()
-    document.add_heading('Результат проверки документов', level=1)
-
     clean_response = (ai_response or '').replace('\r\n', '\n')
     lines = clean_response.split('\n')
+    has_wide_table = any(
+        line.strip().startswith("|") and line.strip().count("|") - 1 >= 7
+        for line in lines
+    )
+    section = document.sections[0]
+    section.top_margin = Inches(0.55)
+    section.bottom_margin = Inches(0.55)
+    section.left_margin = Inches(0.55)
+    section.right_margin = Inches(0.55)
+    if has_wide_table:
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
+
+    title = document.add_heading('Результат проверки документов', level=1)
+    title.paragraph_format.space_after = Pt(10)
 
     i = 0
     while i < len(lines):
@@ -148,12 +244,20 @@ def build_result_docx_bytes(ai_response: str) -> bytes:
             if rows_data:
                 col_count = max(len(r) for r in rows_data)
                 table = document.add_table(rows=len(rows_data), cols=col_count)
-                table.style = 'Table Grid'
                 for r_idx, row_cells in enumerate(rows_data):
                     for c_idx, cell_value in enumerate(row_cells):
                         if c_idx < col_count:
                             p = table.cell(r_idx, c_idx).paragraphs[0]
                             _add_formatted_runs(p, cell_value)
+                _format_table(
+                    table,
+                    rows_data[0],
+                    section.page_width.inches
+                    - section.left_margin.inches
+                    - section.right_margin.inches,
+                )
+                spacer = document.add_paragraph()
+                spacer.paragraph_format.space_after = Pt(3)
             continue
 
         if line.startswith('#### '):
