@@ -79,6 +79,9 @@ Always reread this `AGENTS.md` at the start of a new coding task or after contex
 - For every new feature, add a focused test when practical. If testing is not practical, explain why in the final report.
 - For LLM logic, prefer unit tests, fixture-based tests, monkeypatching/mocking external calls, and pipeline smoke tests over live model calls.
 - For extraction-layer work, start with deterministic tests and CLI smoke runs. Do not use paid/live LLM calls just to verify table parsing.
+- For a requested live full-pipeline run, follow `docs/agent_handoff.md` under "Live API runs". `--no-ktru` disables only KTRU; it still permits external LLM/VLM calls. Select an approved shell with outbound API access before launching the command. Never start a live run in a network-restricted sandbox, even as a connectivity test. If no approved network-enabled shell is available, do not launch the run; explain the tool restriction and ask for an approved execution route.
+- After every live run, inspect `inputs.json`, `run.json`, `warnings.json`, `metrics.json`, `checks.json`, `extraction_result.final.json`, and `report.txt`. A CLI exit code of zero is not evidence that model calls succeeded. Report a live review as unavailable or partial when relevant calls failed or did not run.
+- Run each document-pack variant separately when there are multiple files for the same role. `full_pipeline_cli` selects only one file for most roles; confirm the selected and ignored files in `inputs.json` before interpreting results.
 - Useful extraction smoke command: `python -m summary_model.extraction_cli --input-dir "doci_primery/PACK_06_05" --output-dir "runtime/extraction_runs/PACK_06_05"`.
 
 ## Documentation Rules

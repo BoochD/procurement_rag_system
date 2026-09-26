@@ -444,10 +444,20 @@ a compact diagnostic retained in parser warnings.
 - Plan national-regime rows are identified by the labels for prohibitions,
   restrictions, and advantages; `17.x` numbering is only a fallback because
   current plan forms can use `16.x`. SMP/SONKO preference fields are separate.
-- A service-volume comparison runs only when one aggregate quantity is
-  unambiguously available in the plan, OOZ, and ONMCK, the plan has no KTRU or
-  separate goods, and every plan OKPD2 is identified as a service from its
-  local official title. The plan is the baseline.
+- An aggregate service-volume comparison runs only when one aggregate
+  quantity is unambiguously available in the plan, OOZ, and ONMCK, the plan has
+  no KTRU or separate goods, and every plan OKPD2 is identified as a service
+  from its local official title. For a stage-only service ONMCK, compare the
+  plan unit with the explicit unit used by every ONMCK stage and each offer;
+  For quantities in pieces, a separate quantity check sums explicit quantities
+  in each offer independently after complete one-to-one stage identification.
+  Missing quantities, extra or ambiguous rows and incompatible units require
+  manual review rather than comparison of a partial sum. Mixed goods/stage
+  tables and hourly tariffs do not enter this count check. An OOZ stage with
+  matching number and period can identify an incorrectly named ONMCK row;
+  the name discrepancy remains a separate finding. The plan is the comparison
+  baseline: a different explicit unit is an error; missing units or multiple
+  units within one offer require manual review.
 - ONMCK arithmetic validates every available supplier row total, not only the
   selected minimum and the final total.
 - The plan OKPD2-name check compares each extracted code/name pair with the

@@ -33,6 +33,8 @@ INTERNAL_CHECK_ORDER = [
     "strict.onmck.structure",
     "strict.onmck.items",
     "strict.aggregate_service_volume",
+    "strict.staged_service_units",
+    "strict.staged_service_quantity",
     "strict.onmck.stage_prices",
     "strict.codes.okpd2",
     "strict.codes.ktru",

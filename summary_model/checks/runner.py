@@ -81,6 +81,8 @@ def run_checks(
     results.extend(_check_onmck_structure(package, nmck_layout))
     results.extend(_check_onmck_items_against_ooz(package, nmck_layout))
     results.extend(_check_aggregate_service_volume(package))
+    results.extend(_check_staged_service_units(package, nmck_layout))
+    results.extend(_check_staged_service_quantity(package, nmck_layout))
     results.extend(_check_onmck_supplier_prices(package))
     results.extend(_check_onmck_stage_prices(package))
     results.extend(_check_commercial_offer_content(package))
@@ -1532,6 +1534,187 @@ def _check_aggregate_service_volume(package: ProcurementPackageExtraction) -> li
     ]
 
 
+def _check_staged_service_units(
+    package: ProcurementPackageExtraction,
+    layout: NmckRowLayout,
+) -> list[CheckResult]:
+    schedule = package.schedule_application
+    is_service, _reason = _plan_has_service_volume(schedule)
+    if not is_service or layout.mode != "stages":
+        return []
+
+    plan_value = _aggregate_quantity_value(
+        getattr(schedule, "aggregate_quantity_text", None) if schedule else None
+    )
+    plan_unit = plan_value[1] if plan_value else None
+    plan_unit_raw = plan_value[2] if plan_value else None
+    manual: list[str] = []
+    mismatches: list[str] = []
+    units_by_source: dict[str, list[str]] = {}
+
+    if not plan_unit:
+        manual.append("В ПГ не распознаны количество и единица услуги.")
+    else:
+        units_by_source["Заявка в план-график"] = [
+            f"{_format_decimal(plan_value[0])} {plan_unit_raw}"
+        ]
+
+    onmck = package.nmck_justification
+    stage_items = (
+        [
+            item
+            for index, item in enumerate(getattr(onmck, "items", []) or [])
+            if layout.role_for(index) == "stage"
+        ]
+        if onmck
+        else []
+    )
+    stage_units = [normalize_unit(item.unit) for item in stage_items]
+    if not stage_items or any(not unit for unit in stage_units):
+        manual.append("Не для всех этапных строк ОНМЦК распознана единица измерения.")
+    else:
+        units_by_source["ОНМЦК"] = [
+            f"этап {clean_stage_number(item.row_number) or '?'}: {item.unit}"
+            for item in stage_items
+        ]
+        distinct_nmck_units = set(stage_units)
+        if len(distinct_nmck_units) > 1:
+            manual.append("В ОНМЦК для разных этапов распознаны разные единицы; требуется проверить привязку строк.")
+        elif plan_unit and next(iter(distinct_nmck_units)) != plan_unit:
+            mismatches.append(
+                f"ОНМЦК: этапы указаны в «{stage_items[0].unit}», а в ПГ — «{plan_unit_raw}»."
+            )
+
+    offers = list(package.commercial_offers or [])
+    if not offers:
+        manual.append("Коммерческие предложения не загружены для сверки единицы услуги.")
+    for offer in offers:
+        offer_name = _commercial_offer_name(offer)
+        offer_items = list(getattr(offer, "items", []) or [])
+        offer_units = [normalize_unit(item.unit) for item in offer_items]
+        if not offer_items or any(not unit for unit in offer_units):
+            manual.append(f"{offer_name}: не для всех строк распознана единица измерения.")
+            continue
+        distinct_offer_units = set(offer_units)
+        raw_units = list(dict.fromkeys(str(item.unit).strip() for item in offer_items if item.unit))
+        units_by_source[offer_name] = raw_units
+        if len(distinct_offer_units) > 1:
+            manual.append(
+                f"{offer_name}: в строках указаны разные единицы; "
+                "требуется проверить их соответствие этапам."
+            )
+        elif plan_unit and next(iter(distinct_offer_units)) != plan_unit:
+            mismatches.append(
+                f"{offer_name}: услуга указана в «{raw_units[0]}», а в ПГ — «{plan_unit_raw}»."
+            )
+
+    status = "failed" if mismatches else "manual_review" if manual else "passed"
+    summary_lines = [
+        f"{label}: {', '.join(values)}"
+        for label, values in units_by_source.items()
+    ]
+    summary_lines.extend(mismatches)
+    summary_lines.extend(manual)
+    return [
+        _result(
+            "strict.staged_service_units",
+            "Единицы измерения этапов услуги",
+            status,
+            "strict",
+            (
+                "Единица услуги расходится между документами."
+                if mismatches
+                else "Единицу услуги не удалось полностью сверить."
+                if manual
+                else "Единица услуги совпадает в ПГ, ОНМЦК и коммерческих предложениях."
+            ),
+            documents=["schedule_application", "nmck_justification", "commercial_offers"],
+            fields=[
+                "schedule_application.aggregate_quantity_text",
+                "nmck_justification.items[].unit",
+                "commercial_offers[].items[].unit",
+            ],
+            details={
+                "units": units_by_source,
+                "mismatches": mismatches,
+                "manual_review": manual,
+                "summary_lines": summary_lines,
+            },
+        )
+    ]
+
+
+def _check_staged_service_quantity(
+    package: ProcurementPackageExtraction, layout: NmckRowLayout,
+) -> list[CheckResult]:
+    schedule = package.schedule_application
+    is_service, _reason = _plan_has_service_volume(schedule)
+    plan = _aggregate_quantity_value(getattr(schedule, "aggregate_quantity_text", None))
+    if not is_service or layout.mode != "stages" or not plan or plan[1] != "шт":
+        return []
+
+    stages = list(package.nmck_justification.items)
+    manual: list[str] = []
+    mismatches: list[str] = []
+    lines = [f"Заявка в план-график: {_format_decimal(plan[0])} {plan[2]}."]
+    totals: dict[str, str] = {}
+
+    def compare(label: str, items: list[Any]) -> None:
+        quantities = [normalize_decimal(item.quantity) for item in items]
+        if not items or any(q is None or not q.is_finite() or q < 0 for q in quantities):
+            manual.append(f"{label}: не для всех строк распознано допустимое количество услуги.")
+            return
+        if any(normalize_unit(item.unit) != plan[1] for item in items):
+            manual.append(f"{label}: количество не сверено с ПГ из-за отсутствующей или отличающейся единицы.")
+            return
+        total = sum(quantities, Decimal(0))
+        totals[label] = str(total)
+        lines.append(f"{label}: сумма количеств услуг — {_format_decimal(total)} {plan[2]}.")
+        if total != plan[0]:
+            mismatches.append(f"{label}: {_format_decimal(total)} {plan[2]}, в ПГ — {_format_decimal(plan[0])} {plan[2]}.")
+
+    compare("ОНМЦК", stages)
+    if not package.commercial_offers:
+        manual.append("Коммерческие предложения не загружены для сверки количества услуг.")
+    for index, offer in enumerate(package.commercial_offers or [], 1):
+        label = f"КП {index} ({_commercial_offer_name(offer)})"
+        items = list(offer.items)
+        # Match identities only: quantity, unit and price cannot prove coverage.
+        candidates = {}
+        for i, stage in enumerate(stages):
+            identities = [j for j, item in enumerate(items)
+                          if _stage_offer_identity_matches(stage, item)]
+            if not identities:
+                references = [s for s in getattr(package.purchase_description, "stages", [])
+                              if clean_stage_number(s.stage_number) == clean_stage_number(stage.row_number)]
+                if len(references) == 1:
+                    reference = references[0]
+                    identity = stage.model_copy(update={"name": f"{reference.stage_name or ''} ({reference.stage_number} этап, {reference.service_term_text or ''})"})
+                    identities = [j for j, item in enumerate(items)
+                                  if _stage_offer_identity_matches(identity, item)]
+            candidates[i] = identities or [
+                j for j, item in enumerate(items)
+                if normalize_text(stage.name) and normalize_text(stage.name) == normalize_text(item.name)
+            ]
+        matched = [indexes[0] for indexes in candidates.values() if len(indexes) == 1]
+        if len(matched) != len(stages) or len(set(matched)) != len(items) or len(items) != len(stages):
+            manual.append(f"{label}: не подтверждено полное однозначное соответствие строк этапам ОНМЦК; сумма не сравнивается с ПГ.")
+            continue
+        compare(label, items)
+
+    return [_result(
+        "strict.staged_service_quantity", "Количество услуг",
+        "failed" if mismatches else "manual_review" if manual else "passed", "strict",
+        "Количество услуг расходится с ПГ." if mismatches else
+        "Количество услуг не удалось полностью сверить." if manual else
+        "Количество услуг совпадает с ПГ.",
+        documents=["schedule_application", "nmck_justification", "commercial_offers"],
+        fields=["schedule_application.aggregate_quantity_text", "nmck_justification.items[].quantity", "commercial_offers[].items[].quantity"],
+        details={"totals": totals, "mismatches": mismatches, "manual_review": manual,
+                 "summary_lines": lines + mismatches + manual},
+    )]
+
+
 def _plan_has_service_volume(schedule: Any) -> tuple[bool, str]:
     if schedule is None:
         return False, "заявка в план-график не загружена."
@@ -1881,7 +2064,14 @@ def _check_onmck_structure(
         if raw_unit and not _is_count_like_stage_unit(raw_unit):
             invalid_units.append((number, raw_unit))
 
-    if invalid_units:
+    service_stage_unit_check_applies = (
+        layout.mode == "stages"
+        and _plan_has_service_volume(package.schedule_application)[0]
+        and _aggregate_quantity_value(
+            getattr(package.schedule_application, "aggregate_quantity_text", None)
+        ) is not None
+    )
+    if invalid_units and not service_stage_unit_check_applies:
         distinct_units = {normalize_text(unit) for _number, unit in invalid_units}
         if len(distinct_units) == 1 and len(invalid_units) == len(onmck.stages):
             unit = invalid_units[0][1]

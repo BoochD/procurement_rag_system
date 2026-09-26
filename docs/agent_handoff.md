@@ -393,6 +393,48 @@ and expected explanation. This prevents accepting a plausible but wrong report.
 
 ### 3. Run production-parity CLI
 
+#### Live API runs
+
+The command below is a live run, not an offline smoke test. It can send document
+text or page images to the configured external LLM/VLM providers and can incur
+API usage. `--no-ktru` disables only the live KTRU registry check; it does not
+disable document extraction, semantic checks, stage/penalty checks, table VLM,
+commercial-offer VLM, or short-document VLM. Use the live command only when the
+user requested live model behavior or explicitly authorized these API calls.
+
+Before launching it, select an approved shell that has the repository's
+configured Python environment, credentials, and outbound access to the
+configured providers. A tool shell may be network-sandboxed even when ordinary
+local PowerShell can reach the APIs. Do not launch the live command in that
+sandbox, including as a connectivity test. If the available execution tool
+cannot provide approved outbound access, stop before invoking the pipeline;
+explain the tool restriction and ask for an approved network-enabled execution
+route. Do not try an indirect route to bypass a denied escalation.
+
+After a run in the approved network-enabled shell, inspect `metrics.json`
+immediately. If a relevant provider call still returns `Connection error`, mark
+that model-dependent part unavailable and do not describe it as a successful
+live check.
+
+Before interpreting a run:
+
+1. Read `inputs.json`. Confirm the mandatory plan and every intended document
+   were selected; check `ignored` for accidentally omitted files. The CLI picks
+   only one file for most roles, so run each variant in its own input directory.
+2. Confirm `run.json` says `completed`, then read `warnings.json` and the
+   per-provider entries in `metrics.json`. Check attempted, successful, failed,
+   and retried calls for the document LLM, semantic/stage/penalty checks, table
+   VLM, commercial-offer VLM, and short-document VLM as applicable. A zero
+   call count where a fixture requires that model, or failed calls after retry,
+   means that part of the live check is unavailable.
+3. Review `checks.json` and `extraction_result.final.json` against
+   `report.txt` and the source documents. Separate deterministic results from
+   conclusions that depend on failed or skipped model calls. A clean CLI exit
+   alone does not establish correctness.
+
+Never expose API keys while checking provider configuration. Do not paste
+credential values into commands, logs, reports, or chat.
+
 Full live run without KTRU:
 
 ```powershell

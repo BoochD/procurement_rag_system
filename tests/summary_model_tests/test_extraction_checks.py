@@ -1788,6 +1788,103 @@ def test_aggregate_service_volume_does_not_apply_to_goods_code():
     assert "ОКПД2 ПГ не подтверждает" in result.message
 
 
+def _staged_service_package(nmck_unit: str, offer_unit: str) -> ProcurementPackageExtraction:
+    package = _base_package()
+    package.schedule_application.okpd2_codes = ["62.09.20.190"]
+    package.schedule_application.ktru_codes = []
+    package.schedule_application.aggregate_quantity_text = "10 штук"
+    package.nmck_justification.stages = [
+        ProcurementStage(stage_number="1", stage_name="Этап 1"),
+        ProcurementStage(stage_number="2", stage_name="Этап 2"),
+    ]
+    package.nmck_justification.items = [
+        NmckItem(row_number="1.", name="Этап 1", quantity=Decimal("1"), unit=nmck_unit),
+        NmckItem(row_number="2.", name="Этап 2", quantity=Decimal("3"), unit=nmck_unit),
+    ]
+    package.commercial_offers = [
+        CommercialOfferSchema(
+            document_title="КП №1",
+            items=[
+                CommercialOfferItem(name="Этап 1", quantity=Decimal("1"), unit=offer_unit),
+                CommercialOfferItem(name="Этап 2", quantity=Decimal("1"), unit=offer_unit),
+            ],
+        )
+    ]
+    return package
+
+
+def test_staged_service_quantity_counts_offers_despite_bad_nmck_unit():
+    package = _staged_service_package("кг", "шт.")
+    result = _by_id(run_checks(package))["strict.staged_service_quantity"]
+    assert result.status == "failed"
+    assert list(result.details["totals"].values()) == ["2"]
+    assert any("ОНМЦК" in line for line in result.details["manual_review"])
+    assert "Количество услуг" in build_checks_report_text(run_checks(package))
+
+
+def test_staged_service_quantity_passes_for_explicit_matching_totals():
+    package = _staged_service_package("шт.", "шт.")
+    package.schedule_application.aggregate_quantity_text = "4 штуки"
+    package.commercial_offers[0].items[1].quantity = Decimal("3")
+    result = _by_id(run_checks(package))["strict.staged_service_quantity"]
+    assert result.status == "passed"
+    assert list(result.details["totals"].values()) == ["4", "4"]
+
+
+def test_staged_service_quantity_does_not_sum_incomplete_or_duplicate_offers():
+    package = _staged_service_package("кг", "шт.")
+    package.commercial_offers[0].items.append(package.commercial_offers[0].items[0].model_copy())
+    result = _by_id(run_checks(package))["strict.staged_service_quantity"]
+    assert result.status == "manual_review"
+    assert not result.details["totals"]
+
+
+def test_staged_service_quantity_requires_explicit_quantities():
+    package = _staged_service_package("кг", "шт.")
+    package.commercial_offers[0].items[1].quantity = None
+    result = _by_id(run_checks(package))["strict.staged_service_quantity"]
+    assert result.status == "manual_review"
+    assert not result.details["totals"]
+
+
+def test_staged_service_units_compare_plan_nmck_and_offers_without_adding_stage_quantities():
+    package = _staged_service_package("кг", "шт.")
+
+    results = _by_id(run_checks(package))
+    result = results["strict.staged_service_units"]
+
+    assert result.status == "failed"
+    assert result.details["units"]["Заявка в план-график"] == ["10 штук"]
+    assert result.details["units"]["ОНМЦК"] == ["этап 1: кг", "этап 2: кг"]
+    assert result.details["units"]["КП №1"] == ["шт."]
+    assert any("ОНМЦК" in line and "кг" in line and "штук" in line for line in result.details["mismatches"])
+    assert results["strict.onmck.structure"].status == "passed"
+    report_text = build_checks_report_text(run_checks(package))
+    assert "Единицы измерения этапов услуги" in report_text
+    assert "этапы указаны в «кг»" in report_text
+    assert "«кг»" in report_text and "«штук»" in report_text
+
+
+def test_staged_service_units_pass_when_plan_nmck_and_offers_use_same_unit():
+    package = _staged_service_package("шт.", "штук")
+
+    result = _by_id(run_checks(package))["strict.staged_service_units"]
+
+    assert result.status == "passed"
+    assert result.details["mismatches"] == []
+    assert not result.details["manual_review"]
+
+
+def test_staged_service_unit_check_requires_explicit_offer_units():
+    package = _staged_service_package("шт.", "шт.")
+    package.commercial_offers[0].items[1].unit = None
+
+    result = _by_id(run_checks(package))["strict.staged_service_units"]
+
+    assert result.status == "manual_review"
+    assert any("не для всех строк распознана единица" in line for line in result.details["manual_review"])
+
+
 def test_official_okpd2_service_detection_uses_local_official_name():
     assert official_okpd2_is_service("62.09.20.190") is True
     assert official_okpd2_is_service("25.99.29.120") is False
