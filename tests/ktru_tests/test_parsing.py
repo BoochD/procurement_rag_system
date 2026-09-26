@@ -330,9 +330,83 @@ def test_extract_detailed_ktru_characteristics_with_required_flags(
         "Длина волны, нм": {
             "values": ["850", "1310"],
             "required": False,
+            "unit": None,
         },
         "Интерфейс": {
             "values": ["SFP", "XFP"],
             "required": True,
+            "unit": None,
         },
+    }
+
+
+def test_extract_detailed_ktru_characteristics_uses_header_unit_column_and_rowspan(
+    registry: ProcurementReferenceRegistry,
+) -> None:
+    html = """
+    <div id="ktruCharacteristicContent">
+      <table class="blockInfo__table">
+        <thead>
+          <tr>
+            <th rowspan="2">Наименование характеристики</th>
+            <th colspan="2">Значение характеристики</th>
+          </tr>
+          <tr>
+            <th>Значение</th>
+            <th>Единица измерения характеристики</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="2"><div>Длина волны</div><div class="revert">(характеристика является обязательной для применения)</div></td>
+            <td>850</td>
+            <td rowspan="2">нм</td>
+          </tr>
+          <tr><td>1310</td></tr>
+          <tr>
+            <td><div>Наличие индикатора</div></td>
+            <td>Да</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    """
+
+    payload = registry._extract_detailed_characteristics_from_ktru_description_table(
+        BeautifulSoup(html, "html.parser")
+    )
+
+    assert payload == {
+        "Длина волны": {"values": ["850", "1310"], "required": True, "unit": "нм"},
+        "Наличие индикатора": {"values": ["Да"], "required": None, "unit": None},
+    }
+
+
+def test_get_ktru_characteristics_detailed_fallback_preserves_unknown_required(
+    registry: ProcurementReferenceRegistry,
+    monkeypatch,
+) -> None:
+    html = """
+    <table>
+      <tr>
+        <th>Наименование характеристики</th>
+        <th>Значение характеристики</th>
+        <th>Единица измерения характеристики</th>
+      </tr>
+      <tr><td>Цвет</td><td>Белый</td><td></td></tr>
+      <tr><td>Длина</td><td>10</td><td>см</td></tr>
+    </table>
+    """
+    monkeypatch.setattr(registry, "_fetch_html", lambda url: html)
+
+    payload = registry.get_ktru_characteristics_detailed("01.11.32.000-00000002")
+
+    assert payload == {
+        "Цвет": {"values": ["Белый"], "required": None, "unit": None},
+        "Длина": {"values": ["10"], "required": None, "unit": "см"},
+    }
+    assert registry.get_ktru_characteristics("01.11.32.000-00000002") == {
+        "Цвет": ["Белый"],
+        "Длина": ["10"],
     }

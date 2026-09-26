@@ -1264,7 +1264,10 @@ def _field_lines(details: dict[str, object], keys: list[str]) -> list[str]:
 def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
     details = result.details or {}
     rows = details.get("characteristic_rows")
-    if not isinstance(rows, list) or not rows:
+    rows = rows if isinstance(rows, list) else []
+    identity_rows = details.get("item_identity_rows")
+    identity_rows = identity_rows if isinstance(identity_rows, list) else []
+    if not rows and not identity_rows:
         return []
     lines = [f"- <b>{_human_text(result.title)}</b> - {STATUS_LABELS[result.status]}. {_human_text(result.report_text)}"]
     summary_lines = details.get("summary_lines")
@@ -1272,60 +1275,77 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
         for item in summary_lines:
             if item:
                 lines.append(f"  - {_human_text(str(item))}")
-    identity_rows = details.get("item_identity_rows")
-    if isinstance(identity_rows, list):
-        for row in identity_rows:
-            if not isinstance(row, dict) or row.get("status") in {"passed", "not_checked"}:
-                continue
-            item_name = row.get("item_name") or "позиция"
-            code = row.get("ktru_code") or "КТРУ не найден"
-            if row.get("name_status") in {"failed", "manual_review"}:
-                lines.append(
-                    f"  - <b>{_human_text(str(item_name))}</b>; КТРУ {_human_text(str(code))}: "
-                    f"наименование в КТРУ — {_human_text(str(row.get('ktru_name') or 'не найдено'))}."
-                )
-            if row.get("unit_status") in {"failed", "manual_review"}:
-                lines.append(
-                    f"  - <b>{_human_text(str(item_name))}</b>; единица товара: "
-                    f"ООЗ — {_human_text(str(row.get('ooz_unit') or 'не указана'))}; "
-                    f"КТРУ — {_human_text(str(row.get('ktru_unit') or 'не найдена'))}."
-                )
-    lines.append("")
+    for row in identity_rows:
+        if not isinstance(row, dict):
+            continue
+        item_name = row.get("item_name") or "позиция"
+        code = row.get("ktru_code") or "КТРУ не найден"
+        name_status = _render_ktru_status(row.get("name_status"))
+        unit_status = _render_ktru_status(row.get("unit_status"))
+        lines.extend([
+            f"  - <b>{_human_text(str(item_name))}</b>; КТРУ {_human_text(str(code))}.",
+            f"    Наименование: ООЗ — {_human_text(str(item_name))}; "
+            f"КТРУ — {_human_text(str(row.get('ktru_name') or 'не найдено'))}; "
+            f"статус — {name_status}.",
+            f"    Единица товара: ООЗ — {_human_text(str(row.get('ooz_unit') or 'не указана'))}; "
+            f"КТРУ — {_human_text(str(row.get('ktru_unit') or 'не найдена'))}; "
+            f"статус — {unit_status}.",
+        ])
+    if identity_rows and rows:
+        lines.append("")
     for row in rows:
         if not isinstance(row, dict):
             continue
-        status = STATUS_LABELS.get(str(row.get("status")), str(row.get("status") or ""))
+        status = _render_ktru_status(row.get("status"))
         ktru_code = row.get("ktru_code") or "КТРУ не найден"
         item_name = row.get("item_name") or "позиция"
         char_name = row.get("characteristic_name") or "характеристика"
         ooz_value = row.get("ooz_value") or "не найдено"
         ooz_unit = row.get("ooz_unit") or "не указана"
         legal_unit = row.get("ktru_unit") or "не указана"
+        allowed_values = row.get("ktru_allowed_values")
+        if isinstance(allowed_values, list):
+            allowed_values_text = ", ".join(
+                _human_text(str(value)) for value in allowed_values if value not in (None, "")
+            ) or "не указаны"
+        else:
+            allowed_values_text = _human_text(str(allowed_values or "не указаны"))
         message = row.get("message") or ""
         lines.append(
             f"  - <b>{_human_text(str(item_name))}</b>; КТРУ {_human_text(str(ktru_code))}; "
-            f"характеристика: {_human_text(str(char_name))} — <b>{status}</b>."
+            f"характеристика: {_human_text(str(char_name))} — {status}."
         )
+        lines.extend([
+            f"    Значение в ООЗ: {_human_text(str(ooz_value))}.",
+            f"    Значения, допустимые по КТРУ: {allowed_values_text}.",
+            f"    Единицы измерения: ООЗ — {_human_text(str(ooz_unit))}; "
+            f"КТРУ — {_human_text(str(legal_unit))}.",
+        ])
         if str(row.get("status") or "") == "passed":
+            lines.append("    Значение допустимо в КТРУ.")
+        if message and message != "ОК":
+            lines.append(f"    {_human_text(str(message))}.")
+        similar_name = row.get("similar_ooz_characteristic")
+        if similar_name:
             lines.append(
-                f"    В ООЗ: {_human_text(str(ooz_value))}; единица: "
-                f"{_human_text(str(ooz_unit))}. Значение допустимо в КТРУ."
+                "    Возможно, в ООЗ допущена ошибка в наименовании: "
+                f"«{_human_text(str(similar_name))}»."
             )
-        else:
-            if message and message != "ОК":
-                lines.append(f"    {_human_text(str(message))}.")
-            similar_name = row.get("similar_ooz_characteristic")
-            if similar_name:
-                lines.append(
-                    "    Возможно, в ООЗ допущена ошибка в наименовании: "
-                    f"«{_human_text(str(similar_name))}»."
-                )
-            if ooz_value != "не найдено" or ooz_unit != "не указана" or legal_unit != "не указана":
-                lines.append(
-                    f"    В ООЗ: {_human_text(str(ooz_value))}; единица: "
-                    f"{_human_text(str(ooz_unit))}. В КТРУ: {_human_text(str(legal_unit))}."
-                )
     return lines
+
+
+def _render_ktru_status(value: object) -> str:
+    status = str(value or "manual_review")
+    labels = {**STATUS_LABELS, "not_checked": "НЕ ПРОВЕРЕНО"}
+    tag = {
+        "passed": "ok",
+        "failed": "error",
+        "warning": "warn",
+        "manual_review": "warn",
+        "not_checked": "warn",
+    }.get(status)
+    label = labels.get(status, "ТРЕБУЕТ ПРОВЕРКИ")
+    return f"<{tag}>{label}</{tag}>" if tag else f"<warn>{label}</warn>"
 
 
 def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
@@ -1368,7 +1388,7 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         )
         current = grouped.setdefault(key, {
             "count": 0,
-            "sample_characteristic": None,
+            "characteristics": [],
             "decision": assessment.get("decision") or "manual_review",
             "field_code": plan_regime.get("field_code"),
             "field_value": plan_regime.get("field_value"),
@@ -1384,10 +1404,9 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
         })
         if _is_reportable_additional_characteristic(assessment, row):
             current["count"] = int(current["count"]) + 1
-            if not current.get("sample_characteristic"):
-                current["sample_characteristic"] = _human_text(
-                    str(assessment.get("characteristic") or "")
-                ).strip()
+            characteristic = _human_text(str(assessment.get("characteristic") or "")).strip()
+            if characteristic:
+                current["characteristics"].append(characteristic)
         if decision_rank.get(str(assessment.get("decision")), 1) > decision_rank.get(str(current["decision"]), 1):
             current["decision"] = assessment.get("decision")
         for field_name, value in (("rule_reason", okpd_rule.get("reason") or assessment.get("reason")), ("quote", justification.get("quote"))):
@@ -1410,7 +1429,8 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
             )
         for (item_name, ktru_code, okpd2_code), item in grouped.items():
             count = int(item["count"]) or 1
-            sample = _human_text(str(item.get("sample_characteristic") or "")).strip()
+            characteristics = item.get("characteristics")
+            characteristics = characteristics if isinstance(characteristics, list) else []
             rule_reason = _human_text(str(item.get("rule_reason") or "")).strip()
             fallback_quote = ooz_state.get("quote") if len(grouped) == 1 else None
             quote = _human_text(str(item.get("quote") or fallback_quote or "")).strip()
@@ -1419,18 +1439,13 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
 
             lines.extend(["", f"<b>{_human_text(item_name)}</b>"])
             lines.append(f"  - КТРУ: <b>{_human_text(ktru_code)}</b>; ОКПД2: <b>{_human_text(okpd2_code)}</b>.")
-            if sample and count > 1:
-                remaining = count - 1
+            if characteristics:
                 lines.append(
-                    f"  - Дополнительные характеристики: {_human_text(sample)}; "
-                    f"ещё {remaining} {_characteristic_word(remaining)}."
+                    "  - Дополнительные характеристики: "
+                    f"{'; '.join(_human_text(str(value)) for value in characteristics)}."
                 )
-            elif sample:
-                lines.append(f"  - Дополнительная характеристика: {_human_text(sample)}.")
             else:
                 lines.append(f"  - Дополнительных характеристик: <b>{count}</b>.")
-            if count > 5:
-                lines.append("  - Полный перечень характеристик сохранён в <b>checks.json</b>.")
             if rule_reason:
                 lines.append(f"  - ПП №1875: {_human_text(rule_reason)}")
             if item.get("field_value"):

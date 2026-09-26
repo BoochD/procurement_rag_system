@@ -234,7 +234,7 @@ def test_report_compacts_commercial_offer_fields_and_additional_ktru_values():
     assert "Распознаны товарные знаки: DEPO, YADRO." in text
     assert "| Сервер | 26.20.14.000-00000189<br>26.20.14.000 | Прил. №2, поз. 198: специальное ограничение; 17.2 подтверждён | 2 | ПРЕДУПРЕЖДЕНИЕ |" in text
     assert "<b>Сервер</b>" in text
-    assert "Дополнительные характеристики: RAID 0; ещё 1 характеристика." in text
+    assert "Дополнительные характеристики: RAID 0; RAID 1." in text
     assert "Обоснование из ООЗ: Совместимость" in text
 
 

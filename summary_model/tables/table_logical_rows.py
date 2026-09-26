@@ -9,6 +9,7 @@ from summary_model.tables.utils import (
     OKPD2_RE,
     clean_text,
     normalize_key,
+    normalize_ktru_code,
 )
 
 
@@ -284,7 +285,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
             row_number,
             dense_name,
             okpd_match.group(0) if okpd_match else None,
-            ktru_match.group(0) if ktru_match else None,
+            normalize_ktru_code(ktru_match.group(0)) if ktru_match else None,
             quantity_value,
         )
         has_item_identity = bool(item_key and (dense_name or okpd_match or ktru_match))
@@ -306,7 +307,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                             "row_number": current_parent_number,
                             "name": dense_name,
                             "okpd2_code": okpd_match.group(0) if okpd_match else None,
-                            "ktru_code": ktru_match.group(0) if ktru_match else None,
+                            "ktru_code": normalize_ktru_code(ktru_match.group(0)) if ktru_match else None,
                             "trademark": _value(row, trademark_index),
                             "trademark_justification_text": _value(
                                 row, trademark_justification_index

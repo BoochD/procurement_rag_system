@@ -4,8 +4,12 @@ import re
 from decimal import Decimal, InvalidOperation
 
 
-OKPD2_RE = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?!-\d{8})(?![\d.])")
-KTRU_RE = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8}(?!\d)")
+OKPD2_RE = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?![ \t\xa0]*-[ \t\xa0]*\d{8})(?![\d.])")
+KTRU_RE = re.compile(r"(?<![\d.])\d{2}[ \t\xa0]*\.[ \t\xa0]*\d{2}[ \t\xa0]*\.[ \t\xa0]*\d{2}[ \t\xa0]*\.[ \t\xa0]*\d{3}[ \t\xa0]*-[ \t\xa0]*\d{8}(?!\d)")
+
+
+def normalize_ktru_code(value: str) -> str:
+    return re.sub(r"[ \t\xa0]+", "", value)
 
 NEGATIVE_VALUES = {
     "-",
@@ -91,7 +95,10 @@ def extract_money(value: str | None) -> tuple[str | None, Decimal | None]:
 
 
 def unique_codes(pattern: re.Pattern[str], text: str | None) -> list[str]:
-    return list(dict.fromkeys(pattern.findall(text or "")))
+    values = pattern.findall(text or "")
+    if pattern is KTRU_RE:
+        values = [normalize_ktru_code(value) for value in values]
+    return list(dict.fromkeys(values))
 
 
 def normalize_document_title(text: str | None) -> str | None:

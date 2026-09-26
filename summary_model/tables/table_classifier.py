@@ -83,6 +83,53 @@ def _looks_like_embedded_ooz_items(text: str) -> bool:
     return has_codes and has_item_structure and not has_price_structure
 
 
+def _looks_like_reference_location_equipment_table(table: TableIR, text: str) -> bool:
+    """Keep monitoring-location forms out of OOZ item extraction.
+
+    These appendices describe an already installed device and its connection
+    point.  They are not a purchase specification, even though ``name`` and
+    ``camera`` appear in their headers.  Require several location/connection
+    signals and no procurement-line columns so real camera supply tables keep
+    their normal classification.
+    """
+    if any(marker in text for marker in ("цена", "стоимость", "окпд", "ктру")):
+        return False
+    header_text = " ".join(table.header_labels()).casefold()
+    location_signals = (
+        "адрес размещения",
+        "координат",
+        "широта",
+        "долгота",
+        "город",
+        "адрес",
+        "азимут",
+        "rtsp",
+        "ip адрес",
+        "место размещения",
+        "тип соединения",
+        "пропускная способность",
+    )
+    signal_count = sum(marker in header_text for marker in location_signals)
+    is_monitoring_form = _has_any(
+        text,
+        (
+            "средства видеонаблюдения",
+            "средств видеонаблюдения",
+            "видеокамер",
+            "видеопоток",
+            "камера видеонаблюдения",
+        ),
+    )
+    title_text = str(table.title or "").casefold()
+    has_reference_context = any(
+        marker in title_text
+        for marker in ("адресный план", "перечень адресов", "схем расположения")
+    )
+    if not has_reference_context and _has_any(header_text, ("количество", "кол-во", "кол-в")):
+        return False
+    return is_monitoring_form and signal_count >= 3 and (has_reference_context or signal_count >= 4)
+
+
 def _looks_like_staged_nmck(text: str) -> bool:
     has_parent_stage_rows = bool(re.search(r"(?:^|\s)\d+\.\s+[^|.]{0,160}этап", text))
     has_direct_stage_rows = len(re.findall(r"\(\s*\d+\s*этап\b", text)) >= 2
@@ -159,6 +206,9 @@ def classify_parsed_table(
         return "nmck_staged_calculation_table"
     if document_type == DocumentType.ONMCK and _looks_like_nmck_matrix(table):
         return "nmck_calculation_table"
+
+    if document_type in {DocumentType.OOZ, DocumentType.CONTRACT} and _looks_like_reference_location_equipment_table(table, text):
+        return "ignored_table"
 
     if document_type == DocumentType.OOZ and table.kind in {"characteristics", "item_list"}:
         return "ooz_items_table"

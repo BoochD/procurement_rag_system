@@ -50,6 +50,7 @@ from summary_model.tables.utils import (
     is_negative_value,
     normalize_document_title,
     normalize_key,
+    normalize_ktru_code,
     parse_decimal,
     unique_codes,
 )
@@ -884,7 +885,7 @@ def _code_references_from_text(
     result: list[CodeReference] = []
     seen: set[str] = set()
     for match in pattern.finditer(raw_text):
-        code = match.group(1)
+        code = normalize_ktru_code(match.group(1))
         if code in seen:
             continue
         seen.add(code)
@@ -1910,6 +1911,10 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
             name = clean_text(payload.get("name"))
             if _is_non_item_ooz_row(name, payload):
                 continue
+            warnings = list(payload.get("parser_warnings", []))
+            for match in KTRU_RE.finditer(payload.get("raw_text") or ""):
+                if match.group(0) != normalize_ktru_code(match.group(0)):
+                    warnings.append(f"Код КТРУ содержит лишние пробелы: {match.group(0)}")
             characteristics = [
                 PurchaseItemCharacteristic(
                     name=characteristic.get("name"),
@@ -1934,7 +1939,7 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
                     quantity_raw=payload.get("quantity_raw"),
                     characteristics=characteristics,
                     evidence=f"{table.table_id}:r{payload.get('row_index')}",
-                    parser_warnings=payload.get("parser_warnings", []),
+                    parser_warnings=list(dict.fromkeys(warnings)),
                 )
             )
     return result
@@ -1968,7 +1973,9 @@ def _aggregate_quantity_from_ooz_tables(tables: list[ParsedTable]) -> str | None
         if len(values) != 1:
             continue
         quantity = values.pop()
-        quantity_text = format(quantity, "f").rstrip("0").rstrip(".")
+        quantity_text = format(quantity, "f")
+        if "." in quantity_text:
+            quantity_text = quantity_text.rstrip("0").rstrip(".")
         candidates.append(f"{quantity_text} часов")
     unique = list(dict.fromkeys(candidates))
     return unique[0] if len(unique) == 1 else None

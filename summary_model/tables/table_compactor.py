@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from summary_model.tables.models import LogicalTableRow, ParsedTable
-from summary_model.tables.utils import KTRU_RE, OKPD2_RE, clean_text, parse_decimal
+from summary_model.tables.utils import KTRU_RE, OKPD2_RE, clean_text, parse_decimal, unique_codes
 
 
 def build_compact_json(table_type: str, rows: list[LogicalTableRow]) -> dict[str, Any]:
@@ -139,7 +139,7 @@ def _items_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
             }
             code_text = row.raw_text
             payload["okpd2_codes"] = list(dict.fromkeys(OKPD2_RE.findall(code_text)))
-            payload["ktru_codes"] = list(dict.fromkeys(KTRU_RE.findall(code_text)))
+            payload["ktru_codes"] = unique_codes(KTRU_RE, code_text)
             items.append(payload)
             by_parent[row.row_index] = payload
         elif row.row_type == "characteristic":

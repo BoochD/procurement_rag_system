@@ -812,6 +812,8 @@ def test_aggregate_service_volume_table_is_extracted_without_creating_product_ro
     assert _aggregate_quantity_from_ooz_tables([table]) == "2208 часов"
     table.title = "Таблица №2. Объём выполняемых работ"
     assert _aggregate_quantity_from_ooz_tables([table]) == "2208 часов"
+    table.logical_rows[0].cells_by_col[2] = "3000"
+    assert _aggregate_quantity_from_ooz_tables([table]) == "3000 часов"
     table.title = "Перечень адресов предоставления видеопотоков"
     assert _aggregate_quantity_from_ooz_tables([table]) is None
 

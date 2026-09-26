@@ -476,6 +476,31 @@ a compact diagnostic retained in parser warnings.
 
 ## Known Verification Gaps
 
+### September 24 pack regression boundaries
+
+- KTRU extraction accepts horizontal whitespace around separators, canonicalizes
+  only that whitespace, and keeps the raw source spelling. The VLM source-code
+  whitelist uses the same normalization; changed digits remain rejected.
+- KTRU characteristic metadata retains `required=True/False/None` and the
+  characteristic unit independently of the product unit. Unknown obligation or
+  an unreadable numeric constraint produces manual review, never a silent pass.
+- Numeric characteristic checks preserve open/closed interval bounds and use
+  decimal arithmetic. OOZ constraints must fit inside a recognized catalogue
+  interval; text values cannot pass merely because a number or substring matches.
+- OOZ VLM repair preserves reliable characteristic rows by source provenance,
+  including actual repeated source rows. Do not union model/parser lists without
+  matching source rows, and do not identify products by a shared KTRU code alone.
+- Reference location/connection appendices are excluded from purchased items
+  only with corroborating structure/context. Cameras, addresses, missing KTRU,
+  or a service OKPD2 alone must not suppress ordinary goods or stage checks.
+- Single-service subject/offer matching is gated by explicit aggregate OOZ
+  volume, service-only plan codes, one non-stage calculation row and no separate
+  purchased items. Stage and mixed layouts keep their existing routes. Supplier
+  linkage must have non-price evidence; wrong quantity/unit/price remains a
+  comparison finding, not an identity criterion.
+- KTRU report rows display individual statuses, source values, allowed values,
+  and units. Additional characteristic names are listed in the public report.
+
 - Production end-to-end behavior is exercised primarily through fixture-based `summary_model.full_pipeline_cli` runs; paid LLM, VLM, registry, and network layers still require isolated mocks or deliberate live runs.
 - The OKPD/KTRU plain-text fallbacks and OOZ characteristic name-matching fallback currently rely primarily on manual document-pack verification.
 - Live KTRU tests can skip on network errors, so a green local run does not prove that `zakupki.gov.ru` integration is available.

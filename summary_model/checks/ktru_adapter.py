@@ -13,6 +13,7 @@ from summary_model.checks.additional_characteristics import (
     result_status,
 )
 from summary_model.checks.models import CheckResult
+from summary_model.checks.characteristic_values import looks_numeric, numeric_interval, numeric_value_allowed
 from summary_model.checks.national_regime import resolve_plan_national_regime
 from summary_model.checks.normalization import normalize_code, normalize_text
 from summary_model.extraction_models import ProcurementPackageExtraction, PurchaseItem
@@ -114,6 +115,20 @@ def run_ktru_characteristic_checks(
             continue
 
         legal_lookup, required_names = _build_legal_lookup(legal_characteristics)
+        unknown_required = [
+            name for name, payload in legal_characteristics.items()
+            if payload.get("required") is not True and payload.get("required") is not False
+        ]
+        if unknown_required or not legal_characteristics:
+            characteristic_rows.append({
+                "ktru_code": ktru_code, "item_name": item.name,
+                "characteristic_name": "Полнота данных карточки КТРУ",
+                "status": "manual_review",
+                "message": (
+                    "не удалось определить обязательность характеристик: " + ", ".join(unknown_required)
+                    if unknown_required else "перечень характеристик карточки КТРУ не получен"
+                ),
+            })
         present_required_names: set[str] = set()
         common_info = common_cache.get(ktru_code)
         item_identity_rows.append(_item_identity_row(item, ktru_code, common_info))
@@ -200,11 +215,26 @@ def run_ktru_characteristic_checks(
             legal_key, legal_name, legal_values, _, legal_unit = legal_item
             present_required_names.add(legal_key)
             values = _split_value(characteristic.value)
-            bad_values = [value for value in values if not _is_value_allowed(value, legal_values)]
+            value_results = [(value, _is_value_allowed(value, legal_values)) for value in values]
+            bad_values = [value for value, allowed in value_results if allowed is False]
+            unresolved_values = not values or any(allowed is None for _, allowed in value_results)
             unit_status = _unit_status(characteristic.unit, legal_unit)
             row_status = "passed"
+            reasons = []
+            if unresolved_values:
+                row_status = "manual_review"
+                reasons.append("значение или условие КТРУ не удалось однозначно сопоставить")
+            if characteristic.unit and not legal_unit:
+                row_status = "manual_review"
+                reasons.append("единица характеристики в карточке КТРУ не получена")
+            elif legal_unit and not characteristic.unit:
+                row_status = "manual_review"
+                reasons.append("единица характеристики в ООЗ не указана")
             if bad_values or unit_status == "failed":
                 row_status = "failed"
+            comparison_message = _characteristic_row_message(bad_values, characteristic.unit, legal_unit)
+            if comparison_message != "ОК":
+                reasons.insert(0, comparison_message)
             characteristic_rows.append(
                 {
                     "ktru_code": ktru_code,
@@ -216,7 +246,7 @@ def run_ktru_characteristic_checks(
                     "ktru_unit": legal_unit,
                     "required": legal_key in required_names,
                     "status": row_status,
-                    "message": _characteristic_row_message(bad_values, characteristic.unit, legal_unit),
+                    "message": "; ".join(reasons) or "ОК",
                 }
             )
             if bad_values:
@@ -250,7 +280,10 @@ def run_ktru_characteristic_checks(
     if unavailable:
         characteristic_status = "manual_review"
         characteristic_message = "Часть карточек КТРУ недоступна, проверка характеристик неполная."
-    if invalid_values or missing_required or duplicate_characteristics:
+    if any(row["status"] == "manual_review" for row in characteristic_rows):
+        characteristic_status = "manual_review"
+        characteristic_message = "Часть характеристик не удалось проверить полностью; см. причины по позициям."
+    if any(row["status"] == "failed" for row in characteristic_rows):
         characteristic_status = "failed"
         characteristic_message = "Найдены ошибки в значениях или обязательных характеристиках КТРУ."
     identity_statuses = {row["status"] for row in item_identity_rows}
@@ -680,7 +713,7 @@ def _build_legal_lookup(
     required_names: dict[str, str] = {}
     for name, payload in legal_characteristics.items():
         values = list(payload.get("values") or [])
-        required = bool(payload.get("required"))
+        required = payload.get("required") is True
         unit = payload.get("unit") or payload.get("okei_unit") or payload.get("measure_unit")
         legal_key = _name_key(name)
         record = (legal_key, name, values, required, unit)
@@ -972,42 +1005,6 @@ def _pp1875_match_note(okpd_result: Any) -> str:
     )
 
 
-def _clean_char_value(val: str) -> str:
-    s = normalize_text(str(val or ""))
-    s = re.sub(r"^[\(\[\{\d\.\:\s]+", "", s)
-    s = re.sub(r"[\)\]\}\s]+$", "", s)
-    return s.strip().casefold()
-
-
-def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
-    normalized_value = _name_key(value)
-    visual_value = _visual_key(value)
-    clean_val = _clean_char_value(value)
-    value_number = _number(value)
-    doc_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(value)))
-
-    for allowed in allowed_values:
-        normalized_allowed = _name_key(allowed)
-        if not normalized_allowed:
-            continue
-        if normalized_value == normalized_allowed:
-            return True
-        if visual_value == _visual_key(allowed):
-            return True
-        if clean_val and clean_val in _clean_char_value(allowed):
-            return True
-        if doc_codes:
-            allowed_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(allowed)))
-            if doc_codes.intersection(allowed_codes):
-                return True
-        if _range_match(value, allowed):
-            return True
-        allowed_number = _number(allowed)
-        if value_number is not None and allowed_number is not None and value_number == allowed_number:
-            return True
-    return False
-
-
 def _okpd2_from_ktru(ktru_code: str | None) -> str | None:
     match = re.match(r"(\d{2}\.\d{2}\.\d{2}\.\d{3})-", str(ktru_code or ""))
     return match.group(1) if match else None
@@ -1027,6 +1024,8 @@ def _visual_key(value: Any) -> str:
 
 def _split_value(value: Any) -> list[str]:
     text = _clean_text(value)
+    if numeric_interval(text) is not None:
+        return [text]
     return [part.strip() for part in re.split(r"\s*[;\n\r]+\s*", text) if part.strip()]
 
 
@@ -1053,70 +1052,40 @@ def _result_value(value: Any, key: str) -> Any:
     return getattr(value, key, None)
 
 
-def _number(value: Any) -> float | None:
-    text = normalize_text(str(value)).replace(",", ".")
-    text = re.sub(r"[^\d.\-]+", "", text)
-    if not text:
+def _is_value_allowed(value: str, allowed_values: list[str]) -> bool | None:
+    if not value or not allowed_values:
         return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _clean_char_value(val: str) -> str:
-    s = normalize_text(str(val or ""))
-    s = re.sub(r"^[\(\[\{\d\.\:\s]+", "", s)
-    s = re.sub(r"[\)\]\}\s]+$", "", s)
-    return s.strip().casefold()
-
-
-def _is_value_allowed(value: str, allowed_values: list[str]) -> bool:
-    normalized_value = _name_key(value)
-    visual_value = _visual_key(value)
-    clean_val = _clean_char_value(value)
-    value_number = _number(value)
-    doc_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(value)))
-
-    for allowed in allowed_values:
-        normalized_allowed = _name_key(allowed)
-        if not normalized_allowed:
-            continue
-        if normalized_value == normalized_allowed:
-            return True
-        if visual_value == _visual_key(allowed):
-            return True
-        if clean_val and clean_val in _clean_char_value(allowed):
-            return True
-        if doc_codes:
-            allowed_codes = set(re.findall(r"\b\d{2}\.\d{2}\b", str(allowed)))
-            if doc_codes.intersection(allowed_codes):
-                return True
-        if _range_match(value, allowed):
-            return True
-        allowed_number = _number(allowed)
-        if value_number is not None and allowed_number is not None and value_number == allowed_number:
-            return True
-    return False
+    if looks_numeric(value) or any(looks_numeric(allowed) for allowed in allowed_values):
+        return numeric_value_allowed(value, allowed_values)
+    return any(_visual_key(value) == _visual_key(allowed) for allowed in allowed_values)
 
 
 def _unit_status(ooz_unit: str | None, legal_unit: str | None) -> str:
     if not legal_unit or not ooz_unit:
         return "not_checked"
-    return "passed" if _unit_key(ooz_unit) == _unit_key(legal_unit) else "failed"
+    if _unit_key(ooz_unit) == _unit_key(legal_unit):
+        return "passed"
+    legal_aliases = {_unit_key(part) for part in legal_unit.split(";") if part.strip()}
+    return "passed" if _unit_key(ooz_unit) in legal_aliases else "failed"
 
 
 def _unit_key(value: str | None) -> str:
     normalized = _name_key(value)
-    aliases = (
-        (("пара",), "пара"),
-        (("комплект",), "комплект"),
-        (("шт", "штук"), "штука"),
-        (("усл ед", "условная единица"), "условная единица"),
-    )
-    for markers, canonical in aliases:
-        if any(marker in normalized for marker in markers):
-            return canonical
+    exact_aliases = {
+        "мм": "миллиметр", "см": "сантиметр", "м": "метр",
+        "л": "литр", "дм3": "литр", "дм³": "литр", "кубический дециметр": "литр",
+        "кг": "килограмм", "г": "грамм", "вт": "ватт", "квт": "киловатт",
+        "мгц": "мегагерц", "ггц": "гигагерц", "гц": "герц",
+        "шт": "штука", "штук": "штука",
+    }
+    if normalized in exact_aliases:
+        return exact_aliases[normalized]
+    if re.match(r"^пара(?:\s|$)", normalized):
+        return "пара"
+    if re.match(r"^комплект(?:\s|$)", normalized):
+        return "комплект"
+    if normalized in {"усл ед", "условная единица"}:
+        return "условная единица"
     return normalized
 
 
@@ -1190,24 +1159,7 @@ def _characteristic_row_message(
 
 
 def _range_match(value: str, allowed: str) -> bool:
-    value_number = _number(value)
-    if value_number is None:
-        return False
-    normalized = str(allowed or "").casefold().replace(",", ".").replace("≤", "<=").replace("≥", ">=")
-    matches = re.findall(r"(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)", normalized)
-    if not matches:
-        return False
-    for operator, raw_number in matches:
-        border = float(raw_number)
-        if operator == "<" and not value_number < border:
-            return False
-        if operator == "<=" and not value_number <= border:
-            return False
-        if operator == ">" and not value_number > border:
-            return False
-        if operator == ">=" and not value_number >= border:
-            return False
-    return True
+    return numeric_value_allowed(value, [allowed]) is True
 
 
 def _char_label(item: PurchaseItem, name: str | None, value: str | None) -> str:

@@ -595,6 +595,10 @@ def _check_commercial_offers_against_onmck(
             offer.items,
             source_id=source_id,
         )
+        if _single_service_offer_mapping_allowed(package, layout, onmck, source_id, offer):
+            matches.setdefault(0, 0)
+            if matches.get(0) == 0:
+                reasons[0] = "единственная строка услуги сопоставлена по источнику ОНМЦК"
         item_matches[source_id] = matches
         item_match_reasons[source_id] = reasons
     ooz_items = list(package.purchase_description.items if package.purchase_description else [])
@@ -719,12 +723,7 @@ def _check_commercial_offers_against_onmck(
                     criterion_failures=criterion_failures,
                     criterion_manual=criterion_manual,
                     skip_ooz_item_match=(
-                        len(onmck.items) == 1
-                        and bool(
-                            getattr(package.purchase_description, "aggregate_quantity_text", None)
-                            if package.purchase_description
-                            else None
-                        )
+                        _confirmed_single_service_package(package, layout)[0]
                         and _match_reference_purchase_item(nmck_item, ooz_items) is None
                     ),
                 )
@@ -1992,6 +1991,33 @@ def _check_onmck_items_against_ooz(
         if layout.role_for(index) in {"product", "stage_item"}
     ]
     ooz_items = list(getattr(ooz, "items", []) or []) if ooz else []
+    is_single_service, _service_reason = _confirmed_single_service_package(package, layout)
+    if is_single_service:
+        nmck_item = all_items[0]
+        ooz_subject = getattr(ooz, "purchase_subject", None)
+        matched = _names_close(nmck_item.name, ooz_subject)
+        return [
+            _result(
+                "strict.onmck.items",
+                "Наименования позиций ОНМЦК и ООЗ",
+                "passed" if matched else "failed",
+                "strict",
+                (
+                    "Единственная строка услуги ОНМЦК соответствует предмету закупки ООЗ."
+                    if matched
+                    else "Единственная строка услуги ОНМЦК не соответствует предмету закупки ООЗ."
+                ),
+                documents=["nmck_justification", "purchase_description"],
+                fields=["nmck_justification.items[].name", "purchase_description.purchase_subject"],
+                details={
+                    "summary_lines": [
+                        f"ОНМЦК: {_item_label(nmck_item)}",
+                        f"ООЗ: {ooz_subject or 'не найдено'}",
+                    ],
+                    "service_subject_route": True,
+                },
+            )
+        ]
     if not nmck_items and layout.mode == "stages":
         return [
             _result(
@@ -2055,6 +2081,148 @@ def _check_onmck_items_against_ooz(
 
 def _same_item_identity(left: NmckItem, right: PurchaseItem) -> bool:
     return _names_close(left.name, right.name)
+
+
+def _confirmed_single_service_package(
+    package: ProcurementPackageExtraction,
+    layout: NmckRowLayout,
+) -> tuple[bool, str]:
+    """Gate the service-only exception; all normal product/stage routes remain intact."""
+    schedule = package.schedule_application
+    onmck = package.nmck_justification
+    ooz = package.purchase_description
+    if schedule is None or onmck is None or ooz is None:
+        return False, "не хватает ПГ, ОНМЦК или ООЗ"
+    if layout.mode != "products" or len(onmck.items) != 1:
+        return False, "ОНМЦК не содержит единственную неэтапную строку"
+    if (
+        getattr(schedule, "stages", None)
+        or getattr(schedule, "stage_deliverables", None)
+        or getattr(onmck, "stages", None)
+        or getattr(ooz, "stages", None)
+    ):
+        return False, "в пакете есть этапы"
+    is_service, service_reason = _plan_has_service_volume(schedule)
+    if not is_service:
+        return False, service_reason
+    ooz_items = list(getattr(ooz, "items", []) or [])
+    if ooz_items and not _ooz_items_support_single_service(ooz_items, ooz.purchase_subject):
+        return False, "в ООЗ есть самостоятельные позиции, не подтверждающие единственную услугу"
+    if _aggregate_quantity_value(getattr(ooz, "aggregate_quantity_text", None)) is None:
+        return False, "в ООЗ нет явного общего объёма услуги"
+    if not getattr(ooz, "purchase_subject", None):
+        return False, "в ООЗ не извлечён предмет закупки"
+    return True, ""
+
+
+def _ooz_items_support_single_service(items: list[PurchaseItem], subject: str | None) -> bool:
+    if len(items) != 1 or not _names_close(items[0].name, subject):
+        return False
+    item = items[0]
+    if item.ktru_code:
+        return False
+    return not item.okpd2_code or official_okpd2_is_service(item.okpd2_code) is True
+
+
+def _single_service_offer_mapping_allowed(
+    package: ProcurementPackageExtraction,
+    layout: NmckRowLayout,
+    onmck: Any,
+    source_id: str,
+    offer: Any,
+) -> bool:
+    """Map one service row only after a non-price source linkage is proven."""
+    is_service, _reason = _confirmed_single_service_package(package, layout)
+    if not is_service or len(getattr(offer, "items", []) or []) != 1:
+        return False
+    supplier_prices = [
+        price
+        for price in onmck.items[0].supplier_prices
+        if str(price.source_id) == str(source_id)
+    ]
+    if len(supplier_prices) != 1:
+        return False
+    source = next(
+        (candidate for candidate in onmck.price_sources if str(candidate.source_id) == str(source_id)),
+        None,
+    )
+    if source is None:
+        return False
+    subject_supported = _service_subject_supports_offer(
+        package.purchase_description.purchase_subject,
+        getattr(offer, "purchase_subject", None),
+    )
+    if not subject_supported:
+        return False
+    exact_requisites = bool(
+        getattr(source, "outgoing_letter_number", None)
+        and getattr(source, "outgoing_letter_date", None)
+        and _same_requisite_number(source.outgoing_letter_number, getattr(offer, "outgoing_number", None))
+        and source.outgoing_letter_date
+        == (getattr(offer, "outgoing_date", None) or getattr(offer, "offer_date", None))
+        and sum(
+            bool(
+                candidate.outgoing_letter_number
+                and candidate.outgoing_letter_date
+                and _same_requisite_number(candidate.outgoing_letter_number, source.outgoing_letter_number)
+                and candidate.outgoing_letter_date == source.outgoing_letter_date
+            )
+            for candidate in onmck.price_sources
+        )
+        == 1
+    )
+    named_supplier = _has_unique_exact_supplier_identity(
+        source,
+        onmck.price_sources,
+        getattr(offer, "supplier_name", None),
+    )
+    return exact_requisites or named_supplier
+
+
+def _service_subject_supports_offer(ooz_subject: str | None, offer_subject: str | None) -> bool:
+    """A generic ``услуга`` is not evidence that two service subjects coincide."""
+    generic = {"оказание", "предоставление", "предоставлению", "услуг", "услуги", "услуга", "работ", "работы", "выполнение"}
+    ooz_tokens = _meaningful_name_tokens(ooz_subject) - generic
+    offer_tokens = _meaningful_name_tokens(offer_subject) - generic
+    return bool(
+        ooz_tokens
+        and offer_tokens
+        and ooz_tokens.intersection(offer_tokens)
+        and _offer_names_support(ooz_subject, offer_subject)
+    )
+
+
+def _has_unique_exact_supplier_identity(
+    source: PriceSource,
+    sources: list[PriceSource],
+    offer_supplier_name: str | None,
+) -> bool:
+    source_identity = _supplier_identity(source.supplier_name_raw)
+    offer_identity = _supplier_identity(offer_supplier_name)
+    if not source_identity or source_identity != offer_identity:
+        return False
+    return sum(
+        _supplier_identity(candidate.supplier_name_raw) == source_identity
+        for candidate in sources
+    ) == 1
+
+
+def _supplier_identity(value: str | None) -> str:
+    legal_form_tokens = {
+        "ооо",
+        "ао",
+        "пао",
+        "зао",
+        "ип",
+        "гуп",
+        "муп",
+        "фгуп",
+    }
+    return " ".join(
+        token
+        for token in normalize_text(value).split()
+        if token not in legal_form_tokens
+    )
 
 
 def _check_onmck_supplier_prices(package: ProcurementPackageExtraction) -> list[CheckResult]:

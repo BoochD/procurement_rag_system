@@ -745,6 +745,122 @@ class ProcurementReferenceRegistry:
             return True
         return None
 
+    def _expand_table_rows(self, table: Any) -> list[list[Any]]:
+        """Return table rows with HTML rowspan cells repeated in their logical columns."""
+        rows: list[list[Any]] = []
+        active_spans: dict[int, tuple[Any, int]] = {}
+
+        for row in table.select("tr"):
+            cells = row.find_all(["th", "td"], recursive=False)
+            if not cells:
+                continue
+
+            logical: list[Any] = []
+            column = 0
+
+            def fill_active() -> None:
+                nonlocal column
+                while column in active_spans:
+                    cell, remaining = active_spans[column]
+                    logical.append(cell)
+                    if remaining <= 1:
+                        del active_spans[column]
+                    else:
+                        active_spans[column] = (cell, remaining - 1)
+                    column += 1
+
+            fill_active()
+            for cell in cells:
+                fill_active()
+                colspan = max(int(cell.get("colspan", 1) or 1), 1)
+                rowspan = max(int(cell.get("rowspan", 1) or 1), 1)
+                for offset in range(colspan):
+                    logical.append(cell)
+                    if rowspan > 1:
+                        active_spans[column + offset] = (cell, rowspan - 1)
+                column += colspan
+
+            fill_active()
+            rows.append(logical)
+
+        return rows
+
+    def _ktru_description_column_indexes(
+        self,
+        rows: list[list[Any]],
+    ) -> tuple[int | None, int | None, int | None, int]:
+        header_count = 0
+        for row in rows:
+            if not any(getattr(cell, "name", None) == "th" for cell in row):
+                break
+            header_count += 1
+
+        if not header_count:
+            return None, None, None, 0
+
+        width = max(len(row) for row in rows[:header_count])
+        headers: list[str] = []
+        for index in range(width):
+            parts: list[str] = []
+            for row in rows[:header_count]:
+                if index >= len(row):
+                    continue
+                text = self.clean_text(row[index].get_text(" ", strip=True))
+                if text and text not in parts:
+                    parts.append(text)
+            headers.append(self.normalize_text(" ".join(parts)))
+
+        name_index = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if "наименование характеристики" in header
+                or header == "характеристика"
+            ),
+            None,
+        )
+        value_index = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if "значение характеристики" in header
+                or ("значени" in header and "единиц" not in header)
+            ),
+            None,
+        )
+        unit_index = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if "единиц" in header and "измер" in header
+            ),
+            None,
+        )
+        return name_index, value_index, unit_index, header_count
+
+    def _extract_characteristic_units_from_tables(
+        self,
+        soup: BeautifulSoup,
+    ) -> dict[str, str]:
+        units: dict[str, str] = {}
+        for table in soup.select("table"):
+            rows = self._expand_table_rows(table)
+            name_index, _, unit_index, header_count = (
+                self._ktru_description_column_indexes(rows)
+            )
+            if name_index is None or unit_index is None:
+                continue
+
+            for cells in rows[header_count:]:
+                if len(cells) <= max(name_index, unit_index):
+                    continue
+                name = self._extract_characteristic_name_cell_text(cells[name_index])
+                unit = self.clean_text(self._extract_cell_text(cells[unit_index]))
+                if name and unit and name not in units:
+                    units[name] = unit
+
+        return units
+
     def _extract_detailed_characteristics_from_ktru_description_table(
         self,
         soup: BeautifulSoup,
@@ -754,35 +870,46 @@ class ProcurementReferenceRegistry:
         if table is None:
             return result
 
-        current_name: Optional[str] = None
-        current_required: Optional[bool] = None
+        rows = self._expand_table_rows(table)
+        name_index, value_index, unit_index, header_count = (
+            self._ktru_description_column_indexes(rows)
+        )
 
-        for row in table.select("tbody tr"):
-            cells = row.find_all("td", recursive=False)
-            if not cells:
+        # Legacy cards have no <thead>; their first physical row contains name,
+        # value, and an empty trailing cell, while later rows omit the rowspan name.
+        if name_index is None or value_index is None:
+            name_index, value_index, unit_index, header_count = 0, 1, None, 0
+
+        for cells in rows[header_count:]:
+            if len(cells) <= max(name_index, value_index):
                 continue
 
-            if len(cells) >= 3:
-                current_name = self._extract_characteristic_name_cell_text(cells[0])
-                current_required = self._extract_characteristic_required_flag(cells[0])
-                value_cell = cells[1]
-            elif len(cells) == 2:
-                value_cell = cells[0]
-            else:
-                continue
-
+            name_cell = cells[name_index]
+            current_name = self._extract_characteristic_name_cell_text(name_cell)
             if not current_name:
                 continue
+            current_required = self._extract_characteristic_required_flag(name_cell)
+            value_cell = cells[value_index]
+            unit = (
+                self.clean_text(self._extract_cell_text(cells[unit_index]))
+                if unit_index is not None and len(cells) > unit_index
+                else None
+            ) or None
 
             item = result.setdefault(
                 current_name,
                 {
                     "values": [],
-                    "required": bool(current_required),
+                    "required": current_required,
+                    "unit": unit,
                 },
             )
             if current_required is True:
                 item["required"] = True
+            elif item["required"] is None and current_required is False:
+                item["required"] = False
+            if item.get("unit") is None and unit:
+                item["unit"] = unit
 
             raw_value = self._extract_cell_text(value_cell)
             values = item["values"]
@@ -891,10 +1018,12 @@ class ProcurementReferenceRegistry:
             return parsed
 
         fallback = self._extract_characteristics_from_tables(soup)
+        fallback_units = self._extract_characteristic_units_from_tables(soup)
         return {
             name: {
                 "values": list(values),
-                "required": False,
+                "required": None,
+                "unit": fallback_units.get(name),
             }
             for name, values in fallback.items()
         }

@@ -17,7 +17,13 @@ from summary_model.extraction.structured_recovery import (
 )
 from summary_model.tables.models import ParsedTable
 from summary_model.tables.table_compactor import build_compact_markdown
-from summary_model.tables.utils import KTRU_RE, OKPD2_RE, clean_text
+from summary_model.tables.utils import (
+    KTRU_RE,
+    OKPD2_RE,
+    clean_text,
+    normalize_ktru_code,
+    unique_codes,
+)
 from summary_model.vlm_lab.candidates import (
     justification_candidate_reasons,
     rank_table_candidates,
@@ -803,9 +809,10 @@ def _merge_role_result(
     if role != "additional_characteristics_justification":
         merged = role_result.model_copy(deep=True)
         if role == "purchase_description" and base.table_type == "ooz_items_table":
-            merged.compact_json["items"] = _preserve_coded_items(
+            merged.compact_json["items"] = _merge_purchase_description_items(
                 base.compact_json.get("items"),
                 merged.compact_json.get("items"),
+                base.logical_rows,
             )
         for key in (
             "additional_characteristics_justifications",
@@ -846,7 +853,7 @@ def _document_codes(ir: DocumentIR, pattern: re.Pattern[str]) -> set[str]:
             parts.extend(
                 value for row in block.table.matrix() for value in row if value
             )
-    return set(pattern.findall("\n".join(parts)))
+    return set(unique_codes(pattern, "\n".join(parts)))
 
 
 def _discard_unseen_item_codes(
@@ -869,6 +876,9 @@ def _discard_unseen_item_codes(
             continue
         for field_name, allowed_codes in allowed_by_field.items():
             value = clean_text(item.get(field_name))
+            if field_name == "ktru_code" and value:
+                value = normalize_ktru_code(value)
+                item[field_name] = value
             if value and allowed_codes and value not in allowed_codes:
                 item[field_name] = None
                 discarded.append(f"{field_name}={value}")
@@ -1040,18 +1050,202 @@ def _merge_nmck_supplier_prices(base_prices: object, repaired_prices: object) ->
     return base_rows
 
 
-def _preserve_coded_items(base_items: object, repaired_items: object) -> list[dict[str, Any]]:
-    """A VLM repair may enrich coded OOZ rows, but must not delete them."""
+def _merge_purchase_description_items(
+    base_items: object,
+    repaired_items: object,
+    logical_rows: object,
+) -> list[dict[str, Any]]:
+    """Keep source-identified OOZ characteristics when a VLM repairs a table."""
+    base_rows = [item for item in base_items or [] if isinstance(item, dict)]
     result = [dict(item) for item in repaired_items or [] if isinstance(item, dict)]
-    for item in base_items or []:
-        if not isinstance(item, dict):
+    matched: set[int] = set()
+    for base_item in base_rows:
+        match_index = _find_purchase_item_match(base_item, result, matched)
+        reliable_characteristics = _reliable_characteristics(
+            base_item,
+            logical_rows,
+        )
+        if match_index is not None:
+            matched.add(match_index)
+            characteristics, warnings = _merge_item_characteristics(
+                reliable_characteristics,
+                result[match_index].get("characteristics"),
+            )
+            result[match_index]["characteristics"] = characteristics
+            if warnings:
+                result[match_index]["parser_warnings"] = list(dict.fromkeys([
+                    *(result[match_index].get("parser_warnings") or []),
+                    *warnings,
+                ]))
             continue
-        if not clean_text(item.get("okpd2_code")) and not clean_text(item.get("ktru_code")):
-            continue
-        if any(_same_purchase_item(item, candidate) for candidate in result):
-            continue
-        result.append(dict(item))
+
+        # Retain deterministic coded items as before. A complete, traceable
+        # characteristic row also makes its parent worth retaining.
+        if (
+            clean_text(base_item.get("okpd2_code"))
+            or clean_text(base_item.get("ktru_code"))
+            or reliable_characteristics
+        ):
+            result.append(dict(base_item))
     return result
+
+
+def _find_purchase_item_match(
+    base_item: dict[str, Any],
+    repaired_items: list[dict[str, Any]],
+    matched: set[int],
+) -> int | None:
+    """Match product rows by provenance before considering their visible identity."""
+    for field in ("row_index", "row_number"):
+        value = base_item.get(field)
+        if not _has_value(value):
+            continue
+        candidates = [
+            index
+            for index, item in enumerate(repaired_items)
+            if index not in matched and item.get(field) == value
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+
+    candidates = [
+        index
+        for index, item in enumerate(repaired_items)
+        if index not in matched and _same_purchase_item(base_item, item)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _reliable_characteristics(
+    item: dict[str, Any],
+    logical_rows: object,
+) -> list[dict[str, Any]]:
+    rows_by_index = {
+        row.row_index: row
+        for row in logical_rows or []
+        if getattr(row, "row_type", None) == "characteristic"
+    }
+    item_row_index = item.get("row_index")
+    result = []
+    for characteristic in item.get("characteristics") or []:
+        if not isinstance(characteristic, dict):
+            continue
+        row_index = characteristic.get("row_index")
+        if not isinstance(row_index, int) or isinstance(row_index, bool):
+            continue
+        if characteristic.get("warnings"):
+            continue
+        source_row = rows_by_index.get(row_index)
+        if logical_rows is not None and source_row is None:
+            continue
+        if source_row is not None:
+            if source_row.confidence < 0.75 or source_row.warnings:
+                continue
+            if (
+                item_row_index is not None
+                and source_row.parent_row_index is not None
+                and source_row.parent_row_index != item_row_index
+            ):
+                continue
+        if not _has_value(characteristic.get("name")) and not _has_value(characteristic.get("value")):
+            continue
+        result.append(dict(characteristic))
+    return result
+
+
+def _merge_item_characteristics(
+    base_characteristics: list[dict[str, Any]],
+    repaired_characteristics: object,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fill deterministic rows from VLM output without duplicating a source row."""
+    result: list[dict[str, Any]] = []
+    by_row_index: dict[int, int] = {}
+    unindexed: set[int] = set()
+    for characteristic in repaired_characteristics or []:
+        if not isinstance(characteristic, dict):
+            continue
+        candidate = dict(characteristic)
+        row_index = candidate.get("row_index")
+        if isinstance(row_index, int) and not isinstance(row_index, bool):
+            existing = by_row_index.get(row_index)
+            if existing is not None:
+                result[existing] = _fill_missing_fields(result[existing], candidate)
+                continue
+            by_row_index[row_index] = len(result)
+        else:
+            unindexed.add(len(result))
+        result.append(candidate)
+
+    for base_characteristic in base_characteristics:
+        row_index = base_characteristic["row_index"]
+        existing = by_row_index.get(row_index)
+        if existing is not None:
+            result[existing] = _fill_missing_fields(base_characteristic, result[existing])
+            continue
+        unindexed_match = _find_unindexed_characteristic_match(
+            base_characteristic,
+            result,
+            unindexed,
+        )
+        if unindexed_match is not None:
+            unindexed.remove(unindexed_match)
+            result[unindexed_match] = _fill_missing_fields(
+                base_characteristic,
+                result[unindexed_match],
+            )
+            by_row_index[row_index] = unindexed_match
+            continue
+        by_row_index[row_index] = len(result)
+        result.append(dict(base_characteristic))
+
+    warnings = []
+    if unindexed and base_characteristics:
+        warnings.append(
+            "VLM characteristic without row_index retained because it does not "
+            "exactly match a deterministic source row."
+        )
+    return result, warnings
+
+
+def _find_unindexed_characteristic_match(
+    base_characteristic: dict[str, Any],
+    repaired_characteristics: list[dict[str, Any]],
+    unindexed: set[int],
+) -> int | None:
+    for index in sorted(unindexed):
+        if _same_characteristic_identity(base_characteristic, repaired_characteristics[index]):
+            return index
+    return None
+
+
+def _same_characteristic_identity(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    fields = ("name", "value")
+    if not all(_has_value(left.get(field)) and _has_value(right.get(field)) for field in fields):
+        return False
+    return all(
+        clean_text(str(left.get(field) or "")).casefold()
+        == clean_text(str(right.get(field) or "")).casefold()
+        for field in ("name", "value", "unit")
+    )
+
+
+def _fill_missing_fields(
+    preferred: dict[str, Any],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(preferred)
+    for key, value in fallback.items():
+        if not _has_value(result.get(key)) and _has_value(value):
+            result[key] = value
+    return result
+
+
+def _preserve_coded_items(base_items: object, repaired_items: object) -> list[dict[str, Any]]:
+    """Backward-compatible helper for callers without logical row provenance."""
+    return _merge_purchase_description_items(base_items, repaired_items, [])
 
 
 def _same_purchase_item(left: dict[str, Any], right: dict[str, Any]) -> bool:
