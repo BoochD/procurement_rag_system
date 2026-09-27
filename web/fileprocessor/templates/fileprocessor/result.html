@@ -229,6 +229,11 @@
                         <div class="mb-4">
                             <h5 class="fw-bold mb-3 text-secondary">Итоговый отчёт:</h5>
                             {% if ai_response %}
+                            <button id="toggle-report-details" type="button" class="btn btn-outline-secondary mb-3"
+                                    aria-controls="formatted-report report-summary" aria-expanded="true" hidden>
+                                Скрыть подробности
+                            </button>
+                            <div id="report-summary" class="report-body border rounded shadow-sm" hidden></div>
                             <div id="formatted-report" class="report-body border rounded shadow-sm">
                                 <!-- Rendered Markdown/HTML report content -->
                             </div>
@@ -268,7 +273,7 @@
     {% if status == 'completed' %}
     <script>
         document.addEventListener('DOMContentLoaded', function () {
-            const rawText = document.getElementById('raw-response').value;
+            const rawText = document.getElementById('raw-response')?.value;
             const container = document.getElementById('formatted-report');
 
             if (!rawText || !container) return;
@@ -337,6 +342,49 @@
             }
 
             container.innerHTML = htmlOut;
+
+            const summary = document.getElementById('report-summary');
+            const toggle = document.getElementById('toggle-report-details');
+            const verdictPattern = /^\s*[-–—;:]\s*(ТРЕБУЕТ ПРОВЕРКИ|НЕ ПРИМЕНИМО|НЕПРИМЕНИМО|ПРЕДУПРЕЖДЕНИЕ|ОШИБКА|ПРОПУЩЕНО|ОК)(?=[\s.!;:]|$)/;
+            for (const block of container.children) {
+                const text = block.textContent.trim();
+                if (/^H[1-4]$/.test(block.tagName) || /^\d+\)\s/.test(text)
+                    || text === 'Результат проверки документов' || /^Ошибок:\s*\d/.test(text)) {
+                    const heading = document.createElement('p');
+                    heading.className = 'fw-bold mt-3 mb-2';
+                    heading.textContent = text;
+                    summary.appendChild(heading);
+                    continue;
+                }
+                if (block.tagName === 'TABLE') continue;
+                const title = block.querySelector('b, strong');
+                if (!title) continue;
+                const titleOffset = text.indexOf(title.textContent);
+                const verdict = text.slice(titleOffset + title.textContent.length).match(verdictPattern);
+                if (!verdict) continue;
+                const row = document.createElement('p');
+                row.className = 'mb-2';
+                const label = document.createElement('strong');
+                label.textContent = title.textContent;
+                const status = document.createElement('strong');
+                status.textContent = verdict[1];
+                status.className = verdict[1] === 'ОК' ? 'text-success'
+                    : verdict[1] === 'ОШИБКА' ? 'text-danger'
+                    : ['ПРЕДУПРЕЖДЕНИЕ', 'ТРЕБУЕТ ПРОВЕРКИ'].includes(verdict[1]) ? 'text-warning-emphasis'
+                    : 'text-secondary';
+                row.append(label, document.createTextNode(' — '), status);
+                summary.appendChild(row);
+            }
+            if (summary.children.length) {
+                toggle.hidden = false;
+                toggle.addEventListener('click', function () {
+                    const showDetails = container.hidden;
+                    container.hidden = !showDetails;
+                    summary.hidden = showDetails;
+                    toggle.textContent = showDetails ? 'Скрыть подробности' : 'Показать подробности';
+                    toggle.setAttribute('aria-expanded', String(showDetails));
+                });
+            }
         });
     </script>
     {% endif %}

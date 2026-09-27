@@ -29,6 +29,11 @@ Key document entities:
 
 ## Entrypoints
 
+The completed web result has a "Скрыть подробности" toggle. Its compact view
+retains section headings and check titles with verdicts, hiding explanations
+and tables. Switching back restores the untouched full report without a request.
+This is presentation-only: checks and downloadable DOCX remain unchanged.
+
 - Web app: `web/manage.py`, `web/textprocessor/urls.py`, `web/fileprocessor/urls.py`.
 - Upload/result UI: `web/fileprocessor/views.py`, `web/fileprocessor/templates/fileprocessor/index.html`, `web/fileprocessor/templates/fileprocessor/result.html`.
 - Celery app: `celery-worker/celery_app.py`.
