@@ -96,6 +96,7 @@ def run_ktru_characteristic_checks(
     invalid_values: list[str] = []
     missing_required: list[str] = []
     duplicate_characteristics: list[str] = []
+    characteristic_name_issues: list[str] = []
     extra_characteristics: list[str] = []
     forbidden_extra: list[str] = []
     extra_reasons: list[str] = []
@@ -183,6 +184,46 @@ def run_ktru_characteristic_checks(
             legal_item = _lookup_legal_characteristic(legal_lookup, characteristic.name)
             if legal_item is None:
                 label = _char_label(item, characteristic.name, characteristic.value)
+                if characteristic.is_additional is False:
+                    similar_name = _similar_catalog_characteristic_name(
+                        characteristic.name,
+                        list(dict.fromkeys(payload[1] for payload in legal_lookup.values())),
+                    )
+                    status = "warning" if similar_name else "failed"
+                    message = (
+                        f"название не найдено в КТРУ; возможно, имелась в виду характеристика «{similar_name}»"
+                        if similar_name
+                        else "название не найдено в КТРУ и характеристика не отмечена как дополнительная"
+                    )
+                    _append_unique(characteristic_name_issues, label)
+                    characteristic_rows.append({
+                        "ktru_code": ktru_code,
+                        "item_name": item.name,
+                        "characteristic_name": characteristic.name,
+                        "ooz_value": characteristic.value,
+                        "ooz_unit": characteristic.unit,
+                        "ktru_allowed_values": [],
+                        "ktru_unit": None,
+                        "required": False,
+                        "status": status,
+                        "message": message,
+                        "similar_ktru_characteristic": similar_name,
+                    })
+                    continue
+                if characteristic.is_additional is None:
+                    characteristic_rows.append({
+                        "ktru_code": ktru_code,
+                        "item_name": item.name,
+                        "characteristic_name": characteristic.name,
+                        "ooz_value": characteristic.value,
+                        "ooz_unit": characteristic.unit,
+                        "ktru_allowed_values": [],
+                        "ktru_unit": None,
+                        "required": False,
+                        "status": "manual_review",
+                        "message": "не удалось определить, указана ли характеристика в разделе дополнительных",
+                    })
+                    continue
                 _append_unique(extra_characteristics, label)
                 additional_rows.append(
                     {
@@ -221,6 +262,7 @@ def run_ktru_characteristic_checks(
             unit_status = _unit_status(characteristic.unit, legal_unit)
             row_status = "passed"
             reasons = []
+            declared_additional = characteristic.is_additional is True
             if unresolved_values:
                 row_status = "manual_review"
                 reasons.append("значение или условие КТРУ не удалось однозначно сопоставить")
@@ -232,6 +274,10 @@ def run_ktru_characteristic_checks(
                 reasons.append("единица характеристики в ООЗ не указана")
             if bad_values or unit_status == "failed":
                 row_status = "failed"
+            if declared_additional:
+                reasons.append("в ООЗ помещена в раздел дополнительных характеристик, но найдена в карточке КТРУ")
+                if row_status == "passed":
+                    row_status = "warning"
             comparison_message = _characteristic_row_message(bad_values, characteristic.unit, legal_unit)
             if comparison_message != "ОК":
                 reasons.insert(0, comparison_message)
@@ -277,15 +323,15 @@ def run_ktru_characteristic_checks(
 
     characteristic_status = "passed"
     characteristic_message = "Характеристики ООЗ соответствуют значениям КТРУ."
-    if unavailable:
-        characteristic_status = "manual_review"
-        characteristic_message = "Часть карточек КТРУ недоступна, проверка характеристик неполная."
-    if any(row["status"] == "manual_review" for row in characteristic_rows):
-        characteristic_status = "manual_review"
-        characteristic_message = "Часть характеристик не удалось проверить полностью; см. причины по позициям."
     if any(row["status"] == "failed" for row in characteristic_rows):
         characteristic_status = "failed"
         characteristic_message = "Найдены ошибки в значениях или обязательных характеристиках КТРУ."
+    elif unavailable or any(row["status"] == "manual_review" for row in characteristic_rows):
+        characteristic_status = "manual_review"
+        characteristic_message = "Часть характеристик или карточек КТРУ не удалось проверить полностью."
+    elif any(row["status"] == "warning" for row in characteristic_rows):
+        characteristic_status = "warning"
+        characteristic_message = "Найдены названия характеристик, требующие сверки с карточкой КТРУ."
     identity_statuses = {row["status"] for row in item_identity_rows}
     if "failed" in identity_statuses:
         characteristic_status = "failed"
@@ -317,6 +363,7 @@ def run_ktru_characteristic_checks(
                 "invalid_values": invalid_values,
                 "missing_required": missing_required,
                 "duplicate_characteristics": duplicate_characteristics,
+                "characteristic_name_issues": characteristic_name_issues,
                 "unavailable_ktru": unavailable,
                 "summary_lines": [
                     f"позиций с КТРУ: {len(items)}",
@@ -325,6 +372,7 @@ def run_ktru_characteristic_checks(
                     f"ошибок значений: {len(invalid_values)}",
                     f"отсутствующих обязательных: {len(missing_required)}",
                     f"повторяющихся характеристик: {len(duplicate_characteristics)}",
+                    f"характеристик с неподтверждённым названием: {len(characteristic_name_issues)}",
                     f"недоступных карточек: {len(unavailable)}",
                     *([f"недоступные КТРУ: {', '.join(unavailable[:5])}"] if unavailable else []),
                 ],
@@ -778,6 +826,42 @@ def _similar_ooz_characteristic_name(
         if name and _name_key(name).startswith(prefix)
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _similar_catalog_characteristic_name(
+    ooz_name: str,
+    catalog_names: list[str],
+) -> str | None:
+    source = normalize_text(ooz_name).split()
+    if len(source) < 4:
+        return None
+    matches = [
+        name for name in dict.fromkeys(catalog_names)
+        if (
+            _similar_ooz_characteristic_name(name, [ooz_name]) == ooz_name
+            or (
+                len(normalize_text(name).split()) >= 4
+                and _token_edit_distance_one(source, normalize_text(name).split())
+            )
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _token_edit_distance_one(left: list[str], right: list[str]) -> bool:
+    if abs(len(left) - len(right)) > 1:
+        return False
+    previous = list(range(len(right) + 1))
+    for left_index, left_token in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_token in enumerate(right, start=1):
+            current.append(min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1] + (left_token != right_token),
+            ))
+        previous = current
+    return previous[-1] == 1
 
 
 def _plan_okpd2_for_item(

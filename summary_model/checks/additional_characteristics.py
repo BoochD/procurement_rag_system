@@ -111,10 +111,10 @@ def result_status(
             return "manual_review", "Карточки КТРУ недоступны, проверка дополнительных характеристик неполная."
         return "passed", "Дополнительные характеристики КТРУ не обнаружены."
     decisions = {assessment["decision"] for assessment in assessments}
+    if "restricted" in decisions:
+        return "failed", "В ПГ подтверждён запрет ПП №1875, но в ООЗ указаны дополнительные характеристики."
     if "missing_justification" in decisions:
         return "failed", "Для допустимых дополнительных характеристик не найдено явное обоснование в ООЗ."
-    if "restricted" in decisions:
-        return "warning", "В ПГ подтверждён специальный режим ПП №1875, запрещающий дополнительные характеристики."
     if "manual_review" in decisions or unavailable_ktru:
         return "manual_review", "Часть дополнительных характеристик требует ручной проверки."
     return "passed", "Дополнительные характеристики допустимы и имеют явное обоснование в ООЗ."

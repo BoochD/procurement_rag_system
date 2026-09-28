@@ -491,6 +491,22 @@ a compact diagnostic retained in parser warnings.
 
 ## Known Verification Gaps
 
+### OOZ KTRU characteristic sections and numeric values
+
+- In an OOZ item table, a cell whose complete label is "Дополнительные
+  характеристики" starts that item's additional-characteristics section until
+  the next item. The table parser records this in
+  `PurchaseItemCharacteristic.is_additional`; VLM must preserve the same
+  boundary when the row/column layout is visually complex.
+- A characteristic outside that marked section which is absent from the KTRU
+  card is a name error, or a warning when one unique near-match exists. A
+  characteristic inside the marked section that matches a catalogue entry is
+  a warning and its value is still checked against the catalogue. Unmatched
+  marked characteristics follow the separate PP 1875 allow/justify check.
+- Confirmed restricted extra characteristics are errors. Numeric KTRU values
+  support ratios written as `50000:1` and magnification written with `x`/`х`;
+  comma spacing is normalized only for that recognized coefficient syntax.
+
 ### September 24 pack regression boundaries
 
 - KTRU extraction accepts horizontal whitespace around separators, canonicalizes

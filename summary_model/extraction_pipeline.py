@@ -1920,6 +1920,7 @@ def _purchase_items_from_tables(tables: list[ParsedTable]) -> list[PurchaseItem]
                     name=characteristic.get("name"),
                     value=characteristic.get("value"),
                     unit=characteristic.get("unit"),
+                    is_additional=characteristic.get("is_additional"),
                     evidence=f"{table.table_id}:r{characteristic.get('row_index')}",
                 )
                 for characteristic in payload.get("characteristics", [])

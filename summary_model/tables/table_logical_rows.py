@@ -256,12 +256,17 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
     current_parent_number: str | None = None
     current_parent_key: tuple[str, str, str, str] | None = None
     parent_by_key: dict[tuple[str, str, str, str], tuple[int, str | None]] = {}
+    additional_section = False
     start = max(table.header_rows, default=-1) + 1
     for row_index in range(start, table.row_count):
         row = _row_dense(table, row_index)
         if not _raw_text(row):
             continue
         origin = _row_origin_values(table, row_index)
+        row_values = [value for value in (*origin.values(), *_cells_by_col(row).values()) if value]
+        if any(_is_additional_characteristics_marker(str(value)) for value in row_values):
+            additional_section = True
+            continue
         origin_name = _origin_value(table, row_index, name_index)
         origin_code = _origin_value(table, row_index, code_index)
         origin_quantity = _origin_value(table, row_index, quantity_index)
@@ -292,6 +297,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
         if has_item_identity and item_key:
             existing_parent = parent_by_key.get(item_key)
             if existing_parent is None:
+                additional_section = False
                 current_parent_row = row_index
                 current_parent_number = row_number
                 current_parent_key = item_key
@@ -350,6 +356,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                         "characteristic_name": characteristic_name,
                         "characteristic_value": characteristic_value,
                         "characteristic_unit": _value(row, char_unit_index),
+                        "is_additional": additional_section,
                     },
                     raw_text=_raw_text(row),
                     confidence=0.9,
@@ -365,6 +372,7 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                     cells_by_header={
                         "characteristic_name": characteristic_name,
                         "characteristic_value": characteristic_value,
+                        "is_additional": additional_section,
                     },
                     raw_text=_raw_text(row),
                     confidence=0.35,
@@ -372,6 +380,12 @@ def _ooz_rows(table: TableIR, paths: list[HeaderPath]) -> list[LogicalTableRow]:
                 )
             )
     return logical
+
+
+def _is_additional_characteristics_marker(value: str) -> bool:
+    normalized = normalize_key(value).replace("*", "").replace("_", " ")
+    normalized = " ".join(normalized.split()).strip(" :;.-")
+    return bool(re.fullmatch(r"дополнительные\s+характеристики", normalized))
 
 
 def _quantity_header_unit(paths: list[HeaderPath], quantity_index: int | None) -> str | None:

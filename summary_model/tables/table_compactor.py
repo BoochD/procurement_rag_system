@@ -148,6 +148,7 @@ def _items_json(rows: list[LogicalTableRow]) -> dict[str, Any]:
                 "name": row.cells_by_header.get("characteristic_name"),
                 "value": row.cells_by_header.get("characteristic_value"),
                 "unit": row.cells_by_header.get("characteristic_unit"),
+                "is_additional": row.cells_by_header.get("is_additional"),
                 "row_index": row.row_index,
                 "raw_text": row.raw_text,
                 "warnings": row.warnings,

@@ -138,6 +138,13 @@ Rules:
 - Preserve OKPD2 and KTRU codes exactly.
 - Preserve quantities, units, prices, dates, and stage numbers as raw text.
 - If a row continues the previous item, attach it to the previous item instead of creating a fake item.
+- OOZ tables may contain a row labelled "Дополнительные характеристики **" inside an item.
+  It may appear in any column or a merged cell. Treat it as a section boundary, not as a
+  characteristic. Mark following characteristics is_additional=true until the next item
+  starts. Characteristics before that marker are false. If the boundary or item transition
+  is visually unclear, use null and explain the uncertainty in the table warnings.
+- A characteristic's section label records how the author declared it. Do not infer this
+  label from whether its name matches KTRU; catalog matching is a separate check.
 - Return only keys declared in the supplied schema. In particular, a
   characteristic may contain only row_index, name, value, unit, is_additional,
   and source_note: never add raw_text or warnings to each characteristic.

@@ -1180,7 +1180,10 @@ def _merge_item_characteristics(
         row_index = base_characteristic["row_index"]
         existing = by_row_index.get(row_index)
         if existing is not None:
+            vlm_declared_additional = result[existing].get("is_additional") is True
             result[existing] = _fill_missing_fields(base_characteristic, result[existing])
+            if base_characteristic.get("is_additional") is not True and vlm_declared_additional:
+                result[existing]["is_additional"] = True
             continue
         unindexed_match = _find_unindexed_characteristic_match(
             base_characteristic,
@@ -1189,10 +1192,13 @@ def _merge_item_characteristics(
         )
         if unindexed_match is not None:
             unindexed.remove(unindexed_match)
+            vlm_declared_additional = result[unindexed_match].get("is_additional") is True
             result[unindexed_match] = _fill_missing_fields(
                 base_characteristic,
                 result[unindexed_match],
             )
+            if base_characteristic.get("is_additional") is not True and vlm_declared_additional:
+                result[unindexed_match]["is_additional"] = True
             by_row_index[row_index] = unindexed_match
             continue
         by_row_index[row_index] = len(result)

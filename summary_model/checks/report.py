@@ -1333,6 +1333,12 @@ def _render_ktru_characteristic_rows(result: CheckResult) -> list[str]:
                 "    Возможно, в ООЗ допущена ошибка в наименовании: "
                 f"«{_human_text(str(similar_name))}»."
             )
+        similar_catalog_name = row.get("similar_ktru_characteristic")
+        if similar_catalog_name:
+            lines.append(
+                "    Возможно, в названии характеристики ООЗ пропущено или изменено слово; "
+                f"в КТРУ указано «{_human_text(str(similar_catalog_name))}»."
+            )
     return lines
 
 
@@ -1359,7 +1365,7 @@ def _render_ktru_additional_rows(result: CheckResult) -> list[str]:
     ooz_state = details.get("ooz_justification_state") if isinstance(details.get("ooz_justification_state"), dict) else {}
     decision_labels = {
         "allowed": "ОК",
-        "restricted": "ПРЕДУПРЕЖДЕНИЕ",
+        "restricted": "ОШИБКА",
         "missing_justification": "ОШИБКА",
         "manual_review": "ТРЕБУЕТ ПРОВЕРКИ",
     }

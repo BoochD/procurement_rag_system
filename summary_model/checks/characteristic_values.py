@@ -20,6 +20,9 @@ def _constraint_text(value: str) -> str:
         text = text.replace(words, operator)
     # Only unambiguous thousands grouping; never join arbitrary numbers.
     text = re.sub(r"(?<=\d) (?=\d{3}(?:\D|$))", "", text)
+    text = re.sub(r"(?<=\d)\s*:\s*1(?!\d)", "", text)
+    text = re.sub(r",\s+(?=\d+\s*[хx×](?:\b|$))", ".", text)
+    text = re.sub(r"(?<=\d)\s*[хx×](?!\w)", "", text)
     return text
 
 
